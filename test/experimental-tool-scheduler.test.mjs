@@ -37,6 +37,7 @@ test('current base tool inventory has an explicit scheduler classification', () 
   assert.equal(classes.get('send_message'), 'ordered-action');
   assert.equal(classes.get('send_sticker'), 'ordered-action');
   assert.equal(classes.get('send_poke'), 'ordered-action');
+  assert.equal(classes.get('set_group_card'), 'ordered-action');
 
   // 多模态/带本地副作用的读取保持串行，不误当成并发纯读。
   assert.equal(classes.get('get_message_images'), 'ordered-read');

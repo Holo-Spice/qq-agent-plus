@@ -53,7 +53,8 @@ export const EXPERIMENTAL_SAME_ROUND_ACTION_TOOLS = new Set([
   'friend_request_propose',
   'remind',        // 本地持久化写入
   'group_game',    // 开局/结束：本地状态 + 对外公告
-  'send_voice'     // 对外发送
+  'send_voice',    // 对外发送
+  'set_group_card' // 对外写：改自己的群名片
 ]);
 
 export function experimentalToolSchedulerConfig(cfg = {}) {
