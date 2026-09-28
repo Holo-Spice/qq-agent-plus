@@ -93,7 +93,7 @@ export const DEFAULT_CONFIG = {
     enabled: true,
     searchUrl: 'https://cn.bing.com/search',
     maxResults: 6,
-    // 可选：'bing' | 'deepseek' | 'zhipu' | 'bocha' | 'baidu' | 'metaso' | 'doubao'
+    // 可选：'bing' | 'deepseek' | 'zhipu' | 'bocha' | 'baidu' | 'metaso' | 'doubao' | 'tavily' | 'aggregate'
     provider: 'bing',
     deepseek: {
       apiKey: '',                     // 留空时回退环境变量 DEEPSEEK_API_KEY
@@ -131,6 +131,19 @@ export const DEFAULT_CONFIG = {
       baseUrl: 'https://open.feedcoopapi.com/search_api/web_search',
       count: 6,
       timeoutMs: 20000
+    },
+    tavily: {
+      apiKey: '',                     // tavily.com 搜索 Key；留空时回退环境变量 TAVILY_API_KEY
+      baseUrl: 'https://api.tavily.com/search',
+      count: 5,
+      searchDepth: 'basic',
+      timeoutMs: 20000
+    },
+    // 聚合搜索（provider='aggregate'）：并发跑多个源，URL 去重、结果带 source 标注，
+    // 单源失败不影响整体，全部失败才报错。sources 顺序 = 结果优先级。
+    aggregate: {
+      sources: ['tavily', 'doubao', 'bing'],
+      count: 4
     },
     // 自定义搜索提供商列表（设置页可像添加模型提供商一样自行添加，可多个）。
     // 每项：{ id, name, type, baseUrl, apiKey, model, count, timeoutMs }

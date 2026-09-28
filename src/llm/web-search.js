@@ -28,6 +28,42 @@ function decodeHtml(s) {
     .trim();
 }
 
+/**
+ * 聚合搜索：并发跑多个 provider，结果按来源标注合并去重。
+ * config.webSearch.aggregate.sources = ['doubao','bing','baidu',...]（按优先级排序），
+ * 任一源失败不影响整体；全部失败才抛错。
+ * # ponytail: 简单并发+URL去重；排名融合（RRF）等结果多了再加。
+ */
+export async function aggregateSearch(query) {
+  const cfg = getConfig().webSearch?.aggregate ?? {};
+  const sources = (Array.isArray(cfg.sources) && cfg.sources.length ? cfg.sources : ['doubao', 'bing'])
+    .map(String).slice(0, 4);
+  const perSource = Math.max(2, Math.min(6, Number(cfg.count) || 4));
+  const settled = await Promise.allSettled(sources.map(async (name) => {
+    const fn = { doubao: doubaoSearch, bing: bingSearch, baidu: baiduSearch, zhipu: zhipuSearch, bocha: bochaSearch, metaso: metasoSearch, tavily: tavilySearch }[name];
+    if (!fn) throw new Error(`未知搜索源: ${name}`);
+    const r = await fn(query);
+    return { source: name, results: (r.results || []).slice(0, perSource) };
+  }));
+  const ok = settled.filter((s) => s.status === 'fulfilled').map((s) => s.value);
+  if (!ok.length) {
+    const errs = settled.map((s) => `${s.reason?.message ?? s.reason}`).join('；');
+    throw new Error(`聚合搜索全部源失败：${errs.slice(0, 300)}`);
+  }
+  // 合并去重：URL 优先级 = 源顺序（前面的源排名更高）；同一 URL 只保留第一次出现
+  const seen = new Set();
+  const results = [];
+  for (const { source, results: items } of ok) {
+    for (const item of items) {
+      const url = String(item?.url || '').replace(/[#?].*$/, '');
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      results.push({ ...item, source });
+    }
+  }
+  return { query, results, sources: ok.map((o) => o.source), failed: sources.filter((s) => !ok.some((o) => o.source === s)) };
+}
+
 /** Bing 搜索（解析 b_algo 结果块）。searchUrl 可在配置中替换（测试/换引擎）。 */
 export async function bingSearch(query) {
   const cfg = getConfig().webSearch ?? {};
@@ -71,6 +107,7 @@ export async function webSearch(query) {
   if (!clean) throw new Error('查询词为空');
   const cfg = getConfig().webSearch ?? {};
   const provider = String(cfg.provider || 'bing').toLowerCase();
+  if (provider === 'aggregate') return aggregateSearch(clean);
   if (provider === 'deepseek') return deepSeekSearch(clean);
   if (provider === 'zhipu') return zhipuSearch(clean);
   if (provider === 'bocha') return bochaSearch(clean);
@@ -460,5 +497,44 @@ async function bingSearchWithUrl(query, searchUrl) {
     if (results.length >= maxResults) break;
   }
   if (!results.length) throw new Error('自定义搜索（bing 类型）没有解析到结果，请确认该引擎返回 b_algo 结构');
+  return { query, results };
+}
+
+/**
+ * Tavily 搜索（tavily.com，专为 LLM 设计的搜索 API，免费档 1000 次/月）。
+ * POST https://api.tavily.com/search { api_key, query, max_results } 或 Bearer 头。
+ * 响应 results[]: { title, url, content, score }。
+ */
+export async function tavilySearch(query) {
+  const cfg = getConfig().webSearch?.tavily ?? {};
+  const apiKey = String(cfg.apiKey || process.env.TAVILY_API_KEY || '').trim();
+  if (!apiKey) throw new Error('Tavily 未配置 API Key（config.webSearch.tavily.apiKey 或环境变量 TAVILY_API_KEY）');
+  const res = await fetch(String(cfg.baseUrl || 'https://api.tavily.com/search'), {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      query,
+      max_results: Math.min(10, Math.max(1, Number(cfg.count) || 5)),
+      search_depth: String(cfg.searchDepth || 'basic')
+    }),
+    signal: AbortSignal.timeout(Math.max(10000, Number(cfg.timeoutMs) || 20000))
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Tavily HTTP ${res.status}：${text.slice(0, 300)}`);
+  }
+  const data = await res.json().catch(() => { throw new Error('Tavily 返回了无法解析的 JSON'); });
+  const arr = Array.isArray(data?.results) ? data.results : [];
+  const results = arr
+    .filter((r) => r?.url)
+    .map((r) => ({
+      title: String(r.title ?? '').trim() || '（无标题）',
+      url: String(r.url),
+      snippet: String(r.content ?? '').trim()
+    }));
+  if (!results.length) throw new Error('Tavily 没有返回有效结果');
   return { query, results };
 }

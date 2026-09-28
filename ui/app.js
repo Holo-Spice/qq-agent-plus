@@ -6784,6 +6784,8 @@ function renderSearchSection(c) {
         <option value="baidu" ${prov === 'baidu' ? 'selected' : ''}>百度千帆 AI Search</option>
         <option value="metaso" ${prov === 'metaso' ? 'selected' : ''}>秘塔 AI 搜索</option>
         <option value="doubao" ${prov === 'doubao' ? 'selected' : ''}>豆包搜索（火山 Agent Plan）</option>
+        <option value="tavily" ${prov === 'tavily' ? 'selected' : ''}>Tavily</option>
+        <option value="aggregate" ${prov === 'aggregate' ? 'selected' : ''}>聚合搜索（多源并发）</option>
         ${customProvs.map((p) => `<option value="custom:${esc(p.id)}" ${prov === `custom:${p.id}` ? 'selected' : ''}>${esc(p.name || p.baseUrl)}（自定义 · ${p.type === 'bing' ? '网页解析' : 'JSON 接口'}）</option>`).join('')}
       </select></div>
     <div class="field" id="custom-provider-manage" style="${prov.startsWith('custom:') ? '' : 'display:none'}">
@@ -6840,6 +6842,18 @@ function renderSearchSection(c) {
         <input type="password" id="cfg-doubao-key" value="${esc(c.webSearch?.doubao?.hasApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" style="flex:1" />
         <button class="btn btn-small" id="cfg-doubao-key-toggle" type="button">显示</button>
       </div></div>
+    <div class="field" id="tavily-search-fields" style="${prov === 'tavily' ? '' : 'display:none'}">
+      <label>Tavily API Key（免费档 1000 次/月 / 环境变量 TAVILY_API_KEY）</label>
+      <div style="display:flex;gap:8px">
+        <input type="password" id="cfg-tavily-key" value="${esc(c.webSearch?.tavily?.hasApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" style="flex:1" />
+        <button class="btn btn-small" id="cfg-tavily-key-toggle" type="button">显示</button>
+      </div></div>
+    <div class="field" id="aggregate-search-fields" style="${prov === 'aggregate' ? '' : 'display:none'}">
+      <label>聚合源列表（逗号分隔，按优先级排序；可选 tavily / doubao / bing / baidu / zhipu / bocha / metaso，选中的源需已配好 Key）</label>
+      <input type="text" id="cfg-aggregate-sources" value="${esc((c.webSearch?.aggregate?.sources || ['tavily', 'doubao', 'bing']).join(','))}" placeholder="tavily,doubao,bing" style="flex:1" />
+      <label>每源结果条数（2~6）</label>
+      <input type="number" id="cfg-aggregate-count" min="2" max="6" value="${esc(c.webSearch?.aggregate?.count || 4)}" style="width:100px" />
+    </div>
 
     <h3>添加自定义搜索服务</h3>
     <div class="field-row">
@@ -9840,7 +9854,9 @@ function bindSettingsEvents(c) {
       bocha: '#bocha-search-fields',
       baidu: '#baidu-search-fields',
       metaso: '#metaso-search-fields',
-      doubao: '#doubao-search-fields'
+      doubao: '#doubao-search-fields',
+      tavily: '#tavily-search-fields',
+      aggregate: '#aggregate-search-fields'
     };
     for (const [provider, sel] of Object.entries(fields)) {
       const el = $(sel);
@@ -10230,6 +10246,7 @@ function bindSettingsEvents(c) {
     ['cfg-baidu-key-toggle', 'cfg-baidu-key'],
     ['cfg-metaso-key-toggle', 'cfg-metaso-key'],
     ['cfg-doubao-key-toggle', 'cfg-doubao-key'],
+    ['cfg-tavily-key-toggle', 'cfg-tavily-key'],
     ['cfg-asr-key-toggle', 'cfg-asr-key'],
     ['cfg-asr-secretid-toggle', 'cfg-asr-secretid'],
     ['cfg-asr-secretkey-toggle', 'cfg-asr-secretkey']
@@ -10273,7 +10290,8 @@ function bindSettingsEvents(c) {
     'cfg-bocha-key': 'bocha',
     'cfg-baidu-key': 'baidu',
     'cfg-metaso-key': 'metaso',
-    'cfg-doubao-key': 'doubao'
+    'cfg-doubao-key': 'doubao',
+    'cfg-tavily-key': 'tavily'
   };
 
   // 前端点“显示”时向后端要真实 Key。
@@ -11782,6 +11800,7 @@ async function saveConfig({ quiet = false } = {}) {
     const enteredBaiduKey = val('#cfg-baidu-key', '').trim();
     const enteredMetasoKey = val('#cfg-metaso-key', '').trim();
     const enteredDoubaoKey = val('#cfg-doubao-key', '').trim();
+    const enteredTavilyKey = val('#cfg-tavily-key', '').trim();
     patch.webSearch = {
       ...c.webSearch,
       enabled: chk('#cfg-websearch', c.webSearch?.enabled !== false),
@@ -11812,6 +11831,14 @@ async function saveConfig({ quiet = false } = {}) {
       doubao: {
         ...(c.webSearch?.doubao || {}),
         ...(enteredDoubaoKey && enteredDoubaoKey !== '******' ? { apiKey: enteredDoubaoKey } : {})
+      },
+      tavily: {
+        ...(c.webSearch?.tavily || {}),
+        ...(enteredTavilyKey && enteredTavilyKey !== '******' ? { apiKey: enteredTavilyKey } : {})
+      },
+      aggregate: {
+        sources: val('#cfg-aggregate-sources', '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean).slice(0, 4),
+        count: Math.min(6, Math.max(2, Number(val('#cfg-aggregate-count', '')) || 4))
       },
       // 自定义搜索服务走 webSearch.providers 数组（由「添加自定义搜索服务」按钮维护），
       // 不在这里随表单提交 —— 避免每次保存都把动态列表覆盖掉。
