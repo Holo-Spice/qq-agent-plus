@@ -38,7 +38,7 @@ function writeJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.tmp`;
   try { fs.rmSync(tmp, { force: true }); } catch { /* 不存在就算了 */ }
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 1), { encoding: 'utf8', mode: 0o600 });
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 1), { encoding: 'utf8', mode: 0o600, flush: true });
   fs.renameSync(tmp, file);
   fs.chmodSync(file, 0o600);
 }

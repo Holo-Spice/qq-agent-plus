@@ -13,9 +13,13 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      # action 固定到 commit SHA：移动 tag（v5）在上游可被改写，而这个仓库的产物会被
+      # 自动更新直接下载执行（2026-09-29 审查 P2，与 release.yml 同一口径）。
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: '22'
           cache: npm

@@ -37,20 +37,37 @@ export class ReminderStore {
   }
 
   #load() {
+    let raw;
     try {
-      const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-      return Array.isArray(raw?.items) ? raw.items.filter((x) => x && x.id && x.chatKey && x.at) : [];
-    } catch {
+      raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
+    } catch (error) {
+      // 首次运行没有文件是正常的，只有"文件在但读不了"才值得报警并留档：
+      // 静默返回空数组的后果是「提示没设成」——下一次 #save 会用空列表覆盖掉
+      // 那份损坏文件，用户再也查不出提醒为什么消失（2026-09-29 审查 P2）。
+      if (error?.code !== 'ENOENT') {
+        console.error(`[reminder] 读取 ${this.file} 失败，本次按"没有提醒"处理，原文件已备份为 .broken-<时间戳>：`, error?.message ?? error);
+        try { fs.renameSync(this.file, `${this.file}.broken-${Date.now()}`); } catch { /* 备份失败就留在原处，至少不覆盖 */ }
+      }
       return [];
     }
+    return Array.isArray(raw?.items) ? raw.items.filter((x) => x && x.id && x.chatKey && x.at) : [];
   }
 
   #save() {
     try {
-      fs.mkdirSync(path.dirname(this.file), { recursive: true });
-      fs.writeFileSync(this.file, JSON.stringify({ items: this.items }, null, 2));
+      fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
+      // 与全仓其它落盘点同口径：tmp + rename 原子替换（此前这里是唯一的直接覆盖写），
+      // flush 让 rename 之前数据已经落盘，避免断电后留下"改名成功、内容为空"的文件。
+      const tmp = `${this.file}.${process.pid}.tmp`;
+      try { fs.rmSync(tmp, { force: true }); } catch { /* 不存在就算了 */ }
+      fs.writeFileSync(tmp, JSON.stringify({ items: this.items }, null, 2), { encoding: 'utf8', mode: 0o600, flush: true });
+      fs.renameSync(tmp, this.file);
       fs.chmodSync(this.file, 0o600);
-    } catch { /* 落盘失败不影响内存态 */ }
+    } catch (error) {
+      // 落盘失败不影响内存态，但必须留痕：此前静默吞掉，磁盘满时用户看到"设好了"，
+      // 重启后提醒全没了且没有任何线索（2026-09-29 审查 P2）。
+      console.error('[reminder] 落盘失败（内存态继续用，重启会丢）:', error?.message ?? error);
+    }
   }
 
   #prune() {

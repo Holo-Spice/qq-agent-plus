@@ -5,20 +5,26 @@ on:
     tags:
       - 'v*'
 
+# 默认最小权限：只有真正创建 Release 的那个 job 需要写权限。
+# 此前 contents: write 挂在工作流级，等于把"能改仓库的 token"也交给了 npm ci 的依赖
+# 生命周期脚本和所有第三方 action（它们都在同一个 job 里跑）——而这个仓库的发布物会
+# 被自动更新直接下载执行，链路杠杆很高（2026-09-29 审查 P2）。action 固定到 commit SHA
+# 同理：移动 tag（v5）可以在上游被改写。
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  verify:
     runs-on: ubuntu-latest
     steps:
       # 必须取完整历史：发布说明要按「上一个 tag..本次 tag」算提交列表，
       # 默认的 depth=1 浅克隆里没有上一个 tag，说明会变成空的。
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
 
@@ -56,6 +62,18 @@ jobs:
           node test/render-test.mjs
           node test/scroll-test.mjs
           node test/usage-e2e.mjs
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    # 写权限只给这个 job：它只做"生成说明 + 建草稿 Release"，不跑 npm ci、不跑测试。
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: 生成发布说明草稿
         run: |

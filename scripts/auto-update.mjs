@@ -474,9 +474,19 @@ async function materializeFromApi(workDir, revision) {
   const slug = repositorySlug();
   if (!slug) throw new Error('Automatic update repository is not an approved GitHub HTTPS URL');
   const url = `${codeloadBase()}/${slug.owner}/${slug.repo}/tar.gz/${revision}`;
-  // 默认基地址必须是 HTTPS；只有调用方显式把 QQ_AGENT_CODELOAD 配成 http://（测试桩、
-  // 内网镜像）才放行明文——防的是"默认 https 被代理/镜像悄悄降级"，不是禁止 http 镜像。
-  const allowInsecure = codeloadBase().startsWith('http://');
+  // 默认基地址必须是 HTTPS。把 QQ_AGENT_CODELOAD 配成 http:// 还不够，必须再显式设
+  // QQ_AGENT_CODELOAD_ALLOW_INSECURE=1 才放行明文：这个地址决定"哪份源码会被 npm ci +
+  // 测试 + deploy.sh 以服务账号跑起来"，等于允许执行任意代码，不该由一次顺手配的镜像地址
+  // 静默打开（2026-09-29 审查 P2）。测试桩/内网镜像按需显式打开。
+  const insecureBase = codeloadBase().startsWith('http://');
+  const allowInsecure = insecureBase
+    && /^(1|true|yes)$/i.test(String(process.env.QQ_AGENT_CODELOAD_ALLOW_INSECURE || ''));
+  if (insecureBase && !allowInsecure) {
+    throw Object.assign(
+      new Error('QQ_AGENT_CODELOAD must use HTTPS (set QQ_AGENT_CODELOAD_ALLOW_INSECURE=1 to allow plaintext mirrors)'),
+      { retryable: false }
+    );
+  }
   const timeout = networkSettings.fetchTimeoutSeconds * 1000;
   // retryUpdateOperation 返回 { value, attempts }，别把包装对象当数据用
   const downloaded = await retryUpdateOperation(async () => {

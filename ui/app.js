@@ -244,6 +244,22 @@ function fmtTime(ts) {
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+/**
+ * 版本标记的显示口径。提交是 40 位 sha（显示前 12 位）；用未提交的本地树部署时，
+ * data/deployed-revision 记的是 `source-<UTC 时间戳>` —— 直接截前 12 个字符会显示成
+ * `source-20260` 这种看不懂的串，用户就看不出"当前跑的不是某个提交"（2026-09-29 实测）。
+ */
+function formatRevision(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '-';
+  const exported = /^source-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(raw);
+  if (exported) {
+    const at = Date.parse(`${exported[1]}-${exported[2]}-${exported[3]}T${exported[4]}:${exported[5]}:${exported[6]}Z`);
+    return Number.isFinite(at) ? `未提交版本 · ${fmtTime(at)}` : '未提交版本';
+  }
+  return raw.slice(0, 12);
+}
+
 function fmtClock(ts) {
   const d = new Date(ts);
   const p = (n) => String(n).padStart(2, '0');
@@ -617,6 +633,18 @@ function setHtmlIfChanged(el, html) {
   return true;
 }
 
+// 把整块区域换成一句错误提示。**必须走这里**，不要直接写 innerHTML：
+// setHtmlIfChanged 靠 el.__renderedHtml 去重，出错时缓存里还留着上一次成功渲染的 HTML，
+// 而页面停在错误提示上；等下一次读取成功、HTML 又恰好与缓存相同（数据没变），
+// 就会被判定成"没变化"跳过写入 —— 页面永远停在"读取失败"，只有 F5 能救。
+// 控制页早就单独处理过这一点（见 renderControlHub 的注释），这里收口成同一个约定。
+function setBoxError(el, html) {
+  if (!el) return;
+  el.__renderedHtml = null;
+  if ('__hubBuilt' in el) el.__hubBuilt = false;
+  el.innerHTML = html;
+}
+
 // 状态条里的标签：文字会随数据变长，窄窗口下容易换行把整块内容顶下去。
 // 统一通过这个 setter 写，顺便把完整文本放进 title，截断时鼠标悬停还能看到。
 function setStatusLabel(selector, text) {
@@ -928,7 +956,7 @@ function renderControlHub(data = {}) {
     : update.enabled
       ? (updateLabels[update.status] || '等待检查')
       : '已暂停';
-  const revision = (value) => value ? String(value).slice(0, 12) : '-';
+  const revision = formatRevision;
   // 更新进度行：结构只建一次，这里的初值 + updateControlHubFields 里的实时同步
   // 一起保证"点完立即更新马上能看到阶段与耗时"。没有在跑时留空并隐藏。
   const progressLine = updateProgressText(update);
@@ -1054,7 +1082,7 @@ function updateControlHubFields(box, statuses, update) {
   const updateState = update.status === 'failed'
     ? labels.failed
     : update.enabled ? (labels[update.status] || '等待检查') : '已暂停';
-  const revision = (value) => value ? String(value).slice(0, 12) : '-';
+  const revision = formatRevision;
   const setText = (el, text) => { if (el && el.textContent !== text) el.textContent = text; };
 
   // 服务卡片状态
@@ -1153,10 +1181,8 @@ async function loadControlHub({ force = false } = {}) {
   } catch (error) {
     // 读取失败（部署重启期间很常见）会把结构换成错误提示，此时必须把 __hubBuilt 归零：
     // 否则下一次成功刷新只跑 updateControlHubFields，元素已不在 DOM，页面永远停在
-    // 这句错误提示上（按钮也失效）——进度行同样会被吞掉。
-    box.__hubBuilt = false;
-    box.__renderedHtml = null;
-    box.innerHTML = `<div class="empty-hint">服务状态读取失败：${esc(error.message)}</div>`;
+    // 这句错误提示上（按钮也失效）——进度行同样会被吞掉。setBoxError 同时清 __renderedHtml。
+    setBoxError(box, `<div class="empty-hint">服务状态读取失败：${esc(error.message)}</div>`);
   }
 }
 
@@ -1512,6 +1538,31 @@ function scheduleSessionRender() {
   }, 80);
 }
 
+// 存档页的刷新合并：chat-update 是"每条落库消息推一次"，而选中某个群时每次都会重拉
+// 该会话整段历史（limit=100000）并重建整张消息表 —— 活跃群里等于每分钟几十次全量
+// 下载 + 重绘，界面明显卡顿（2026-09-29 审查 P2）。合并到 1.5 秒一次；
+// keepView 仍然生效，所以滚出来的内容不会被刷回去。
+let chatsRefreshTimer = null;
+function scheduleChatsRefresh() {
+  if (chatsRefreshTimer) return;
+  chatsRefreshTimer = setTimeout(() => {
+    chatsRefreshTimer = null;
+    if (state.tab === 'chats') loadChats({ quiet: true });
+  }, 1500);
+}
+
+// 顶栏状态同样合并：chat-update 是每条消息一次，而 status-refresh.js 重写过的 refreshStatus
+// 在人物印象 / 异常处理页会各自整页重拉（5 个接口 / 2 个接口 + 整串模板重算）——
+// 只合并存档页的话，这两个页面的请求量一点没少（2026-09-29 审查 P2）。
+let statusRefreshTimer = null;
+function scheduleStatusRefresh() {
+  if (statusRefreshTimer) return;
+  statusRefreshTimer = setTimeout(() => {
+    statusRefreshTimer = null;
+    refreshStatus();
+  }, 1500);
+}
+
 // ── SSE ──
 function connectSSE() {
   const es = new EventSource('/api/events');
@@ -1584,8 +1635,8 @@ function connectSSE() {
     }
   });
   es.addEventListener('chat-update', () => {
-    if (state.tab === 'chats') loadChats({ quiet: true });
-    refreshStatus();
+    if (state.tab === 'chats') scheduleChatsRefresh();
+    scheduleStatusRefresh();
   });
   es.addEventListener('memory-update', (ev) => {
     let data = {};
@@ -4386,12 +4437,17 @@ function impressionMetaLabel(entry) {
 
 async function loadMemoryDetail(chatKey) {
   const detail = $('#memory-detail');
+  // 竞态守卫：快速切群、或"整理 A 群"的推送触发的刷新与用户点击切到 B 群并发时，
+  // 先发后到的响应会把右侧详情覆盖成另一个群的内容（2026-09-29 审查 P2）。
+  // 与资产页 requestId、会话详情 currentSessionId 的写法同一口径。
+  const seq = (state.memoryDetailSeq = (state.memoryDetailSeq || 0) + 1);
   detail.innerHTML = '<div class="empty-hint">加载中…</div>';
   try {
     const [mem, cfg] = await Promise.all([
       api(`/api/memory-files/${chatKey.replace(':', '_')}`),
       api('/api/config')
     ]);
+    if (seq !== state.memoryDetailSeq) return;
     const notes = cfg.memberNotes || {};
     const kind = chatKey.startsWith('group') ? 'group' : 'private';
     const chatId = chatKey.split(':')[1] || '';
@@ -4597,6 +4653,9 @@ async function loadMemoryDetail(chatKey) {
     // 若本群正在整理，启动计时刷新（切回来时也能接着走）
     if (state.consolidating[chatKey]) startConsolidateTicker();
   } catch (e) {
+    // 失败分支也要守：切群后旧请求晚失败，会把新群已经渲染好的详情换成"加载失败"
+    // （与资产页的 catch 同一口径，2026-09-29 审查）
+    if (seq !== state.memoryDetailSeq) return;
     detail.innerHTML = `<div class="empty-hint">加载失败：${esc(e.message)}</div>`;
   }
 }
@@ -4691,6 +4750,27 @@ async function loadGroupMembers(chatId, chatKey) {
   }
 }
 
+/**
+ * 群友备注（memberNotes）的唯一写入口。控制台两处会改它：会话记忆页的成员列表，
+ * 以及人物记忆页的备注行——都走这里，避免"某个入口漏了 __replace__"再次发生。
+ *
+ * __replace__ 是必须的：普通深合并只遍历传上去的键，删掉某个键再整体回传是删不掉的
+ * （服务端会把已有的备注原样并回来，于是清空/删除备注看着成功、实际没变；2026-09-29 审查 P1）。
+ * 传空串表示删除这条备注。
+ */
+async function saveMemberNote(userId, note) {
+  const key = String(userId ?? '').trim();
+  if (!/^\d{1,15}$/.test(key)) throw new Error('缺少可用的 QQ 号');
+  // state.config 还没拉到就先取一次现值打底：否则 __replace__ 会把服务端已有的备注整体清掉
+  if (!state.config) state.config = await api('/api/config');
+  const nextNotes = { ...(state.config?.memberNotes || {}) };
+  const text = String(note ?? '').trim();
+  if (text) nextNotes[key] = text; else delete nextNotes[key];
+  const data = await api('/api/config', { method: 'POST', body: JSON.stringify({ memberNotes: { __replace__: nextNotes } }) });
+  if (data?.config) state.config = data.config;
+  return data;
+}
+
 async function openMemberNoteModal(qq, chatKey) {
   const cfg = state.config || await api('/api/config');
   const notes = cfg.memberNotes || {};
@@ -4701,7 +4781,7 @@ async function openMemberNoteModal(qq, chatKey) {
     head: `编辑备注：${oldNote || displayName || qq}`,
     body: `
       <div class="field"><label>QQ 号</label><input type="text" value="${esc(qq)}" readonly style="width:100%" /></div>
-      <div class="field"><label>备注名</label><input type="text" id="mn-note" value="${esc(oldNote)}" placeholder="${esc(displayName || '备注名（如 老王）')}" style="width:100%" /></div>
+      <div class="field"><label>备注名</label><input type="text" id="mn-note" maxlength="200" value="${esc(oldNote)}" placeholder="${esc(displayName || '备注名（如 老王）')}" style="width:100%" /></div>
       <div class="hint">保存后，聊天记录、记忆、群成员列表都会优先显示这个备注；留空则显示原群名片/昵称。</div>`,
     foot: `<button class="btn" id="mn-cancel">取消</button>
            ${oldNote ? '<button class="btn btn-danger" id="mn-delete">删除备注</button>' : ''}
@@ -4710,11 +4790,8 @@ async function openMemberNoteModal(qq, chatKey) {
   overlay.querySelector('#mn-cancel').addEventListener('click', () => closeModelModal(overlay));
   overlay.querySelector('#mn-save').addEventListener('click', async () => {
     const name = $('#mn-note')?.value.trim() || '';
-    const nextNotes = { ...(state.config?.memberNotes || {}) };
-    if (name) nextNotes[String(qq)] = name; else delete nextNotes[String(qq)];
     try {
-      const data = await api('/api/config', { method: 'POST', body: JSON.stringify({ memberNotes: nextNotes }) });
-      state.config = data.config;
+      await saveMemberNote(qq, name);
       closeModelModal(overlay);
       await loadGroupMembers(chatKey.split(':')[1] || '', chatKey);
     } catch (e) {
@@ -4723,11 +4800,8 @@ async function openMemberNoteModal(qq, chatKey) {
   });
   const delBtn = overlay.querySelector('#mn-delete');
   if (delBtn) delBtn.addEventListener('click', async () => {
-    const nextNotes = { ...(state.config?.memberNotes || {}) };
-    delete nextNotes[String(qq)];
     try {
-      const data = await api('/api/config', { method: 'POST', body: JSON.stringify({ memberNotes: nextNotes }) });
-      state.config = data.config;
+      await saveMemberNote(qq, '');
       closeModelModal(overlay);
       await loadGroupMembers(chatKey.split(':')[1] || '', chatKey);
     } catch (e) {
@@ -6433,6 +6507,36 @@ function bindCrossSectionControls() {
       refreshBtn.addEventListener('click', loadRemindersView);
     }
   }
+  // 群游戏「正在进行的局」：进这一页拉一次，刷新与结束按钮都在这里绑
+  if ($('#gg-running')) {
+    loadGroupGameView();
+    const ggRefresh = $('#gg-refresh-btn');
+    if (ggRefresh && !ggRefresh.dataset.bound) {
+      ggRefresh.dataset.bound = '1';
+      ggRefresh.addEventListener('click', loadGroupGameView);
+    }
+    const ggBox = $('#gg-running');
+    if (ggBox && !ggBox.dataset.bound) {
+      ggBox.dataset.bound = '1';
+      ggBox.addEventListener('click', async (e) => {
+        const btn = e.target?.closest?.('.gg-stop-btn');
+        if (!btn) return;
+        const row = btn.closest('.gg-row');
+        if (!row) return;
+        if (!window.confirm('结束这一局？会往群里发一句"游戏到此为止"（身份与进行中的行动一并作废）。')) return;
+        btn.disabled = true;
+        btn.textContent = '结束中…';
+        try {
+          await api('/api/group-game/stop', { method: 'POST', body: JSON.stringify({ chatKey: row.dataset.chatkey }) });
+          await loadGroupGameView();
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = '重试';
+          ggBox.title = String(err?.message || err).slice(0, 120);
+        }
+      });
+    }
+  }
 }
 
 function renderSettingsSection(c) {
@@ -7102,6 +7206,12 @@ function renderExperimentalSettingsSection(c) {
         <b>② 打开上面的「游戏期间私聊豁免」</b>——只在本局进行中、只发给报名参加的那几个人、只发引擎文本，
         模型自己发消息仍受白名单限制（管理员屏蔽的人永远发不进）。谁是卧底只有发词一条私聊；狼人杀整局都要私聊，
         没有 ① 或 ② 就只有白名单里的人能收到。</div>
+      <h3 style="margin-top:18px">正在进行的局</h3>
+      <div id="gg-running"><span class="muted">正在读取…</span></div>
+      <div class="settings-actions">
+        <button class="btn btn-small" id="gg-refresh-btn" type="button">刷新</button>
+        <span class="muted">局跑歪了可以就地结束（等效于让机器人执行「结束游戏」；结束时会在群里发一句说明）</span>
+      </div>
       <div class="hint" id="experiment-launch-result"></div>
     </section>`;
 }
@@ -7672,7 +7782,7 @@ async function loadIdentityFeaturePage() {
     syncGraduatedFeatureNavigation(cfg);
     renderIdentityFeaturePage(status, identities, memories);
   } catch (error) {
-    box.innerHTML = `<div class="empty-hint">人物统一印象读取失败：${esc(error.message)}</div>`;
+    setBoxError(box, `<div class="empty-hint">人物统一印象读取失败：${esc(error.message)}</div>`);
   }
 }
 
@@ -7845,7 +7955,7 @@ async function loadFriendFeaturePage() {
       loadFriendOpportunities(status)
     ]);
   } catch (error) {
-    box.innerHTML = `<div class="empty-hint">好友管理读取失败：${esc(error.message)}</div>`;
+    setBoxError(box, `<div class="empty-hint">好友管理读取失败：${esc(error.message)}</div>`);
   }
 }
 
@@ -7951,7 +8061,7 @@ async function loadSlangFeaturePage() {
     syncGraduatedFeatureNavigation(cfg);
     renderSlangFeaturePage(cfg, status);
   } catch (error) {
-    box.innerHTML = `<div class="empty-hint">黑话研究读取失败：${esc(error.message)}</div>`;
+    setBoxError(box, `<div class="empty-hint">黑话研究读取失败：${esc(error.message)}</div>`);
   }
 }
 
@@ -8113,7 +8223,7 @@ async function loadIncidentFeaturePage() {
     syncGraduatedFeatureNavigation(cfg);
     renderIncidentFeaturePage(cfg, data.status || {}, data.incidents || []);
   } catch (error) {
-    box.innerHTML = `<div class="empty-hint">异常日志读取失败：${esc(error.message)}</div>`;
+    setBoxError(box, `<div class="empty-hint">异常日志读取失败：${esc(error.message)}</div>`);
   }
 }
 
@@ -8411,6 +8521,37 @@ async function loadRemindersView() {
   }).join('');
   pendBox.innerHTML = (r?.pending || []).length ? rows(r.pending, false) : '<span class="muted">没有待触发的提醒（群友说"X 点提醒我 Y"就会出现在这里）</span>';
   if (recBox) recBox.innerHTML = (r?.recent || []).length ? rows(r.recent, true) : '<span class="muted">暂无完成记录</span>';
+}
+
+/** 群游戏「正在进行的局」：列表 + 就地结束（管理员收场用）。 */
+async function loadGroupGameView() {
+  const box = $('#gg-running');
+  if (!box) return;   // 不在这一页（其他页面的渲染也会走到这里）
+  let r = null;
+  try { r = await api('/api/group-game/status'); } catch (e) {
+    box.innerHTML = `<span class="muted">读取失败：${esc(e?.message || e)}</span>`;
+    return;
+  }
+  if (!r?.enabled) {
+    box.innerHTML = '<span class="muted">群游戏当前是关闭的（上面的开关打开后这里才会显示局面）</span>';
+    return;
+  }
+  const list = Array.isArray(r.running) ? r.running : [];
+  if (!list.length) {
+    box.innerHTML = '<span class="muted">当前没有进行中的局</span>';
+    return;
+  }
+  box.innerHTML = list.map((g) => {
+    const mins = Math.max(0, Math.round((Date.now() - Number(g.startedAt || 0)) / 60000));
+    const summary = String(g.summary || '').replace(/^【[^】]*】/, '').trim();
+    return `<div class="gg-row" data-chatkey="${esc(g.chatKey)}">`
+      + `<span class="gg-chat">${esc(formatChatTitle(g.chatKey, chatNameOf(g.chatKey)))}</span>`
+      + `<span class="gg-name">${esc(g.name || g.game || '')}</span>`
+      + `<span class="gg-summary">${esc(summary)}</span>`
+      + `<span class="gg-age">已跑 ${mins} 分钟</span>`
+      + '<button type="button" class="btn btn-small gg-stop-btn">结束</button>'
+      + '</div>';
+  }).join('');
 }
 
 function renderMomentWindowRow(window) {
@@ -11988,17 +12129,21 @@ function openModelDeleteModal() {
 // ── 白名单可视化选择器 ──
 async function openWhitelistPicker(kind) {
   const isGroups = kind === 'groups';
-  $('#pick-result').textContent = '拉取中…';
+  // 打开前的文案先快照：取消失败/取消关闭时要还原回去。
+  // 以前"取消"只做了 overlay.remove()，标签就一直停在"拉取中…"（2026-09-29 用户实测）
+  const resultEl = $('#pick-result');
+  const prevLabel = resultEl ? resultEl.textContent : '';
+  if (resultEl) resultEl.textContent = '拉取中…';
   let list;
   try {
     const data = await api(`/api/onebot/${kind}`);
     list = isGroups ? data.groups : data.friends;
   } catch (e) {
-    $('#pick-result').textContent = `拉取失败：${e.message}（OneBot 未连接？）`;
+    if (resultEl) resultEl.textContent = `拉取失败：${e.message}（OneBot 未连接？）`;
     return;
   }
   if (!list?.length) {
-    $('#pick-result').textContent = isGroups ? '没拉到群列表（检查 SnowLuma）' : '没拉到好友列表';
+    if (resultEl) resultEl.textContent = isGroups ? '没拉到群列表（检查 SnowLuma）' : '没拉到好友列表';
     return;
   }
   const inputEl = $(isGroups ? '#cfg-allowgroups' : '#cfg-allowprivate');
@@ -12022,11 +12167,19 @@ async function openWhitelistPicker(kind) {
       </div>
     </div>`;
   document.body.appendChild(overlay);
-  $('#pick-cancel', overlay).addEventListener('click', () => overlay.remove());
+  // 关闭（「取消」或点弹窗外的空白）：还原到打开前的文案，别把"拉取中…"留在页面上
+  const closePicker = () => {
+    overlay.remove();
+    if (resultEl) resultEl.textContent = prevLabel;
+  };
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closePicker();
+  });
+  $('#pick-cancel', overlay).addEventListener('click', closePicker);
   $('#pick-apply', overlay).addEventListener('click', () => {
     const picked = $$('input[type=checkbox]:checked', overlay).map((el) => el.value);
     inputEl.value = picked.join(',');
-    $('#pick-result').textContent = `已选 ${picked.length} 个${isGroups ? '群' : '好友'}，记得点"保存设置"`;
+    if (resultEl) resultEl.textContent = `已选 ${picked.length} 个${isGroups ? '群' : '好友'}，记得点"保存设置"`;
     overlay.remove();
   });
 }

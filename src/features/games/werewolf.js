@@ -265,6 +265,29 @@ function quitPlayer(state, me, now = 0, rng = Math.random) {
     const out = resolveNight(s, rng, now);
     return { state: out.state, effects: [...effects, ...out.effects] };
   }
+  // 退出的正好是本阶段唯一欠动作/欠票的那个人：白天全员发完言就直接进投票，投票全员投完就结算。
+  // 不补这两条会一直干等到窗口超时（白天 120 秒 / 投票 90 秒），群里看着像卡住
+  // （卧底插件对同一场景有等价重算；2026-09-29 审查 P2）。
+  if (s.phase === 'day') {
+    const alive = aliveList(s);
+    const allVoted = alive.every((r) => s.votes[r.userId]);
+    const majorityReady = alive.length > 0 && (s.readyVote || []).length * 2 > alive.length;
+    if (allVoted) {
+      const out = tally(s, now);
+      return { state: out.state, effects: [...effects, ...out.effects] };
+    }
+    if (alive.length > 0 && ((s.spoken || []).length >= alive.length || majorityReady)) {
+      s.phase = 'vote';
+      s.phaseStartedAt = now;
+      effects.push({ type: 'public', text: `剩下的人都聊过了，开始投票：发「投 3」或「投 @他」都行（存活的 ${alive.length} 人各一票）。` });
+    }
+  } else if (s.phase === 'vote') {
+    const aliveIds = aliveList(s).map((r) => r.userId);
+    if (aliveIds.length && aliveIds.every((x) => s.votes[x])) {
+      const out = tally(s, now);
+      return { state: out.state, effects: [...effects, ...out.effects] };
+    }
+  }
   return { state: s, effects };
 }
 
@@ -340,6 +363,7 @@ function resolveNight(state, rng = Math.random, now = 0) {
   s.cursor = 0;
   s.order = aliveList(s).map((r) => r.userId);   // 只用于"第几号人"的展示
   s.spoken = [];                                  // 本白天说过话的人（谁想说就说）
+  s.dayWarned = false;                            // 新的一天：倒计时提醒可以再发一次
   s.votes = {};
   // 计时起点必须在天亮这一刻就设：置 0 会让 onTick 里 `Number(0) || now` 恒等于 now，
   // 白天第一个发言者 AFK 时 90 秒超时永不生效（与卧底第 2 轮同款坑，2026-09-29）
@@ -666,6 +690,19 @@ export function onTick(state, { now = 0, deadline = 0, rng = Math.random } = {})
   const windowSec = state.phase === 'day'
     ? (Number(state.discussSeconds) || DAY_DISCUSS_SECONDS)
     : (Number(state.roundSeconds) || meta.roundSeconds || 90);
+  // 白天讨论快到时提前喊一嗓子：真人群里经常"谁也不想先开口"干等到点，
+  // 这句不花钱（引擎自己发）、每天只发一次，discussSeconds 太短（<60 秒）就不插嘴
+  if (state.phase === 'day' && !state.dayWarned && windowSec >= 60) {
+    const leftMs = windowSec * 1000 - (now - started);
+    if (leftMs > 0 && leftMs <= 30 * 1000) {
+      const s = JSON.parse(JSON.stringify(state));
+      s.dayWarned = true;
+      return {
+        state: s,
+        effects: [{ type: 'public', text: '⏳ 还有约 30 秒开始投票（想说什么抓紧，也可以直接发「投 3」带票）。' }]
+      };
+    }
+  }
   if (now - started < windowSec * 1000) return { state, effects: [] };
 
   if (state.phase === 'night') {

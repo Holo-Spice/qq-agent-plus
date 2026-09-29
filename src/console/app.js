@@ -2607,6 +2607,16 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         return json(res, 200, groupGame.status());
       }
 
+      if (pathname === '/api/group-game/stop' && method === 'POST') {
+        // 管理员在控制台结束某一局（局跑歪/要收场时用）：与模型调 group_game stop 走同一入口
+        const body = await readBody(req);
+        const chatKey = String(body?.chatKey || '').trim();
+        if (!/^group:[^:\s]+$/.test(chatKey)) return json(res, 400, { ok: false, error: 'chatKey 要写成 group:<群号>' });
+        const out = await groupGame.stop(chatKey, '管理员在控制台结束');
+        if (!out?.ok) return json(res, 404, { ok: false, error: out?.error || '这个群没有进行中的游戏' });
+        return json(res, 200, { ok: true });
+      }
+
       if (pathname === '/api/group-digest/status' && method === 'GET') {
         return json(res, 200, groupDigest.status());
       }

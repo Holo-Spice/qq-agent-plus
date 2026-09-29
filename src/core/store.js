@@ -170,7 +170,15 @@ export class ChatStore {
     for (const name of fs.readdirSync(dir).filter((s) => /^(group|private)_\d+\.json$/.test(s))) {
       if (this.db.prepare('SELECT 1 FROM migrations WHERE name=?').get(name)) continue;
       // Fail closed on corrupt legacy files; never replace them with an empty database.
-      const state = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8').replace(/^\uFEFF/, ''));
+      // 解析失败必须带上文件名：这条错误会让构造失败 → createApp 抛 → 进程退出，
+      // 而 systemd 只会反复重启；不带文件名的话线上根本看不出是哪个归档坏了
+      // （2026-09-29 审查 P2）。修法：把那份 json 改名/移走后重启即可跳过该文件。
+      let state;
+      try {
+        state = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8').replace(/^\uFEFF/, ''));
+      } catch (error) {
+        throw new Error(`Invalid legacy message archive: ${name} (${error?.message ?? error})`);
+      }
       const key = state.chatKey || name.replace(/^(group|private)_/, '$1:').replace(/\.json$/, '');
       if (!Array.isArray(state.messages)) throw new Error(`Invalid legacy message archive: ${name}`);
       this.#transaction(() => {
@@ -319,9 +327,16 @@ export class ChatStore {
     return messages;
   }
 
+  // 该会话是否已有未回收的运行租约（leased）。claimUnread 会因此返回 null，
+  // 调用方（尤其是"到点派发提醒"这类会标记已完成的路径）需要在派发前先查这个，
+  // 否则会在静默空转之后照样把提醒标成已触发（2026-09-29 审查 P1）。
+  hasLeasedRun(chatKey) {
+    return Boolean(this.db.prepare("SELECT 1 FROM runs WHERE chat_key=? AND state='leased'").get(chatKey));
+  }
+
   claimUnread(chatKey, { limit = 100, maxChars = 32000, leaseMs = 240000 } = {}) {
     return this.#transaction(() => {
-      if (this.db.prepare("SELECT 1 FROM runs WHERE chat_key=? AND state='leased'").get(chatKey)) return null;
+      if (this.hasLeasedRun(chatKey)) return null;
       const pending = this.peekUnread(chatKey, Math.min(100, Math.max(1, limit)));
       const messages = [];
       let chars = 0;

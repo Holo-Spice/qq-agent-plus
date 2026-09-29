@@ -108,6 +108,8 @@ timer 每小时唤醒一次，应用配置中的 `intervalHours` 决定是否已
 7. `QQ_AGENT_CODELOAD` 可覆盖 codeload 基地址，供测试桩或自建镜像使用，普通部署无需设置。
    该变量与 `QQ_AGENT_GITHUB_API` 的信任级别不同：后者仅修改只读查询地址，
    前者修改的是**会由 `deploy.sh` 执行的源码来源**。该变量不得接入配置或控制台。
+   覆盖成 `http://` 时还必须显式再设 `QQ_AGENT_CODELOAD_ALLOW_INSECURE=1` 才会放行明文——
+   等于书面确认"允许从该地址执行代码"，默认拒绝。
 8. 本次实际使用的通道记录在 `data/auto-update.json` 的 `transport` 与
    `connectivity.transport`（`git` / `api`）中，控制页的连通性一行同样显示通道名。
 

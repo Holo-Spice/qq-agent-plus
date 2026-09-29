@@ -132,7 +132,7 @@ function nextRound(state, effects, now = 0) {
   return {
     // phaseStartedAt 必须在轮次切换时就起算：置 0 的话 onTick 里 `Number(0) || now` 恒等于
     // now，超时永远不生效，整局会卡到全局时长上限（2026-09-29 审查 P1，第 2 轮起必现）
-    state: { ...state, phase: 'speak', round, order, cursor: 0, spoken: [], readyVote: [], votes: {}, selfVoteWarned: [], phaseStartedAt: now || 0 },
+    state: { ...state, phase: 'speak', round, order, cursor: 0, spoken: [], readyVote: [], votes: {}, selfVoteWarned: [], dayWarned: false, phaseStartedAt: now || 0 },
     effects: [...effects, { type: 'public', text: `第 ${round} 轮开始：想描述的就说（不用等点名，每人一句），也可以直接发「投 3」带票；`
       + `${Number(state.discussSeconds) || DAY_DISCUSS_SECONDS} 秒后自动进投票，过半人说「投吧」也会立刻进。` }]
   };
@@ -179,12 +179,21 @@ function quitPlayer(state, me, now = 0) {
   // 退出后阶段要重算：剩下的人要是都说过了就直接进投票。
   // （旧判据写的是 cursor >= order.length，而 cursor 从不自增、永远不成立——死分支；2026-09-29 审查 P2）
   const leftAlive = s.roles.filter((r) => !s.eliminated.includes(r.userId));
+  // "剩下的人是不是都投过票了"用活人逐个判，而不是数 votes 的条数：
+  // 退出者本人的票、以及投给退出者的票都要作废，数条数会把这两种情况算错
+  // （与 onMessage 里那条"全员投完立刻结算"的捷径同口径；2026-09-29 审查 P2）
+  const leftAllVoted = leftAlive.length > 0 && leftAlive.every((r) => s.votes?.[r.userId]);
   if (s.phase === 'speak' && leftAlive.length > 0 && leftAlive.every((r) => (s.spoken || []).includes(r.userId))) {
+    // 剩下的人都发过言、也都投过票（边说边投）→ 立刻结算，不用再等一个投票窗口
+    if (leftAllVoted) {
+      const out = tally(s, now);
+      return { state: out.state, effects: [...effects, ...out.effects] };
+    }
     s.phase = 'vote';
     s.votes = s.votes && typeof s.votes === 'object' ? s.votes : {};   // 早票要留着
     s.phaseStartedAt = now;
     effects.push({ type: 'public', text: `第 ${s.round} 轮发言结束，开始投票：发「投 3」或「投 @他」都行。` });
-  } else if (s.phase === 'vote' && Object.keys(s.votes).length >= s.roles.filter((r) => !s.eliminated.includes(r.userId)).length) {
+  } else if (s.phase === 'vote' && leftAllVoted) {
     const out = tally(s, now);
     return { state: out.state, effects: [...effects, ...out.effects] };
   }
@@ -268,6 +277,18 @@ export function onTick(state, { now = 0 } = {}) {
   const windowSec = state.phase === 'speak'
     ? (Number(state.discussSeconds) || DAY_DISCUSS_SECONDS)
     : (Number(state.roundSeconds) || meta.roundSeconds || 150);
+  // 描述阶段快到时喊一句（与狼人杀同口径：引擎自己发、每轮一次、<60 秒不插嘴）
+  if (state.phase === 'speak' && !state.dayWarned && windowSec >= 60) {
+    const leftMs = windowSec * 1000 - (now - started);
+    if (leftMs > 0 && leftMs <= 30 * 1000) {
+      const s = JSON.parse(JSON.stringify(state));
+      s.dayWarned = true;
+      return {
+        state: s,
+        effects: [{ type: 'public', text: '⏳ 还有约 30 秒进入投票（想描述的抓紧，也可以直接发「投 3」带票）。' }]
+      };
+    }
+  }
   if (now - started < windowSec * 1000) return { state, effects: [] };
   const s = JSON.parse(JSON.stringify(state));
   s.phaseStartedAt = now;

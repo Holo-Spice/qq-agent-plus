@@ -16,6 +16,7 @@ const {
 const { ChatStore } = await import('../src/core/store.js');
 const { SessionRegistry } = await import('../src/core/sessions.js');
 const { setRuntimeConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+const { ReminderStore } = await import('../src/core/reminders.js');
 
 describe('Orchestrator', () => {
   it('draws the debounce delay inside the configured range', () => {
@@ -62,7 +63,7 @@ describe('Orchestrator', () => {
     assert.ok(result.estimatedPromptTokens < 10000);
   });
 
-  function fixture(t) {
+  function fixture(t, extra = {}) {
     const cfg = structuredClone(DEFAULT_CONFIG);
     cfg.runtime.mode = 'active';
     cfg.allow.groups = ['1'];
@@ -112,7 +113,8 @@ describe('Orchestrator', () => {
         selfId: '888',
         selfNickname: 'bot',
         getGroupInfo: async () => ({ group_name: 'test' })
-      }
+      },
+      ...extra
     });
     const original = globalThis.fetch;
     t.after(async () => { await runner.abortAll(); store.close(); globalThis.fetch = original; });
@@ -1409,6 +1411,85 @@ it('换卡后 24 小时内，历史与交接口径会说明"旧口癖不作数"'
   const old = await run();
   assert.equal(old.includes('【角色设定】刚换过'), false);
 });
+
+  // ── 定时提醒的派发闸门（2026-09-29 审查 P1：标成"已触发"却从没派发过）──
+
+  it('定时提醒：会话还留着未回收租约时本轮不派发，也不标记已触发', async (t) => {
+    // 每个用例一份独立的提醒文件：默认文件是 DATA_DIR/reminders.json，同文件共用会让
+    // 用例之间通过磁盘互相影响（一条用例把提醒标成 fired，另一条的断言就跟着变）
+    const { runner, store, append } = fixture(t, { reminders: new ReminderStore(path.join(root, 'reminders-lease.json')) });
+    append(1);
+    // 模拟硬崩溃留下的 leased 残行：claimUnread 会因此返回 null，而 #wake 在那条路径上是静默 return
+    assert.ok(store.claimUnread('group:1'), '先占一个租约');
+    assert.equal(store.hasLeasedRun('group:1'), true);
+    runner.reminders.items.push({
+      id: 'r-lease', chatKey: 'group:1', at: Date.now() - 1000, text: '喝水', status: 'pending', createdBy: '42'
+    });
+    let woke = 0;
+    runner.wake = async () => { woke++; };
+
+    runner.fireDueReminders();
+
+    assert.equal(woke, 0, '接不了就不该唤醒');
+    assert.equal(runner.reminders.items[0].status, 'pending', '租约还在时不能标记已触发（否则提醒永久丢失）');
+  });
+
+  it('定时提醒：一次只派发装得进提示词的条数，装不下的留到下一轮（标记与内容一致）', async (t) => {
+    const { runner, append } = fixture(t, { reminders: new ReminderStore(path.join(root, 'reminders-merge.json')) });
+    append(1);
+    const long = 'A'.repeat(200);
+    // 单条正文上限 200 字，note 正文上限 400 字 → 第一条就吃掉全部预算，其余必须留到下一轮
+    for (const [i, id] of ['r1', 'r2', 'r3', 'r4'].entries()) {
+      runner.reminders.items.push({
+        id, chatKey: 'group:1', at: Date.now() - 1000 - i, text: `${long}${i}`, status: 'pending', createdBy: '42'
+      });
+    }
+    const notes = [];
+    runner.wake = async (_chatKey, opts = {}) => { notes.push(String(opts.wakeNote || '')); };
+
+    runner.fireDueReminders();
+
+    const byStatus = (s) => runner.reminders.items.filter((x) => x.status === s).map((x) => x.id);
+    assert.equal(notes.length, 1, '一轮只唤醒一次');
+    assert.deepEqual(byStatus('fired'), ['r1'], '只标记真正写进 note 的那些');
+    assert.deepEqual(byStatus('pending'), ['r2', 'r3', 'r4'], '装不下的留在 pending，下一轮继续派');
+    // 核心不变量：标记 fired 的每一条，内容都真的在 note 里（此前是多条被截掉却照样标记 fired）
+    for (const id of byStatus('fired')) {
+      const text = runner.reminders.items.find((x) => x.id === id).text;
+      assert.ok(notes[0].includes(text), `${id} 的内容必须在 note 里`);
+    }
+    for (const id of byStatus('pending')) {
+      const text = runner.reminders.items.find((x) => x.id === id).text;
+      assert.equal(notes[0].includes(text), false, `${id} 还没派发，内容不该出现在 note 里`);
+    }
+
+    // 短提醒能吃满预算：一次全部派发（不能因为"多条"就只发一条）
+    for (const item of runner.reminders.items) { item.status = 'pending'; item.at = Date.now() - 1000; }
+    runner.reminders.items[0].text = '喝水'; runner.reminders.items[1].text = '吃药';
+    runner.reminders.items[2].text = '开会'; runner.reminders.items[3].text = '睡觉';
+    notes.length = 0;
+    runner.fireDueReminders();
+    assert.equal(notes.length, 1);
+    assert.deepEqual(byStatus('pending'), [], '四条短提醒应当一轮派完');
+    for (const text of ['喝水', '吃药', '开会', '睡觉']) assert.ok(notes[0].includes(text), `${text} 应在同一条 note 里`);
+  });
+
+  it('自安排唤醒：会话接不了这次唤醒时顺延，而不是删掉安排后静默丢弃', async (t) => {
+    const { runner, cfg } = fixture(t);
+    // 没配模型时 #wake 会静默 return（模型未设置 → 不产生报错会话），安排不能被吃掉
+    setRuntimeConfig({ ...cfg, api: { ...cfg.api, model: '' } });
+    runner.scheduledWakes.set('group:1', {
+      at: Date.now() - 1000, note: '我过会儿回来看', paced: false, kind: 'selfWake', timer: null
+    });
+
+    runner.fireDueScheduledWakes();
+
+    const kept = runner.scheduledWakes.get('group:1');
+    assert.ok(kept, '接不了时必须顺延重排，不能把安排删掉');
+    assert.equal(kept.note, '我过会儿回来看', '模型留的话不能丢');
+    assert.ok(kept.at > Date.now(), '重排到将来');
+    setRuntimeConfig(cfg);
+  });
 });
 
 process.on('exit', () => fs.rmSync(root, { recursive: true, force: true }));

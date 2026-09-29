@@ -98,6 +98,27 @@ test('send tools accept a verified current group member', async () => {
   assert.equal(f.sends[1][0], 'poke');
 });
 
+test('atUserId 带 # 前缀时先归一化再发送（模型常把聊天记录里的 #123 连 # 一起传）', async () => {
+  // 校验那一侧一直用 normalizeMid 放行 '#42'，但发送用的是原值，而 onebot 只接受纯数字 →
+  // 整条消息发不出去（2026-09-29 审查 P1）。这条钉住"放行的形态 = 发送的形态"。
+  const f = context();
+  const result = await tool('send_message').execute(f.ctx, { messages: 'hello', atUserId: '#42' });
+  assert.equal(result.isError, undefined);
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.sends[0][3].atUserId, '42', 'atUserId 必须是纯数字，否则协议端会拒绝');
+
+  const sticker = context({
+    stickers: {
+      // 托管内联（有 localFile + base64 url）→ 跳过 validateImageUrl，专注测 atUserId 的传递
+      findForSend: async () => ({ id: 's1', name: '表情', desc: '', localFile: 'sticker-assets/s1.png', url: 'base64://AAAA' }),
+      markUsed: () => {}
+    }
+  });
+  const sent = await tool('send_sticker').execute(sticker.ctx, { stickerId: 's1', atUserId: '#42' });
+  assert.equal(sent.isError, undefined);
+  assert.equal(sticker.sends[0][3].atUserId, '42');
+});
+
 test('get_message_images refreshes an expired stored URL from the source message', async () => {
   const png = Buffer.from('89504e470d0a1a0a00000000', 'hex').toString('base64');
   const updates = [];

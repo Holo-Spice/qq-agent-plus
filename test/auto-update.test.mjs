@@ -343,3 +343,19 @@ test('失败通知发送前先落"结果未知"：发送途中崩溃重启不会
   assert.equal(state.notification.pending, false, '结果未知的失败不保留 pending（否则 30 秒定时器会重发）');
   assert.equal(Boolean(state.notification.deliveryUnknown), true);
 });
+
+test('currentRevision 以 deployed-revision 为准：状态文件里的旧值不能盖过它', (t) => {
+  // 背景（2026-09-29 实测）：线上用未提交的本地树部署（deployed-revision = source-…）时，
+  // 控制台"当前版本"却显示成状态文件里记的 4 天前提交 —— 因为 status() 优先用了 state.currentRevision。
+  const f = fixture(t);
+  writeAutoUpdateState(f.dataDir, {
+    status: 'no-update', phase: 'complete', currentRevision: 'c'.repeat(40), lastCheckAt: Date.now()
+  });
+  assert.equal(f.manager.status().currentRevision, 'c'.repeat(40), '没有部署记录时回落到状态里的值');
+
+  fs.writeFileSync(path.join(f.dataDir, 'deployed-revision'), 'source-20260929T111923Z\n');
+  assert.equal(f.manager.status().currentRevision, 'source-20260929T111923Z', '有部署记录时必须显示实际部署的那个');
+
+  fs.writeFileSync(path.join(f.dataDir, 'deployed-revision'), `${'d'.repeat(40)}\n`);
+  assert.equal(f.manager.status().currentRevision, 'd'.repeat(40), '提交部署时显示提交号');
+});

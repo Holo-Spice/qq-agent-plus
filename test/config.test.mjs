@@ -260,3 +260,49 @@ test('保存白名单不会清掉屏蔽名单（界面没有 deny 控件，靠�
   assert.deepEqual(afterAllowSave.deny, { groups: ['999'], private: ['888'] }, '保存白名单不能清掉 deny');
   assert.deepEqual(afterAllowSave.allow.groups, ['123']);
 });
+
+test('群成员备注：__replace__ 才是"能删键"的写法，且写入时夹住长度与条目数', async () => {
+  // 背景（2026-09-29 审查 P1）：控制台清空备注/删除备注是"从对象里删掉这个键再整体回传"，
+  // 而 deepMerge 只遍历传上去的键 —— 缺的键会被服务端原样保留，于是"删除备注"看着成功、
+  // 实际没变。这里钉住服务端语义 + UI 现在采用的 __replace__ 写法。
+  const { updateConfig, getConfig } = await import('../src/core/config.js');
+
+  updateConfig({ memberNotes: { __replace__: { '42': '老张', '43': '小李' } } });
+  assert.deepEqual(getConfig().memberNotes, { '42': '老张', '43': '小李' });
+
+  // 普通深合并删不掉键（这正是 UI 之前踩的坑）
+  updateConfig({ memberNotes: { '43': '小李' } });
+  assert.deepEqual(getConfig().memberNotes, { '42': '老张', '43': '小李' }, '普通合并不会删除缺的键');
+
+  // 整体替换才能真正删掉
+  updateConfig({ memberNotes: { __replace__: { '43': '小李' } } });
+  assert.deepEqual(getConfig().memberNotes, { '43': '小李' }, '删掉的键必须真的消失');
+
+  updateConfig({ memberNotes: { __replace__: {} } });
+  assert.deepEqual(getConfig().memberNotes, {}, '清空备注列表');
+
+  // 写入侧的长度/条数上界：备注值 200 字、空值不入库
+  updateConfig({ memberNotes: { __replace__: { '44': 'x'.repeat(500), '45': '   ' } } });
+  assert.equal(getConfig().memberNotes['44'].length, 200, '备注值夹到 200 字');
+  assert.equal('45' in getConfig().memberNotes, false, '纯空白备注不入库');
+
+  // 不改这一项时不动存量：把内存态换成一个超长的存量值，再保存无关字段 → 不能被截断
+  // （这是"只在写入侧夹"的设计取舍：升级不该悄悄改写用户已有的配置）
+  const { setRuntimeConfig } = await import('../src/core/config.js');
+  setRuntimeConfig({ ...getConfig(), memberNotes: { '47': 'w'.repeat(400) } });
+  updateConfig({ persona: { botName: '小鲸鱼' } });
+  assert.equal(getConfig().memberNotes['47'].length, 400, '无关保存不回头截断存量值');
+  updateConfig({ memberNotes: { __replace__: {} } });
+});
+
+test('人设正文与自定义规则在写入侧夹住长度（防止粘贴事故把提示词打爆）', async () => {
+  const { updateConfig, getConfig } = await import('../src/core/config.js');
+  const { PERSONAS } = await import('../src/personas.js').catch(() => ({ PERSONAS: null }));
+
+  updateConfig({ persona: { roleText: 'z'.repeat(30000), customRules: 'r'.repeat(9000), templateId: '' } });
+  assert.equal(getConfig().persona.roleText.length, 20000);
+  assert.equal(getConfig().persona.customRules.length, 4000);
+
+  // 恢复成默认人设卡，别影响同文件后续用例
+  updateConfig({ persona: { roleText: PERSONAS?.xiaojingyu?.text ?? '默认人设', templateId: 'xiaojingyu' } });
+});

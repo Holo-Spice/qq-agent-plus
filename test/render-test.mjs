@@ -631,7 +631,10 @@ try {
       && /聊天白名单/.test(wolfOnHtml)
       && /id="cfg-game-discuss"/.test(wolfOnHtml)
       && /白天讨论时长/.test(wolfOnHtml)
-      && /投吧/.test(wolfOnHtml);
+      && /投吧/.test(wolfOnHtml)
+      && /id="gg-running"/.test(wolfOnHtml)          // 正在进行的局面板
+      && /id="gg-refresh-btn"/.test(wolfOnHtml)
+      && /正在进行的局/.test(wolfOnHtml);
     okWolf ? pass++ : fail++;
     console.log('  ' + (okWolf ? 'OK   ' : 'FAIL ') + '群游戏：狼人杀勾选与「游戏期间私聊豁免」开关随配置（含白名单/加好友提示）');
   }
@@ -2516,6 +2519,214 @@ try {
       && /启用定时提醒/.test(html);
     okPage ? pass++ : fail++;
     console.log('  ' + (okPage ? 'OK   ' : 'FAIL ') + '定时提醒设置页：开关、两个列表容器、刷新按钮齐备');
+  }
+
+  // ── 控制台错误页复位（2026-09-29 审查 P1）──
+  //    setHtmlIfChanged 靠 el.__renderedHtml 去重。出错时若不清缓存，页面会永远停在
+  //    "读取失败"上（数据其实已经回来了，只有 F5 能救）。这条钉住"出错 → 恢复 → DOM 真的被重写"。
+  {
+    const box = document.querySelector('#identity-page');
+    const good = '<div class="ok">页面内容</div>';
+    ctx.setHtmlIfChanged(box, good);                                   // 一次成功渲染，缓存住 HTML
+    ctx.setBoxError(box, '<div class="empty-hint">读取失败：boom</div>');
+    const recovered = ctx.setHtmlIfChanged(box, good);                 // 同样的内容，必须能写回去
+    const okRecover = recovered === true && box.innerHTML === good;
+
+    // 控制页还多一个 __hubBuilt 结构标志：出错时也要归零，否则下次成功刷新只更新字段、不重建
+    const hub = document.querySelector('#control-page');
+    hub.__hubBuilt = true;
+    ctx.setBoxError(hub, 'err');
+    const okHub = hub.__hubBuilt === false && hub.__renderedHtml === null;
+
+    const ok = okRecover && okHub;
+    ok ? pass++ : fail++;
+    console.log('  ' + (ok ? 'OK   ' : 'FAIL ')
+      + `出错提示后退回同样内容能重新渲染（缓存复位=${okRecover}，控制页结构标志归零=${okHub}）`);
+  }
+
+  // ── 群友备注的写入形状（2026-09-29 审查 P1）──
+  //    备注写回必须走 __replace__ 整体替换：普通深合并删不掉键，"清空/删除备注"会看着成功、实际没变。
+  //    控制台只有 saveMemberNote 一个写入口（会话记忆页与人物记忆页共用），这里钉住它的三种调用。
+  {
+    const originalFetch = sandbox.fetch;
+    const posts = [];
+    sandbox.fetch = async (url, options = {}) => {
+      const method = String(options.method || 'GET').toUpperCase();
+      const body = options.body ? JSON.parse(options.body) : null;
+      posts.push({ url: String(url), method, body });
+      if (method === 'GET') {
+        // /api/config 的 GET 直接返回配置本身（控制台就是这么用的）
+        return { ok: true, status: 200, json: async () => ({ memberNotes: { '42': '服务端上的老张' } }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true, config: { memberNotes: body.memberNotes.__replace__ } }) };
+    };
+
+    vm.runInContext("state.config = { memberNotes: { '42': '老张', '43': '小李' } };", ctx);
+    await ctx.saveMemberNote('42', '张三');
+    const setBody = posts.at(-1)?.body;
+    const okSet = setBody?.memberNotes?.__replace__?.['42'] === '张三'
+      && setBody.memberNotes.__replace__['43'] === '小李'
+      && setBody.memberNotes['42'] === undefined;   // 普通对象形态会让服务端把旧值并回来
+
+    await ctx.saveMemberNote('42', '');              // 传空串 = 删除这条备注
+    const delBody = posts.at(-1)?.body;
+    const okDel = Boolean(delBody?.memberNotes?.__replace__) && !('42' in delBody.memberNotes.__replace__)
+      && delBody.memberNotes.__replace__['43'] === '小李';
+
+    // state.config 还没拉到就先取一次现值打底：否则 __replace__ 会把服务端已有的备注整体清掉
+    vm.runInContext('state.config = null;', ctx);
+    await ctx.saveMemberNote('43', '小李子');
+    const guardBody = posts.at(-1)?.body;
+    const okGuard = guardBody?.memberNotes?.__replace__?.['43'] === '小李子'
+      && guardBody.memberNotes.__replace__['42'] === '服务端上的老张';
+
+    sandbox.fetch = originalFetch;
+    const ok = okSet && okDel && okGuard;
+    ok ? pass++ : fail++;
+    console.log('  ' + (ok ? 'OK   ' : 'FAIL ')
+      + `备注写入走 __replace__（新增=${okSet}，删除=${okDel}，配置未加载时不误清=${okGuard}）`);
+  }
+
+  // ── 存档页 / 顶栏刷新的合并（2026-09-29 审查 P2）──
+  //    chat-update 是"每条落库消息推一次"：不合并的话存档页会为每条消息重拉整段历史并重建表格，
+  //    人物印象/异常处理页还会各自整页重拉。这里连推 5 次，断言只发生一轮刷新。
+  {
+    ctx.connectSSE();
+    const originalFetch = sandbox.fetch;
+    const originalRefreshStatus = sandbox.refreshStatus;
+    const originalRefreshIntervalMs = sandbox.refreshIntervalMs;
+    const paths = [];
+    sandbox.fetch = async (url) => {
+      paths.push(String(url));
+      return { ok: true, status: 200, json: async () => ({ chats: [] }) };
+    };
+    const originalRefreshStatus2 = originalRefreshStatus;
+    let statusCalls = 0;
+    sandbox.refreshStatus = () => { statusCalls++; };
+    // 存档页另有一条每 4 秒的列表轮询（startListPoller，见 ui/app.js:1834）：不把它挪开，
+    // 它就会在观测窗口里插一脚，"5 次事件只刷一轮"的断言会变成看运气。
+    sandbox.refreshIntervalMs = () => 3600 * 1000;
+    ctx.startListPoller();
+    vm.runInContext("state.tab = 'chats'; state.currentChatKey = '';", ctx);
+    paths.length = 0;   // connectSSE 自己可能先拉一次列表，只统计"派发事件之后"的请求
+
+    for (let i = 0; i < 5; i++) {
+      for (const fn of sseRegistry['chat-update'] || []) fn({ data: '{}' });
+    }
+    await new Promise((r) => setTimeout(r, 2000));   // sleepMs 是别的块里的局部函数，这里自己等
+
+    const chatCalls = paths.filter((u) => u.includes('/api/chats')).length;
+    sandbox.fetch = originalFetch;
+    sandbox.refreshStatus = originalRefreshStatus2;
+    sandbox.refreshIntervalMs = originalRefreshIntervalMs;
+    ctx.startListPoller();                           // 恢复原来的轮询间隔
+    vm.runInContext("state.tab = '';", ctx);
+
+    const ok = chatCalls === 1 && statusCalls === 1;
+    ok ? pass++ : fail++;
+    console.log('  ' + (ok ? 'OK   ' : 'FAIL ')
+      + `连推 5 次 chat-update 只刷新一轮（存档页 ${chatCalls} 次、顶栏 ${statusCalls} 次，期望各 1 次）`
+      + (ok ? '' : ' -> ' + JSON.stringify(paths)));
+  }
+
+  // ── 会话记忆详情的切群竞态守卫（2026-09-29 审查 P2）──
+  //    连点两个群时，先发出的那个请求晚回来（成功或失败）都不该覆盖后选中的群。
+  //    这里让旧请求挂住、新请求先成功，再把旧请求以失败收尾 —— 旧的 catch 也必须认守卫，
+  //    否则它会把已经渲染好的新群详情换成"加载失败"。
+  {
+    const originalFetch = sandbox.fetch;
+    const detail = document.querySelector('#memory-detail');
+    let releaseFirst;
+    const firstHang = new Promise((resolve) => { releaseFirst = resolve; });
+    let listed = 0;
+    sandbox.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/api/memory-files/')) {
+        listed += 1;
+        if (listed === 1) { await firstHang; throw new Error('隧道断了'); }   // 旧请求：晚失败
+        return { ok: true, status: 200, json: async () => ({ members: [], handoff: null }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ memberNotes: {} }) };
+    };
+    vm.runInContext('state.memoryDetailSeq = 0;', ctx);
+
+    const stale = ctx.loadMemoryDetail('group:1');   // 旧：会挂在那儿
+    const fresh = ctx.loadMemoryDetail('group:2');   // 新：先渲染完
+    await fresh;
+    const afterFresh = String(detail.innerHTML || '');
+    releaseFirst();
+    await stale.catch(() => {});
+    const afterStale = String(detail.innerHTML || '');
+    sandbox.fetch = originalFetch;
+
+    const rendered = /的记忆/.test(afterFresh);                        // 防止用例空转（成功路径真跑到了）
+    const ok = rendered && afterStale === afterFresh;
+    ok ? pass++ : fail++;
+    console.log('  ' + (ok ? 'OK   ' : 'FAIL ')
+      + `切群时旧请求晚失败不覆盖新群详情（新群已渲染=${rendered}，旧请求回来后未改动=${afterStale === afterFresh}）`
+      + (ok ? '' : ' -> ' + afterStale.slice(0, 120)));
+  }
+
+  // ── "当前版本"的显示口径（2026-09-29 实测）──
+  //    用未提交的本地树部署时，deployed-revision 记的是 `source-<UTC 时间戳>`：
+  //    直接截前 12 个字符会显示成 `source-20260`，用户看不出"当前跑的不是某个提交"。
+  {
+    vm.runInContext(`state.autoUpdateStatus = ${JSON.stringify({
+      installed: true, enabled: false, busy: false, status: 'no-update',
+      ownerUin: '10000003',
+      repository: 'https://github.com/sakurawwwxh/qq-agent-plus.git', branch: 'main', intervalHours: 6,
+      currentRevision: 'source-20260929T111923Z', targetRevision: '',
+      lastCheckAt: Date.now() - 60000, nextCheckAt: 0, error: ''
+    })};`, ctx);
+    const box = document.getElementById('control-page');
+    box.__hubBuilt = false;
+    box.__renderedHtml = null;
+    ctx.renderControlHub({ services: [{ id: 'agent', online: true }] });
+    const html = String(box.innerHTML || '');
+    const ok = html.includes('未提交版本') && !html.includes('source-20260');
+    ok ? pass++ : fail++;
+    console.log('  ' + (ok ? 'OK   ' : 'FAIL ')
+      + '部署未提交树时"当前版本"显示为「未提交版本 · 时间」，不是被截断的 source-20260');
+  }
+
+  // ── 人物记忆页「按 QQ 设备注」（2026-09-29）──
+  //    左侧名单只列"进过记忆库的人"（说过话的），没说过话的群友靠这个入口补。
+  //    它必须走同一个写入口（app.js 的 saveMemberNote → __replace__），
+  //    否则"清空备注"又会变成看着成功、实际没变。
+  {
+    const originalFetch = sandbox.fetch;
+    const posts = [];
+    sandbox.fetch = async (url, options = {}) => {
+      const method = String(options.method || 'GET').toUpperCase();
+      posts.push({ url: String(url), method, body: options.body ? JSON.parse(options.body) : null });
+      if (method === 'GET') return { ok: true, status: 200, json: async () => ({ files: [], memberNotes: {} }) };
+      return { ok: true, status: 200, json: async () => ({ ok: true, config: { memberNotes: {} } }) };
+    };
+    // 这个页面脚本在真实控制台里随 index.html 加载；这里在同一个 vm 里执行它，
+    // 然后直接触发"保存"按钮绑定的那个处理器。
+    if (typeof sandbox.addEventListener !== 'function') sandbox.addEventListener = () => {};
+    const gmCode = fs.readFileSync(path.join(ROOT, 'ui', 'global-memory.js'), 'utf8');
+    new vm.Script(gmCode, { filename: 'ui/global-memory.js' }).runInContext(ctx);
+
+    const qqInput = document.getElementById('gm-anynote-qq');
+    const noteInput = document.getElementById('gm-anynote-text');
+    const saveBtn = document.getElementById('gm-anynote-save');
+    qqInput.value = '12345';
+    noteInput.value = '沉默群友';
+    const handler = (saveBtn._listeners?.click || [])[0];
+    if (handler) await handler({ currentTarget: saveBtn });
+    const body = posts.find((p) => p.method === 'POST')?.body;   // 之后还会跟一次 GET（刷新名单）
+    const statusText = String(document.getElementById('gm-anynote-status')?.textContent || '');
+    sandbox.fetch = originalFetch;
+
+    const ok = Boolean(handler)
+      && body?.memberNotes?.__replace__?.['12345'] === '沉默群友'
+      && statusText.includes('已保存')
+      && noteInput.value === '';
+    ok ? pass++ : fail++;
+    console.log('  ' + (ok ? 'OK   ' : 'FAIL ')
+      + `按 QQ 设备注：走 __replace__ 写入口并回报状态（状态="${statusText}"）`
+      + (ok ? '' : ' -> ' + JSON.stringify(body) + ' handler=' + Boolean(handler)));
   }
 
 } catch (e) {

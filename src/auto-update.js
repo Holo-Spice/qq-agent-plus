@@ -279,7 +279,11 @@ export class AutoUpdateManager {
         ? Math.max(Date.now(), Number(state.lastCheckAt || 0) + intervalMs)
         : 0,
       ...state,
-      currentRevision: state.currentRevision || deployedRevision
+      // 以 data/deployed-revision 为准：那是每次部署都会重写的"这台机器现在跑的版本"，
+      // 而 state.currentRevision 只是"上一次更新器自己部署时"的快照。反过来会让控制台
+      // 显示与实际不符的版本（2026-09-29 实测：线上跑的是未提交树 source-…，控制台却显示
+      // 4 天前的提交 cd4e1003）。文件缺失（没走 deploy.sh 部署过）才回落到状态里的值。
+      currentRevision: deployedRevision || state.currentRevision
     };
   }
 

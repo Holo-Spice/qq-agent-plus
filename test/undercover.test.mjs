@@ -238,3 +238,33 @@ test('给模型的摘要与主持口径：不含身份/词，且叮嘱了出局�
   assert.match(voteBrief, /绝不泄漏词或身份/, voteBrief);
   assert.match(voteBrief, /已出局的人|没参加的人/, voteBrief);
 });
+
+test('描述阶段快到时提醒一次「还有约 30 秒进入投票」（不重复；太短不提）', () => {
+  let s = newGame();
+  const t0 = s.phaseStartedAt;
+  assert.equal(uc.onTick(s, { now: t0 + 60 * 1000 }).effects.length, 0, '还剩 60 秒不提醒');
+  const near = uc.onTick(s, { now: t0 + 95 * 1000 });
+  assert.equal(near.effects.length, 1, JSON.stringify(near.effects));
+  assert.match(near.effects[0].text, /还有约 30 秒进入投票/, near.effects[0].text);
+  assert.equal(uc.onTick(near.state, { now: t0 + 100 * 1000 }).effects.length, 0, '同一轮只提醒一次');
+  const quick = { ...s, discussSeconds: 40, dayWarned: false };
+  assert.equal(uc.onTick(quick, { now: t0 + 20 * 1000 }).effects.length, 0, '40 秒的窗口不提醒');
+});
+
+test('退出重算：剩下的人已全员投完时立刻结算，不干等投票窗口（审查 P2）', () => {
+  // 场景：三个人都"边说边投"，第四个人一直没说话；这时第四个人退出 ——
+  // 剩下的人既全员发过言、又全员投过票，就该当场出结果
+  // （旧代码只把阶段置成 vote，群里白等最多 roundSeconds 秒；同批的狼人杀有同类漏改）
+  let s = newGame();
+  const [a, b, c, quitter] = [...s.order];
+  s = msg(s, a, `我描述一下，投 ${numOf(s, b)}`).state;
+  s = msg(s, b, `我描述一下，投 ${numOf(s, a)}`).state;
+  s = msg(s, c, `我描述一下，投 ${numOf(s, a)}`).state;
+  assert.equal(s.phase, 'speak', '还有人没发言，仍在描述阶段');
+  assert.deepEqual(Object.keys(s.votes).sort(), [a, b, c].sort(), '三张早票都要在');
+
+  const quit = uc.onMessage(s, { userId: quitter, text: '不玩了', ts: 5 }, { now: 5 });
+  const texts = quit.effects.map((e) => e.text || '').join('|');
+  assert.match(texts, /投票结果/, '退出后剩下的人已全员投完，应当立刻结算：' + texts);
+  assert.equal(quit.state.eliminated.includes(a), true, '两票在身的 a 出局：' + JSON.stringify(quit.state.eliminated));
+});

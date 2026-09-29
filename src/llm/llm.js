@@ -551,7 +551,12 @@ export function estimateCost(usage, opts = {}) {
   // 统一走 resolveModelPrice：自定义 > 内置官方表 > 全局兜底
   // 注意：第二个参数要传完整配置对象（内部读 cfg.api.*），
   // 传 effectiveApi() 的返回值（它就是 api 本身）会导致取不到字段。
-  const p = resolveModelPrice(model, getConfig());
+  // 第三、四个参数不能省：带时间区间的别名与渠道价都靠 options.at/vendor 判定，
+  // 丢了就会拿"现在"的别名规则去算历史调用（2026-09-29 审查 P2）。
+  const p = resolveModelPrice(model, getConfig(), null, {
+    at: Number(opts.at) || 0,
+    vendor: String(opts.vendor ?? '')
+  });
 
   // 峰谷：传了 at（调用时刻）且该模型有 peak 档位就取对应档
   const tier = p.peak && opts.at ? priceAt(p, opts.at) : null;

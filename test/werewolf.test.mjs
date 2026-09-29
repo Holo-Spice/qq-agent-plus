@@ -975,3 +975,74 @@ test('夜晚记录的正向格式：救 N 与「（好人）」标注都要在',
   assert.match(end, new RegExp(`救${idx(s, good.userId)}`), '要渲染"救 N"：' + end);
   assert.match(end, new RegExp(`查${idx(s, good.userId)}（好人）`), '要渲染"（好人）"：' + end);
 });
+
+test('白天讨论快到时提醒一次「还有约 30 秒开始投票」（不重复；讨论时长太短不提）', () => {
+  let s = newGame(6);
+  const seer = by(s, 'seer')[0];
+  s = pm(s, seer.userId, `查 ${idx(s, seer.userId)}`).state;
+  s = wolf.onTick(s, { now: s.phaseStartedAt + 95 * 1000, rng: () => 0 }).state;   // 天亮
+  assert.equal(s.phase, 'day');
+  const t0 = s.phaseStartedAt;
+  assert.equal(wolf.onTick(s, { now: t0 + 60 * 1000, rng: () => 0 }).effects.length, 0, '还剩 60 秒不提醒');
+  const near = wolf.onTick(s, { now: t0 + 95 * 1000, rng: () => 0 });              // 剩 25 秒
+  assert.equal(near.effects.length, 1, JSON.stringify(near.effects));
+  assert.match(near.effects[0].text, /还有约 30 秒开始投票/, near.effects[0].text);
+  assert.equal(near.state.dayWarned, true);
+  assert.equal(wolf.onTick(near.state, { now: t0 + 100 * 1000, rng: () => 0 }).effects.length, 0, '同一天只提醒一次');
+  // 讨论时长 <60 秒就不插嘴
+  const quick = { ...s, discussSeconds: 40, dayWarned: false };
+  assert.equal(wolf.onTick(quick, { now: t0 + 20 * 1000, rng: () => 0 }).effects.length, 0, '40 秒的窗口不提醒');
+});
+
+test('白天倒计时提醒跨天会重置（第 2 天照样提醒一次）', () => {
+  let s = newGame(6);
+  const seer = by(s, 'seer')[0];
+  s = pm(s, seer.userId, `查 ${idx(s, seer.userId)}`).state;
+  s = wolf.onTick(s, { now: s.phaseStartedAt + 95 * 1000, rng: () => 0 }).state;   // 第 1 天
+  const day1 = wolf.onTick(s, { now: s.phaseStartedAt + 95 * 1000, rng: () => 0 }).state;
+  assert.equal(day1.dayWarned, true);
+  // 讨论到点 → 投票 → 无人投票 → 第 2 夜 → 到点 → 第 2 天
+  const vote = wolf.onTick(day1, { now: day1.phaseStartedAt + 121 * 1000, rng: () => 0 }).state;
+  assert.equal(vote.phase, 'vote');
+  const night = wolf.onTick(vote, { now: vote.phaseStartedAt + 91 * 1000, rng: () => 0 }).state;
+  assert.equal(night.night, 2);
+  const day2 = wolf.onTick(night, { now: night.phaseStartedAt + 91 * 1000, rng: () => 0 }).state;
+  assert.equal(day2.phase, 'day');
+  assert.equal(day2.dayWarned, false, '新的一天要重置');
+  assert.equal(wolf.onTick(day2, { now: day2.phaseStartedAt + 95 * 1000, rng: () => 0 }).effects.length, 1, '第 2 天照样提醒');
+});
+
+test('退出重算：最后那个"欠发言/欠票"的人退出时立刻推进，不等窗口超时', () => {
+  // 背景（2026-09-29 审查 P2）：quitPlayer 只在夜里补结算，白天/投票阶段直接返回 ——
+  // 群里最后一人退出后要干等 120/90 秒超时，观感就是"卡住了"。卧底插件早有等价重算。
+  const toDay = () => {
+    let g = newGame();
+    g = pm(g, by(g, 'seer')[0].userId, '查 1').state;
+    return wolf.onTick(g, { now: g.phaseStartedAt + 95 * 1000, rng: () => 0 }).state;   // 天亮
+  };
+
+  // ① 白天：除一人外都说过话，那个人退出 → 立刻进投票
+  let s = toDay();
+  const aliveIds = s.roles.filter((r) => r.alive).map((r) => r.userId);
+  const quiet = aliveIds[aliveIds.length - 1];
+  let out = { state: s, effects: [] };
+  for (const uid of aliveIds.slice(0, -1)) {
+    out = wolf.onMessage(out.state, { userId: uid, text: '我说两句', ts: 1 }, { now: 1 });
+  }
+  assert.equal(out.state.phase, 'day', '还差一个人发言');
+  const quit = wolf.onMessage(out.state, { userId: quiet, text: '不玩了', ts: 2 }, { now: 2 });
+  assert.equal(quit.state.phase, 'vote', '最后一人退出后应立刻进投票（而不是等 120 秒超时）');
+  assert.match(quit.effects.map((e) => e.text || '').join(''), /开始投票/);
+
+  // ② 投票：只剩他没投，他退出 → 立刻结算（进下一夜或直接终局）
+  const left = quit.state.roles.filter((r) => r.alive).map((r) => r.userId);
+  const lastVoter = left[left.length - 1];
+  let v = { state: quit.state, effects: [] };
+  for (const uid of left.slice(0, -1)) {
+    const target = left.find((x) => x !== uid);
+    v = wolf.onMessage(v.state, { userId: uid, text: `投 ${idx(v.state, target)}`, ts: 3 }, { now: 3 });
+  }
+  assert.equal(v.state.phase, 'vote', '还差一票');
+  const quit2 = wolf.onMessage(v.state, { userId: lastVoter, text: '不玩了', ts: 4 }, { now: 4 });
+  assert.notEqual(quit2.state.phase, 'vote', '最后一票退出后应立刻结算');
+});

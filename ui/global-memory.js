@@ -58,6 +58,13 @@
       .gm-note { padding:10px 12px; margin:0 0 12px; border-radius:8px; background:rgba(127,127,127,.08); font-size:13px; line-height:1.5; }
       .gm-empty { padding:24px 14px; opacity:.6; }
       .gm-status { font-size:12px; opacity:.75; }
+      .gm-note-field { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+      .gm-note-field input { flex:1 1 240px; min-width:0; }
+      .gm-anynote { padding:8px 12px; border-bottom:1px solid var(--border-color, rgba(128,128,128,.15)); font-size:13px; }
+      .gm-anynote > summary { cursor:pointer; opacity:.8; }
+      .gm-anynote .gm-note-field { margin-top:8px; }
+      /* 列表栏很窄：这一行的两个输入框各占满一行，别挤成两三个字符宽 */
+      .gm-anynote .gm-note-field input { flex:1 1 100%; }
     `;
     document.head.appendChild(style);
   }
@@ -202,6 +209,8 @@
     await api(`/api/memory-files/global/members/${userId}`, { method: 'DELETE', body: JSON.stringify({ confirm: true }) });
   }
 
+  let noteDraft = { key: '', value: '' };   // 备注输入中的草稿（见 renderDetail 的说明）
+
   function renderDetail() {
     const box = document.getElementById('global-memory-detail');
     if (!box) return;
@@ -230,6 +239,23 @@
     const manageable = /^\d{1,15}$/.test(String(person.userId || ''))
       && Boolean(sourceFor(person));
 
+    // 备注编辑放在人物记忆页：memberNotes 是按 QQ 全局的人物级数据，与长期印象同一层级。
+    // （会话记忆页那份"拉取群成员列表（编辑备注）"按上游设计被 CSS 隐藏，见 ui/session-memory-view.js。）
+    // 写入口是 app.js 的 saveMemberNote —— 它走 __replace__ 整体替换，清空才真的删得掉。
+    const noteKey = /^\d{1,15}$/.test(String(person.userId || '')) ? String(person.userId) : '';
+    const savedNote = noteKey ? String((state.config?.memberNotes || {})[noteKey] || '') : '';
+    // 15 秒轮询会重建整块详情：不保留草稿的话，正在输入的字会被擦掉
+    const noteValue = noteKey && noteDraft.key === noteKey ? noteDraft.value : savedNote;
+    const noteHtml = noteKey ? `
+      <div class="gm-section"><h3>备注</h3>
+        <div class="gm-note-field">
+          <input type="text" id="gm-note-input" maxlength="200" value="${esc(noteValue)}" placeholder="留空 = 不设备注（如 老王）" />
+          <button class="btn btn-small" type="button" id="gm-note-save">保存备注</button>
+          <span class="gm-status" id="gm-note-status"></span>
+        </div>
+        <div class="gm-status">备注用于聊天记录、记忆与提示词里的称呼（与“会话记忆”页共用同一份数据）。</div>
+      </div>` : '';
+
     box.innerHTML = `
       <div class="detail-header">
         <h2>${esc(person.name || person.userId || '未知人物')}</h2>
@@ -244,10 +270,29 @@
         人物长期记忆按 QQ 全局统一；来源会话只用于证据追溯，不限制这条记忆在哪个群可见。<br>
         群聊/私聊自己的 handoff 已独立到“会话记忆”页，并继续严格按 chatKey 隔离。
       </div>
+      ${noteHtml}
       <div class="gm-section"><h3>来源会话</h3><div>${sourceHtml}</div></div>
       <div class="gm-section"><h3>长期印象</h3>${memoryHtml}</div>`;
 
     const status = box.querySelector('#gm-action-status');
+    const noteInput = box.querySelector('#gm-note-input');
+    const noteStatus = box.querySelector('#gm-note-status');
+    noteInput?.addEventListener('input', () => { noteDraft = { key: noteKey, value: noteInput.value }; });
+    box.querySelector('#gm-note-save')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      if (noteStatus) noteStatus.textContent = '保存中…';
+      try {
+        const value = String(noteInput?.value || '').trim();
+        await saveMemberNote(noteKey, value);
+        noteDraft = { key: '', value: '' };
+        if (noteStatus) noteStatus.textContent = value ? '已保存' : '已清空';
+      } catch (error) {
+        if (noteStatus) noteStatus.textContent = `保存失败：${error?.message || error}`;
+      } finally {
+        button.disabled = false;
+      }
+    });
     box.querySelector('#gm-consolidate')?.addEventListener('click', async (event) => {
       const button = event.currentTarget;
       button.disabled = true;
@@ -305,6 +350,32 @@
   }
 
   document.getElementById('gm-refresh')?.addEventListener('click', () => loadGlobalMemory(true));
+
+  // 按 QQ 设备注：名单里只有"进过记忆库的人"（说过话的），没说过话的群友靠这一行补上。
+  // 写入口仍是 app.js 的 saveMemberNote（__replace__ 整体替换，留空即删除）。
+  document.getElementById('gm-anynote-save')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    const status = document.getElementById('gm-anynote-status');
+    const qq = String(document.getElementById('gm-anynote-qq')?.value || '').trim();
+    const note = String(document.getElementById('gm-anynote-text')?.value || '').trim();
+    if (!/^\d{1,15}$/.test(qq)) {
+      if (status) status.textContent = 'QQ 号要填纯数字';
+      return;
+    }
+    button.disabled = true;
+    if (status) status.textContent = '保存中…';
+    try {
+      await saveMemberNote(qq, note);
+      const input = document.getElementById('gm-anynote-text');
+      if (input) input.value = '';
+      if (status) status.textContent = note ? `已保存：${qq}` : `已删除：${qq}`;
+      await loadGlobalMemory(true);   // 名单里有这个人的话，详情里的备注行也要跟着更新
+    } catch (error) {
+      if (status) status.textContent = `保存失败：${error?.message || error}`;
+    } finally {
+      button.disabled = false;
+    }
+  });
   document.querySelector('[data-tab="people-memory"]')?.addEventListener('click', () => {
     // app.js 的通用 tab handler 先完成视图切换；随后刷新人物全局视图。
     setTimeout(() => loadGlobalMemory(true), 0);

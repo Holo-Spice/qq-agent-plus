@@ -12,7 +12,9 @@ import { synthesizeSpeech, ttsConfigured } from '../llm/tts.js';
 
 // 消息 id 归一化：模型常把聊天记录里的 "#123" 连 # 一起传进来，而 OneBot 只认纯数字 id。
 // store.js 里有一份同名函数但没导出，所以这里保留 tools 层自用的一份。
-function normalizeMid(value) {
+// **导出**：orchestrator 记录"续接线索参与者"时读的是工具调用的原始参数，
+// 不归一化就会把 '#42' 当成参与者 id 永久存进线程（2026-09-29 审查）。
+export function normalizeMid(value) {
   return String(value ?? '').trim().replace(/^(?:#+|collected_)+/, '').trim();
 }
 
@@ -315,7 +317,7 @@ export function buildToolDefs() {
             runId: ctx.session.leaseId, signal: ctx.signal,
             preserveCode: ctx.behaviorProfile === 'grounded',
             replyToMessageId: normalizeMid(args.replyToMessageId) || null,
-            atUserId: args.atUserId ?? null
+            atUserId: normalizeMid(args.atUserId) || null
           });
           ctx.session.sent.push(...result.sent.map((s) => ({ type: 'text', text: s.text, at: s.at })));
           ctx.emit('session-update', ctx.session.id);
@@ -368,7 +370,7 @@ export function buildToolDefs() {
           const result = await ctx.sender.sendSticker(ctx.chatKey, sticker, {
             runId: ctx.session.leaseId, signal: ctx.signal,
             replyToMessageId: normalizeMid(args.replyToMessageId) || null,
-            atUserId: args.atUserId ?? null
+            atUserId: normalizeMid(args.atUserId) || null
           });
           ctx.stickers.markUsed(sticker.id, String(ctx.session.triggerText || '').slice(0, 100));
           ctx.session.sent.push({ type: 'sticker', text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
@@ -516,7 +518,7 @@ export function buildToolDefs() {
           const result = await ctx.sender.sendFace(ctx.chatKey, hit.face, {
             runId: ctx.session.leaseId, signal: ctx.signal,
             replyToMessageId: normalizeMid(args.replyToMessageId) || null,
-            atUserId: args.atUserId ?? null,
+            atUserId: normalizeMid(args.atUserId) || null,
             text: args.text ? unquoteJsonString(args.text) : null
           });
           ctx.session.sent.push({ type: 'face', text: `${args.text ? unquoteJsonString(args.text) : ''}[表情:${hit.face.name}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });

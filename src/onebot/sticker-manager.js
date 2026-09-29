@@ -214,11 +214,21 @@ export class StickerManager {
     if (buffer.length > MAX_STICKER_BYTES) throw new Error('图片不能超过 8 MiB');
     const contentType = imageType(buffer);
     if (!contentType) throw new Error('仅支持 PNG、JPEG、GIF 或 WebP 图片');
+    // id 会进文件名：收藏那条链路用的是协议端给的 message_id（collected_<messageId>），
+    // 不约束的话 `/../../x` 这种值能让落盘逸出 sticker-assets/（读路径本来就有 containment 校验，
+    // 写路径此前没有；2026-09-29 审查 P2）。正常 id 只有字母数字下划线与连字符。
+    if (!/^[A-Za-z0-9_-]{1,120}$/.test(String(id))) {
+      throw new Error(`表情 id 非法：${String(id).slice(0, 40)}`);
+    }
     const relativeFile = `sticker-assets/${id}.${IMAGE_EXTENSIONS[contentType]}`;
     const file = path.join(DATA_DIR, relativeFile);
+    const assetRoot = `${path.resolve(STICKER_ASSET_DIR)}${path.sep}`;
+    if (!path.resolve(file).startsWith(assetRoot)) {
+      throw new Error('表情路径非法');
+    }
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, buffer, { mode: 0o600 });
+    fs.writeFileSync(tmp, buffer, { mode: 0o600, flush: true });
     fs.renameSync(tmp, file);
     return { relativeFile, file };
   }

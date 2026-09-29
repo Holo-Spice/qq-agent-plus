@@ -30,6 +30,14 @@ import { redactText } from './redact.js';
 // 主动开话题的"上次判定时间"要落盘：否则服务一重启，15 秒后的第一个 tick 就又能开一次话题，
 // 表现就是"重启一下群里就多一次开话题"，跟"约 5 小时概率一次"的设定不符。
 const PROACTIVE_STATE_FILE = path.join(DATA_DIR, 'proactive-state.json');
+// 一次 tick 里合并多条到点提醒时，note 正文的总长度上限。note 进提示词时会被
+// safeSlice(…, 600) 截一次，超过它的条目内容会被整段切掉、却已经在下面标记 fired。
+// 400 给"【定时提醒】"前缀、迟到提示与尾句留足余量；放不下的条目继续留在 pending，
+// 下一个 30 秒 tick 再派发（2026-09-29 审查 P1）。
+const REMINDER_NOTE_BODY_MAX = 400;
+// 主动唤醒被"接不了"（会话在跑 / 并发满 / 没配模型）时的重试间隔：
+// 不设这个的话模型自安排的唤醒会在那些时刻被静默丢掉（2026-09-29 审查 P2）。
+const WAKE_RETRY_MS = 60 * 1000;
 function readProactiveLastAttempt() {
   try {
     return Number(JSON.parse(fs.readFileSync(PROACTIVE_STATE_FILE, 'utf8')).lastAttemptAt) || 0;
@@ -104,6 +112,7 @@ import { ZONE_OFFSET_MS, minuteOfDayInZone, randInt, sleep, createEventBus, toda
 import { buildSystemPrompt, buildUserPrompt, resolveContextTier } from '../llm/prompt.js';
 import { chatCompletion, chatCompletionWithRetry, addUsage, isRetryableError } from '../llm/llm.js';
 import { buildToolDefs, toOpenAiTools, executeTool } from '../tools/tools.js';
+import { normalizeMid } from '../tools/tools-core.js';
 import { visionEnabled } from '../llm/vision-scan.js';
 import { currentProviders } from './providers.js';
 import { buildSlangContextForChat } from '../console/asset-observer.js';
@@ -121,7 +130,10 @@ function continuationParticipantIds(session, triggerEntries, store, chatKey) {
   for (const item of session?.messages || []) {
     const call = item?.toolCall;
     if (!call || !['send_message', 'send_sticker', 'send_poke'].includes(call.name)) continue;
-    const atUserId = String(call.args?.atUserId ?? call.args?.targetUserId ?? '').trim();
+    // 与 tools 层的校验/发送同口径归一化：模型会把 '#42' 这种形态传进来，
+    // 直接存进 participantIds 的话后续 `participants.has(senderId)` 永远不命中
+    // （该人再发言就不会触发确定性续接；2026-09-29 审查）。
+    const atUserId = normalizeMid(call.args?.atUserId ?? call.args?.targetUserId ?? '');
     if (atUserId) ids.push(atUserId);
     const replyId = call.args?.replyToMessageId;
     if (replyId !== undefined && replyId !== null && String(replyId).trim()) {
@@ -1837,12 +1849,12 @@ export class Orchestrator {
   startScheduledWakeTicker() {
     if (this.scheduledWakeTicker) return;
     this.scheduledWakeTicker = setInterval(() => {
-      try { this.#fireDueScheduledWakes(); } catch { /* 调度失败不影响主流程 */ }
+      try { this.fireDueScheduledWakes(); } catch { /* 调度失败不影响主流程 */ }
     }, 30000);
     if (this.scheduledWakeTicker.unref) this.scheduledWakeTicker.unref();
   }
 
-  #fireDueScheduledWakes() {
+  fireDueScheduledWakes() {
     const now = Date.now();
     const cfgNow = getConfig();
     for (const [chatKey, item] of [...this.scheduledWakes.entries()]) {
@@ -1867,11 +1879,35 @@ export class Orchestrator {
           continue;
         }
       }
+      // 到点但会话现在接不了这次唤醒（在跑 / 被阻塞 / 并发满 / 没配模型）：#wake 在这些分支上是
+      // **静默 return**，而上面已经把安排删掉了 —— 模型给自己留的那句"我过会儿回来看"就永久消失
+      // （与定时提醒同一类静默丢失，2026-09-29 审查）。顺延一轮再试，而不是丢掉。
+      // paced 不在此列：它每次运行结束都会由 #ensurePacedWake 重新排，不需要这里兜。
+      // 不走 scheduleInitiativeWake 重排：那个函数按默认 noteLimit(200) 截断留言，这里原样保留。
+      if (!item.paced && this.#wakeBlockedNow(chatKey, cfgNow)) {
+        const timer = setTimeout(() => { try { this.fireDueScheduledWakes(); } catch { /* 忽略 */ } }, WAKE_RETRY_MS + 50);
+        if (timer.unref) timer.unref();
+        this.scheduledWakes.set(chatKey, { ...item, at: Date.now() + WAKE_RETRY_MS, timer });
+        continue;
+      }
       this.wake(chatKey, item.paced
         ? { manual: true, paced: true, wakeNote: item.note }
         : { proactive: true, wakeNote: item.note })
         .catch((error) => console.error('[orchestrator] 自主唤醒出错:', error));
     }
+  }
+
+  /**
+   * 这一轮 #wake 会不会因为"接不了"而静默丢弃（在跑 / 被暂停 / 被阻塞 / 并发满 / 没配模型）。
+   * 主动派发（提醒、自安排唤醒）都必须在**派发前**问一次，否则会先标记完成/先删安排、
+   * 再被 #wake 静默吞掉（2026-09-29 审查：同一模式在两处各犯过一次）。
+   */
+  #wakeBlockedNow(chatKey, cfg = getConfig()) {
+    if (this.aborted || this.paused) return true;
+    if (this.runningChats.has(chatKey)) return true;
+    if (!this.#chatRuntimeDecision(chatKey).allowed) return true;
+    if (!String(cfg.api?.model || '').trim()) return true;
+    return this.runningChats.size >= Math.max(1, Number(cfg.maxConcurrentRuns) || 2);
   }
 
   /** 安排一次稍后的主动发言（模型调用 schedule_wake / 补话 / 自主节奏唤醒共用）。 */
@@ -1882,7 +1918,7 @@ export class Orchestrator {
     const at = Date.now() + wait;
     const prev = this.scheduledWakes.get(chatKey);
     if (prev?.timer) clearTimeout(prev.timer);
-    const timer = setTimeout(() => { try { this.#fireDueScheduledWakes(); } catch { /* 忽略 */ } }, wait + 50);
+    const timer = setTimeout(() => { try { this.fireDueScheduledWakes(); } catch { /* 忽略 */ } }, wait + 50);
     if (timer.unref) timer.unref();
     // kind 只用于派发时按开关作废（followUp=补话 / selfWake=模型自安排 / paced=自主节奏），不进提示词
     const label = kind || (paced ? 'paced' : 'selfWake');
@@ -1894,7 +1930,7 @@ export class Orchestrator {
   startReminderLoop() {
     if (this.reminderTimer) return;
     const tick = () => {
-      try { this.#fireDueReminders(); } catch (error) { console.error('[reminder] 派发出错（不影响下一轮）:', error?.message ?? error); }
+      try { this.fireDueReminders(); } catch (error) { console.error('[reminder] 派发出错（不影响下一轮）:', error?.message ?? error); }
     };
     tick();
     this.reminderTimer = setInterval(tick, 30000);
@@ -1906,7 +1942,7 @@ export class Orchestrator {
     this.reminderTimer = null;
   }
 
-  #fireDueReminders() {
+  fireDueReminders() {
     if (!this.reminders) return;
     // 控制台开关（设置 → 定时提醒）：关掉后不派发，已存数据保留，重新打开继续用
     if (getConfig().reminders?.enabled === false) return;
@@ -1928,11 +1964,22 @@ export class Orchestrator {
       const first = items[0];
       const late = now - first.at;
       const at = new Date(first.at).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false, hour: '2-digit', minute: '2-digit' });
-      // 不再自称（createdBy 是机器人自己的名字，写成"小鲸鱼之前让你…"很怪）；合并后可能较长，
-      // 用 noteLimit 放行到 600 字，避免尾部被截掉却已标记 fired（2026-09-28 审查 P3）
-      const body = items.length === 1
-        ? `之前有人让你在 ${at} 提醒：${first.text}`
-        : `到点了，要提醒的事有 ${items.length} 件：${items.map((x) => `「${x.text}」`).join('、')}`;
+      // 一次只合并"能完整写进 note"的条目：note 在 #wake 里被 safeSlice(…, 600) 截断，
+      // 而下面会对合并进来的每一条 markFired。无限合并（单条正文 200 字 × 每会话最多 10 条）
+      // 会让第 4 条起的内容被截掉却照样标记已触发 —— 内容永久丢失（2026-09-29 审查 P1）。
+      // 第一条无论如何都进（否则会永远卡在同一条上）；放不下的留到下一轮 tick 继续。
+      const chosen = [];
+      let bodyChars = 0;
+      for (const item of items) {
+        const cost = String(item.text || '').length + 4;
+        if (chosen.length && bodyChars + cost > REMINDER_NOTE_BODY_MAX) break;
+        chosen.push(item);
+        bodyChars += cost;
+      }
+      // 不再自称（createdBy 是机器人自己的名字，写成"小鲸鱼之前让你…"很怪）
+      const body = chosen.length === 1
+        ? `之前有人让你在 ${at} 提醒：${chosen[0].text}`
+        : `到点了，要提醒的事有 ${chosen.length} 件：${chosen.map((x) => `「${x.text}」`).join('、')}`;
       const note = `【定时提醒】${body}`
         + `${late > 3 * 60000 ? '（已经迟到了一点，顺口说明下）' : ''}。现在自然地把这些说出来（一两句，别说"系统提醒"）。`;
       // **直接唤醒**，不走 scheduledWakes：那是"每会话单槽"，两批提醒只要落在相邻 tick
@@ -1940,19 +1987,21 @@ export class Orchestrator {
       // 2026-09-28 服务器实测：相隔 5 秒的两条提醒，第一条"喝水"从未发出。
       // manual+paced 与原先 paced:true 的派发形态一致：不按概率跳过、也不受活跃时段顺延。
       //
-      // 派发前同步预检 #wake 的三个"静默空转"闸门（会话在跑 / 会话被阻塞 / 并发满 / 无模型）：
+      // 派发前同步预检 #wake 的"静默空转"闸门（会话在跑 / 会话被阻塞 / 并发满 / 无模型，
+      // 判据统一在 #wakeBlockedNow 里，与自安排唤醒共用）+ 该会话已有未过期租约：
       // 这些判断在 #wake 里也是同步做的，这里不满足就**本轮不派发、不 markFired**，
       // 留在 due() 里 30 秒后再试 —— 否则提醒被标成已发却永远没人说（2026-09-29 审查 P1）。
-      const maxRuns = Math.max(1, Number(getConfig().maxConcurrentRuns) || 2);
-      const dispatchable = !this.runningChats.has(chatKey)
-        && this.#chatRuntimeDecision(chatKey).allowed
-        && this.runningChats.size < maxRuns
-        && String(getConfig().api.model || '').trim() !== '';
+      // 最后那条租约闸门对应 #wake 里 claimUnread 取不到租约的静默 return：
+      // 硬崩溃（kill -9/OOM）会留下 runs.state='leased' 的残行，recoverExpired 最多 5 秒后回收。
+      const dispatchable = !this.#wakeBlockedNow(chatKey)
+        && !this.store.hasLeasedRun(chatKey);
       if (!dispatchable) continue;
       this.wake(chatKey, { manual: true, paced: true, wakeNote: note })
         .catch((error) => console.error('[reminder] 唤醒出错:', error?.message ?? error));
-      for (const it of items) this.reminders.markFired(it.id, now);
-      console.log(`[reminder] 到点派发 ${items.length} 条：${chatKey} ${items.map((x) => String(x.text).slice(0, 20)).join(' / ')}`);
+      for (const it of chosen) this.reminders.markFired(it.id, now);
+      const deferred = items.length - chosen.length;
+      console.log(`[reminder] 到点派发 ${chosen.length} 条：${chatKey} ${chosen.map((x) => String(x.text).slice(0, 20)).join(' / ')}`
+        + (deferred > 0 ? `（另有 ${deferred} 条本轮装不进提示词，30 秒后继续派发）` : ''));
     }
   }
 

@@ -66,13 +66,22 @@ export class GroupGameManager {
   }
 
   #load() {
+    let raw;
     try {
-      const raw = JSON.parse(fs.readFileSync(FILE, 'utf8'));
-      for (const [chatKey, item] of Object.entries(raw?.games || {})) {
-        if (item && item.gameId && item.state) this.games.set(chatKey, item);
+      raw = JSON.parse(fs.readFileSync(FILE, 'utf8'));
+    } catch (error) {
+      // 首次运行没有文件是正常的；"文件在但坏了"不能静默按空处理 —— 下一次 #save 会把
+      // 进行中的局与当天的开局限额一起覆盖掉（与 reminders 同一口径：留备份 + 告警）。
+      if (error?.code !== 'ENOENT') {
+        console.error(`[group-game] 读取 ${FILE} 失败，本次按"没有进行中的局"处理，原文件已备份为 .broken-<时间戳>：`, error?.message ?? error);
+        try { fs.renameSync(FILE, `${FILE}.broken-${Date.now()}`); } catch { /* 备份失败就留在原处 */ }
       }
-      for (const [chatKey, d] of Object.entries(raw?.daily || {})) this.daily.set(chatKey, d);
-    } catch { /* 首次运行没有文件 */ }
+      return;
+    }
+    for (const [chatKey, item] of Object.entries(raw?.games || {})) {
+      if (item && item.gameId && item.state) this.games.set(chatKey, item);
+    }
+    for (const [chatKey, d] of Object.entries(raw?.daily || {})) this.daily.set(chatKey, d);
   }
 
   #save() {
@@ -338,6 +347,18 @@ export class GroupGameManager {
       await this.#dealNow(chatKey, plugin, roster, cfg, { today, used, now });
       return;
     }
+    // 报名快截止（窗口 ≥30 秒时才提）且人还不够：提一句还剩多少、还差几人（只提一次）
+    const recruitUntil = Number(g.state.recruitUntil || 0);
+    if (!g.recruitWarned && cfg.recruitSeconds >= 30 && recruitUntil && recruitUntil - now <= 18 * 1000) {
+      g.recruitWarned = true;
+      this.#save();
+      const have = g.state.joiners.length;
+      const need = Math.max(0, Number(g.state.minPlayers || 0) - have);
+      await this.#applyEffects(chatKey, [{
+        type: 'public',
+        text: `⏳ ${plugin.meta.name}报名马上截止（现在 ${have} 人${need > 0 ? `，还差 ${need} 人` : ''}），想玩的赶紧回「我玩」。`
+      }]);
+    }
     if (now >= Number(g.state.recruitUntil || 0)) {
       this.games.delete(chatKey);
       this.#save();
@@ -395,8 +416,10 @@ export class GroupGameManager {
       const hit = idByName.get(name);
       return hit ? { userId: hit, name: name || hit } : null;
     };
-    // 人数上限：控制台设的与插件自身上限取较小值（以前 UI 那个输入框是死配置）
-    const playerCap = Math.min(plugin.meta.maxPlayers, cfg.maxPlayers || plugin.meta.maxPlayers);
+    // 人数上限：控制台设的与插件自身上限取较小值（以前 UI 那个输入框是死配置）。
+    // 再夹一次下限：控制台允许填到 2，而狼人杀最少 6 人——上限小于下限时报名制会
+    // "先报满、再说人数不够"，这局永远开不出来且看不出去配置哪里错（2026-09-29 审查 P2）。
+    const playerCap = Math.max(plugin.meta.minPlayers, Math.min(plugin.meta.maxPlayers, cfg.maxPlayers || plugin.meta.maxPlayers));
     const picked = requested ? requested.map(resolvePlayer).filter(Boolean) : active;
     // 同一个人可能被模型写两遍（QQ 号 + 名片，或重复名片）→ 按 userId 去重，
     // 否则他会拿到多张身份、胜负面全乱（2026-09-29 审查 P1）
@@ -425,7 +448,7 @@ export class GroupGameManager {
         joiners: [],
         recruitUntil: now + cfg.recruitSeconds * 1000,
         minPlayers: plugin.meta.minPlayers,
-        maxPlayers: Math.min(plugin.meta.maxPlayers, cfg.maxPlayers || plugin.meta.maxPlayers),
+        maxPlayers: playerCap,
         gameName: plugin.meta.name
       };
       this.games.set(chatKey, {

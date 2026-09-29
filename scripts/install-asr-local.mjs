@@ -13,6 +13,8 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REPO_URL = 'https://github.com/ggml-org/whisper.cpp.git';
+/** 构建用的固定提交（2026-09-29 master）。默认分支会变，构建产物却是长期运行的。 */
+const WHISPER_COMMIT = '6e4ab854f67f743900934a703d5603419384c961';
 
 /** 模型源：默认 hf-mirror（国内可直连），失败自动回退官方 HF。两者路径结构一致。 */
 export const MODEL_MIRRORS = ['https://hf-mirror.com', 'https://huggingface.co'];
@@ -182,7 +184,16 @@ async function main() {
     }
     if (!fs.existsSync(srcDir)) {
       console.log('· 拉取 whisper.cpp 源码…');
+      // 固定到具体提交再构建：默认分支可被强推/投毒，而这份源码会被编译成二进制、
+      // 以服务账号长期运行（2026-09-29 审查 P2）。升级就改这个常量，
+      // 改完必须重新验证"构建成功 + 一条转写能出结果"。
       run('git', ['clone', '--depth', '1', REPO_URL, srcDir]);
+      run('git', ['fetch', '--depth', '1', 'origin', WHISPER_COMMIT], { cwd: srcDir });
+      run('git', ['checkout', '--detach', WHISPER_COMMIT], { cwd: srcDir });
+      const head = run('git', ['rev-parse', 'HEAD'], { cwd: srcDir, quiet: true }).stdout.trim();
+      if (head !== WHISPER_COMMIT) {
+        throw new Error(`whisper.cpp 检出提交不一致（期望 ${WHISPER_COMMIT}，实际 ${head}）`);
+      }
     } else {
       console.log('· 源码已在，直接用');
     }

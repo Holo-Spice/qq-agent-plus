@@ -840,3 +840,50 @@ test('数字炸弹：边界与文案（炸弹=1 / 炸弹=100、区间提示、�
   assert.equal(chat.state.high, v.high);
   assert.equal(chat.effects.length, 0);
 });
+
+test('管理台视角：status 列出进行中的局，stop 就地结束并播报', async () => {
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 0, games: ['werewolf'] } });
+  const r = await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const st = w.mgr.status();
+  assert.equal(st.enabled, true);
+  assert.equal(st.running.length, 1, JSON.stringify(st));
+  assert.equal(st.running[0].chatKey, 'group:1');
+  assert.match(st.running[0].name, /狼人杀/);
+  assert.match(String(st.running[0].summary || ''), /狼人杀/, '面板要能显示公开摘要：' + st.running[0].summary);
+  w.sent.length = 0;
+  const out = await w.mgr.stop('group:1', '管理员在控制台结束');
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal(w.mgr.status().running.length, 0, '结束后不该还在列表里');
+  assert.ok(
+    w.sent.some((x) => x.chatKey === 'group:1' && /到此为止/.test(x.msgs[0])),
+    '结束要往群里发一句说明：' + JSON.stringify(w.sent.map((x) => x.msgs[0]))
+  );
+});
+
+test('报名快截止时提一句「还差 N 人」（只提一次；窗口太短不提）', async () => {
+  const w = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 30, games: ['werewolf'] } });
+  await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  say(w.store, 'u1', '群友1', '我玩');            // 只来 1 个人
+  await w.mgr.tick();
+  w.sent.length = 0;
+  const until = Number(w.mgr.games.get('group:1').state.recruitUntil);
+  w.setClock(until - 10 * 1000);                  // 距截止 10 秒
+  await w.mgr.tick();
+  const hits = w.sent.filter((x) => x.chatKey === 'group:1' && /报名马上截止/.test(x.msgs[0]));
+  assert.equal(hits.length, 1, JSON.stringify(w.sent.map((x) => x.msgs[0])));
+  assert.match(hits[0].msgs[0], /现在 1 人，还差 5 人/, hits[0].msgs[0]);
+  await w.mgr.tick();
+  assert.equal(w.sent.filter((x) => /报名马上截止/.test(x.msgs[0])).length, 1, '只提一次');
+  // 窗口太短（<30 秒）不提：避免刚挂出去就喊"马上截止"
+  const w2 = makeWorld({ players: 6 });
+  updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 10, games: ['werewolf'] } });
+  await w2.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
+  w2.sent.length = 0;
+  const until2 = Number(w2.mgr.games.get('group:1').state.recruitUntil);
+  w2.setClock(until2 - 5 * 1000);
+  await w2.mgr.tick();
+  assert.equal(w2.sent.filter((x) => /报名马上截止/.test(x.msgs[0])).length, 0, '10 秒窗口不提');
+});

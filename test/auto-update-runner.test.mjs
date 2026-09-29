@@ -674,7 +674,9 @@ esac
       QQ_AGENT_UPDATE_NPM: fakeNpm,
       FAKE_DEPLOY_MARKER: marker,
       QQ_AGENT_GITHUB_API: github.base,
-      QQ_AGENT_CODELOAD: github.base
+      QQ_AGENT_CODELOAD: github.base,
+      // 明文基地址要显式放行（桩件是 http://127.0.0.1）；生产默认要求 HTTPS
+      QQ_AGENT_CODELOAD_ALLOW_INSECURE: '1'
     }
   });
   assert.equal(result.status, 0, result.stderr);
@@ -796,7 +798,9 @@ esac
       FAKE_DEPLOY_MARKER: marker,
       FAKE_GIT_LOG: gitLog,
       QQ_AGENT_GITHUB_API: github.base,
-      QQ_AGENT_CODELOAD: github.base
+      QQ_AGENT_CODELOAD: github.base,
+      // 明文基地址要显式放行（桩件是 http://127.0.0.1）；生产默认要求 HTTPS
+      QQ_AGENT_CODELOAD_ALLOW_INSECURE: '1'
     }
   });
   assert.equal(result.status, 0, result.stderr);
@@ -913,7 +917,9 @@ esac
       QQ_AGENT_UPDATE_NPM: fakeNpm,
       FAKE_DEPLOY_MARKER: marker,
       QQ_AGENT_GITHUB_API: github.base,
-      QQ_AGENT_CODELOAD: github.base
+      QQ_AGENT_CODELOAD: github.base,
+      // 明文基地址要显式放行（桩件是 http://127.0.0.1）；生产默认要求 HTTPS
+      QQ_AGENT_CODELOAD_ALLOW_INSECURE: '1'
     }
   });
   assert.equal(result.status, 0, result.stderr);

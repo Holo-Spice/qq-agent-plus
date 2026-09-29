@@ -28,7 +28,7 @@ function writeJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.tmp`;
   try { fs.rmSync(tmp, { force: true }); } catch { /* 不存在就算了 */ }
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 1), { encoding: 'utf8', mode: 0o600 });
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 1), { encoding: 'utf8', mode: 0o600, flush: true });
   fs.renameSync(tmp, file);
   fs.chmodSync(file, 0o600);
 }
@@ -131,7 +131,10 @@ export class MemoryStore {
     // 让"记忆页手工改写"成为唯一不可恢复的破坏性写入。
     const member = this.replaceMember(chatKey, userId, name, impressions, { origin: 'manual' });
     const notes = { ...(getConfig().memberNotes || {}) }; const n = String(note ?? '').trim();
-    if (n) notes[String(userId)] = n; else delete notes[String(userId)]; updateConfig({ memberNotes: notes });
+    // __replace__ 整体替换：普通深合并删不掉键，"清空备注"会被服务端并回原值
+    // （2026-09-29 审查 P1，与 ui/app.js 的群成员备注弹窗同一个根因）。
+    if (n) notes[String(userId)] = n; else delete notes[String(userId)];
+    updateConfig({ memberNotes: { __replace__: notes } });
     return { ...member, note: n };
   }
   // options 要透传：memory.js 的子类会传 { origin }（整理=consolidated / 控制台手动=manual），

@@ -3019,6 +3019,18 @@ input[type=checkbox], input[type=radio] {
 .reminder-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; color: var(--text); }
 .reminder-row .btn { flex: 0 0 auto; }
 
+/* ── 群游戏「正在进行的局」行 ── */
+.gg-row {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 6px 8px; border-radius: 8px; font-size: 13px;
+}
+.gg-row:nth-child(odd) { background: color-mix(in srgb, var(--bg-3) 55%, transparent); }
+.gg-chat { flex: 0 0 auto; max-width: 26%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
+.gg-name { flex: 0 0 auto; white-space: nowrap; font-weight: 600; color: var(--text); }
+.gg-age { flex: 0 0 auto; white-space: nowrap; color: var(--muted); font-size: 12px; }
+.gg-summary { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; color: var(--text); }
+.gg-row .btn { flex: 0 0 auto; }
+
 /* ── 概览数字（当前版本 / 目标版本 / 上次检查 …）── */
 .update-deploy-summary {
   display: grid;

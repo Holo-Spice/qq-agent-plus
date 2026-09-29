@@ -969,6 +969,27 @@ export function incidentPilotEnabled(cfg = getConfig()) {
   return cfg?.incidentPilot?.enabled === true;
 }
 
+/** 控制台可粘贴的长文本上界（见 updateConfig 里的说明）。 */
+const PERSONA_ROLE_TEXT_MAX = 20000;
+const PERSONA_CUSTOM_RULES_MAX = 4000;
+const MEMBER_NOTE_MAX = 200;
+const MEMBER_NOTES_MAX = 2000;
+
+/** 备注表归一化：值去空白并截断，丢空值，条目数设上限（防止备注表无限膨胀）。 */
+function clampMemberNotes(value) {
+  if (!isPlainObject(value)) return {};
+  const out = {};
+  let count = 0;
+  for (const [key, note] of Object.entries(value)) {
+    if (count >= MEMBER_NOTES_MAX) break;
+    const text = String(note ?? '').trim();
+    if (!text) continue;
+    out[String(key)] = text.slice(0, MEMBER_NOTE_MAX);
+    count += 1;
+  }
+  return out;
+}
+
 /** 更新并持久化配置（浅合并到当前值；patch 里传对象字段则整体替换该字段）。 */
 export function updateConfig(patch) {
   // 人设段传了 null / 数组 / 标量（手写 API 调用、坏客户端）时当"没改人设"处理：
@@ -989,6 +1010,19 @@ export function updateConfig(patch) {
   if (patchPersona?.templateId !== undefined || patchPersona?.roleText === undefined) {
     applyPersonaTemplate(next);
   }
+  // 长文本字段在"写入这一侧"设上界（放在 applyPersonaTemplate 之后，保证最终值也被夹住）：
+  // roleText / customRules 每次请求都会进系统提示词，memberNotes 会进控制台回包与 config.json，
+  // 而 /api/config 唯一的兜底是 2MB 请求体 —— 一次粘贴事故就能把模型上下文打爆，
+  // 并让之后每次保存都搬运这几百 KB（2026-09-29 审查 P2）。
+  // 触发条件是"这次 patch 带了该字段"：不带就不动它，所以无关保存不会改写存量值。
+  // 注意 memberNotes 是按整张表夹的：控制台每次保存都整表回传，做不到只夹被改的那个键。
+  if (patchPersona.roleText !== undefined && typeof next.persona.roleText === 'string') {
+    next.persona.roleText = next.persona.roleText.slice(0, PERSONA_ROLE_TEXT_MAX);
+  }
+  if (patchPersona.customRules !== undefined && typeof next.persona.customRules === 'string') {
+    next.persona.customRules = next.persona.customRules.slice(0, PERSONA_CUSTOM_RULES_MAX);
+  }
+  if ('memberNotes' in safePatch) next.memberNotes = clampMemberNotes(next.memberNotes);
   next.tokenSaver = { ...(next.tokenSaver || {}), mode: normalizeTokenSaverMode(next.tokenSaver?.mode) };
   next.timeControl = normalizeTimeControl(next.timeControl);
   next.dailyMoments.scheduleWindows = normalizeMomentWindows(next.dailyMoments.scheduleWindows);
@@ -1343,7 +1377,9 @@ export function updateConfig(patch) {
 
   fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
   const tmp = `${CONFIG_FILE}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(currentConfig, null, 2), { mode: 0o600 });
+  // flush：rename 之前先把数据落盘，否则断电后可能拿到"改名成功、内容为空"的 config.json
+  // （进程被杀不受影响，只有真断电会中招；2026-09-29 审查 P2）
+  fs.writeFileSync(tmp, JSON.stringify(currentConfig, null, 2), { mode: 0o600, flush: true });
   fs.renameSync(tmp, CONFIG_FILE);
   // btrfs（部分 NAS）上 writeFileSync 的 mode 参数会丢失（0600→0700）：
   // 显式 chmod 兜底，不依赖"创建时 mode"在所有文件系统上都生效（Issue #11）。
@@ -1402,7 +1438,7 @@ export function scheduleConfigSave() {
       const tmp = `${CONFIG_FILE}.tmp`;
       // config.json 含模型 Key 与控制台 Token，防抖路径也必须锁 0600，
       // 否则 rename 会把 updateConfig 落好的 0600 打回 umask 默认（0664）
-      fs.writeFileSync(tmp, JSON.stringify(getConfig(), null, 2), { mode: 0o600 });
+      fs.writeFileSync(tmp, JSON.stringify(getConfig(), null, 2), { mode: 0o600, flush: true });
       fs.renameSync(tmp, CONFIG_FILE);
       fs.chmodSync(CONFIG_FILE, 0o600); // btrfs 兜底（Issue #11：mode 参数在该文件系统上会丢失）
     } catch (error) {

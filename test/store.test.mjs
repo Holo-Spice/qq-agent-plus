@@ -391,4 +391,19 @@ describe('ChatStore', () => {
     assert.equal(store.getConversationThread('group:1'), null);
     assert.equal(store.latestThreadCheckpoint('group:1'), null);
   });
+
+  it('exposes a lease probe for callers that must not dispatch while a lease is open', (t) => {
+    // 背景（2026-09-29 审查 P1）：到点派发提醒的预检必须在 wake 之前知道"这个会话是不是已经
+    // 有未回收的租约"——claimUnread 会返回 null 让 wake 静默空转，而调用方随后会把提醒
+    // 标记成已触发。硬崩溃留下的 leased 残行正好命中这个窗口。
+    const { store } = fixture(t);
+    append(store, 1);
+    assert.equal(store.hasLeasedRun('group:1'), false);
+    const lease = store.claimUnread('group:1');
+    assert.equal(store.hasLeasedRun('group:1'), true);
+    assert.equal(store.claimUnread('group:1'), null, '有租约时领不到新批次');
+    store.ackLease(lease.id);
+    assert.equal(store.hasLeasedRun('group:1'), false);
+    assert.equal(store.hasLeasedRun('group:2'), false, '只作用于指定会话');
+  });
 });

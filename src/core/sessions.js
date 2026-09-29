@@ -55,11 +55,44 @@ export class SessionRegistry {
       const pick = this.keepFiles > 0 ? files.slice(0, this.keepFiles) : files;
       for (const f of pick) {
         try {
-          const data = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf8'));
-          if (data?.id) this.index.push(this.#summary(data));
+          const file = path.join(SESSIONS_DIR, f);
+          const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+          if (data?.id) {
+            // 进程刚起来，不可能有任何会话真的在跑：盘上残留的 running/waiting 只可能来自
+            // 硬崩溃（SIGTERM 优雅退出会由 abortAll 收成 aborted/error）。不回收的话控制台
+            // 一直显示"运行中"、开机自动跟随还会选中它并持续轮询一个永不变化的详情
+            // （daily-moments / qzone-interactions / identity-store 都做了同样的启动回收；
+            // 2026-09-29 审查 P2）。文件一并改回，否则列表说 aborted、详情（读文件）说 running。
+            if (data.status === 'running' || data.status === 'waiting') {
+              data.status = 'aborted';
+              data.waitUntil = null;
+              // endedAt 也要补：控制台的详情头用它区分"· 结束"与"· 进行中"，
+              // 只改 status 会出现"中止徽标 + 进行中"同屏矛盾（2026-09-29 审查 P2）。
+              data.endedAt = data.endedAt ?? Date.now();
+              this.#rewriteSessionFile(file, data);
+            }
+            this.index.push(this.#summary(data));
+          }
         } catch { /* 跳过坏文件 */ }
       }
     } catch { /* 目录还没建 */ }
+  }
+
+  /**
+   * 只改写会话文件本身（原子替换 + 0600）。
+   * 不走 #persist：它会在"非运行态"时累加今日用量，而启动回收不是一次真实运行，
+   * 每重启一次就把这轮用量重复记一次。
+   */
+  #rewriteSessionFile(file, session) {
+    try {
+      const tmp = `${file}.${process.pid}.tmp`;
+      try { fs.rmSync(tmp, { force: true }); } catch { /* 不存在就算了 */ }
+      fs.writeFileSync(tmp, JSON.stringify(session, null, 1), { encoding: 'utf8', mode: 0o600, flush: true });
+      fs.renameSync(tmp, file);
+      fs.chmodSync(file, 0o600);
+    } catch (error) {
+      console.error('[sessions] 回收崩溃残留的运行状态失败:', error?.message ?? error);
+    }
   }
 
   #summary(s) {
