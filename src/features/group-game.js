@@ -188,7 +188,10 @@ export class GroupGameManager {
    * 那时他的私聊按普通聊天处理，同样不转给别的局。
    */
   #privateCandidates(chatKey) {
-    // 不限定 \d+：生产里 uid 是 QQ 号，但测试世界用 u1/u2 这类 id（同一套逻辑）
+    // 入站（收玩家的私聊行动）不限定 \d+：生产里 uid 是 QQ 号，但测试世界用 u1/u2 这类 id。
+    // 注意出站方向不对称：发送时的「游戏期间私聊豁免」只对**纯数字 QQ 号**生效
+    // （src/core/access.js 的 assertCanSend 那道 /^\d+$/ 是私聊命名空间的安全网）——
+    // 所以非数字 id 的世界里，行动收得进、身份/回执发不出（2026-09-29 审查 P2）。
     const m = /^private:([^:\s]+)$/.exec(String(chatKey || ''));
     if (!m) return [];
     const who = m[1];
@@ -381,13 +384,13 @@ export class GroupGameManager {
   /** 开局。players 缺省用最近活跃成员；返回 { ok, text }（text 是可直接发给群里的说明）。 */
   async start({ chatKey, gameId, players = null }) {
     const cfg = this.#cfg();
-    if (!cfg.enabled) return { ok: false, error: '群游戏未启用（控制台 → 实验性设置里打开）' };
+    if (!cfg.enabled) return { ok: false, error: '群游戏未启用（设置 → 实验功能里打开）' };
     if (!cfg.chats.includes(chatKey)) return { ok: false, error: '这个群不在群游戏白名单里' };
     const plugin = PLUGINS.get(String(gameId || ''));
     if (!plugin) return { ok: false, error: `未知游戏：${gameId || '（没给）'}。可选：${[...PLUGINS.keys()].join(' / ')}` };
     // 控制台勾选白名单：没勾的游戏不许开（以前这个勾选是死控件，2026-09-29 审查 P1）
     if (!cfg.games.includes(plugin.meta.id)) {
-      return { ok: false, error: `「${plugin.meta.name}」在控制台没被允许（设置 → 实验功能 → 群游戏里勾上再开）` };
+      return { ok: false, error: `「${plugin.meta.name}」在控制台没被允许（设置 → 群游戏里勾上再开）` };
     }
     if (this.games.has(chatKey)) return { ok: false, error: '这个群已经有一局在进行了（先 stop 或等它结束）' };
     if (plugin.meta.needsPrivate && !cfg.allowPrivateInvite) {

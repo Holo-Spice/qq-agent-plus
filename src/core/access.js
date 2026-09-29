@@ -29,6 +29,9 @@ export function assertCanSend(chatKey, signal, { gameScoped = false } = {}) {
   if (!isTimeActive(chatKey)) throw new Error('非活跃时间，禁止发送消息');
   const cfg = getConfig();
   const [kind, id] = String(chatKey).split(':');
+  // /^\d+$/ 是有意收紧的：私聊命名空间在生产里就是 QQ 号，这道判据确保豁免只作用于它。
+  // 副作用：非数字 id 的测试世界拿不到豁免（入站仍收得到行动，出站发不出身份/回执），
+  // 排查时别把它当成"私聊白名单配错了"（2026-09-29 审查 P2）。
   if (gameScoped && kind === 'private' && /^\d+$/.test(id || '')) {
     if (cfg.runtime?.mode !== 'active' || cfg.runtime?.paused) {
       throw new Error('Send blocked: observe/paused mode or chat not allowed');

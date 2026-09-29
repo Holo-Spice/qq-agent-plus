@@ -6418,6 +6418,7 @@ function renderSettingsSidebar() {
     ['asr', '语音转文字'],
     ['memory', '记忆'],
     ['experiments', '实验功能'],
+    ['groupGame', '群游戏'],
     ['moments', '每日动态'],
     ['reminders', '定时提醒'],
     ['qzone-interactions', '动态互动'],
@@ -6457,7 +6458,7 @@ function renderSettings() {
   bindCrossSectionControls();
 }
 
-// 跨页控件：群勾选列表与群日报试跑按钮分布在"实验功能 / 每日动态"两个页面上，
+// 跨页控件：群勾选列表与群日报试跑按钮分布在"群游戏 / 每日动态"两个页面上，
 // bindSettingsEvents 里按 settingsSection 分块，只有当前页会执行 —— 放那里会出现
 // "切到该页也一直显示正在读取群列表"（2026-09-28 实测：列表永远不填充）。
 // 所以这一类"哪个页面都要能绑"的控件单独在这里、每次渲染都跑一遍。
@@ -6547,6 +6548,7 @@ function renderSettingsSection(c) {
     asr: () => renderAsrSection(c),
     memory: () => renderMemorySettingsSection(c),
     experiments: () => renderExperimentalSettingsSection(c),
+    groupGame: () => renderGroupGameSection(c),
     moments: () => renderDailyMomentsSection(c),
     reminders: () => renderRemindersSection(c),
     'qzone-interactions': () => renderQzoneInteractionSection(c),
@@ -7163,55 +7165,15 @@ function renderExperimentalSettingsSection(c) {
             </button>
           </span>
         </div>
+        <div class="control-key-row">
+          <span><strong>群游戏</strong><small id="experiment-groupgame-state">${c.groupGame?.enabled === true ? '已启用' : '已停用'} · 实验中</small></span>
+          <span class="settings-actions" style="margin:0">
+            <label class="checkbox-row" style="margin:0"><input type="checkbox" id="cfg-game-enabled" ${c.groupGame?.enabled === true ? 'checked' : ''} /><span>启用</span></label>
+          </span>
+        </div>
       </div>
-      <h3 style="margin-top:18px">群游戏（数字炸弹 / 谁是卧底）</h3>
-      <div class="hint">系统负责轮次、计票与判定，模型只负责氛围与解说；卧底的词只走私聊，公开摘要里不含身份。
-        默认关、白名单制、每群同时一局。</div>
-      <div class="checkbox-row"><input type="checkbox" id="cfg-game-enabled" ${c.groupGame?.enabled === true ? 'checked' : ''} />
-        <label for="cfg-game-enabled">启用群游戏</label></div>
-      <div class="field-row">
-        <div class="field"><label>允许开局的群（勾选机器人已加入的群）</label>
-          <div id="cfg-game-chats-box" class="group-checklist"><span class="muted">正在读取群列表…</span></div></div>
-        <div class="field"><label for="cfg-game-daily">每群每天最多开局数</label>
-          <input type="number" id="cfg-game-daily" min="1" max="50" value="${esc(c.groupGame?.dailyLimitPerChat ?? 6)}" /></div>
-      </div>
-      <div class="checkbox-row"><input type="checkbox" id="cfg-game-private" ${c.groupGame?.allowPrivateInvite === true ? 'checked' : ''} />
-        <label for="cfg-game-private">允许私聊发词/身份（谁是卧底与狼人杀都必需；只发给报名/在册的人，失败不重试）</label></div>
-      <div class="field-row">
-        <div class="field"><label for="cfg-game-maxplayers">每局人数上限</label>
-          <input type="number" id="cfg-game-maxplayers" min="2" max="30" value="${esc(c.groupGame?.maxPlayers ?? 10)}" /></div>
-        <div class="field"><label for="cfg-game-round">单回合超时（秒，0=插件默认）</label>
-          <input type="number" id="cfg-game-round" min="0" max="600" value="${esc(c.groupGame?.roundSeconds ?? 0)}" /></div>
-        <div class="field"><label for="cfg-game-discuss">白天讨论时长（秒，0=插件默认 120）</label>
-          <input type="number" id="cfg-game-discuss" min="0" max="600" value="${esc(c.groupGame?.discussSeconds ?? 0)}" /></div>
-        <div class="field"><label for="cfg-game-recruit">开局报名时长（秒，0=不报名直接发牌）</label>
-          <input type="number" id="cfg-game-recruit" min="0" max="300" value="${esc(c.groupGame?.recruitSeconds ?? 45)}" /></div>
-      </div>
-      <div class="hint">需要私聊的游戏（谁是卧底/狼人杀）默认先**报名**：想玩的在群里发一句「我玩」或「报名」，
-        够人数才发牌、发牌才发私聊——不会把只是在群里插话的围观者拉进局（把报名时长设 0 就回到"按最近发言者直接发牌"）。</div>
-      <div class="hint">白天讨论到点会自动进投票；中途**超过半数**存活玩家说一句「投吧 / 直接投」也会立刻开投
-        （说「投 3」这种带目标的算投票，不算想开投）。讨论时长与单回合超时**小于 30 秒按 30 秒生效**（0 = 用插件默认）。</div>
-      <div class="checkbox-row"><input type="checkbox" id="cfg-game-bomb" ${(Array.isArray(c.groupGame?.games) ? c.groupGame.games : ['number-bomb', 'undercover']).includes('number-bomb') ? 'checked' : ''} />
-        <label for="cfg-game-bomb">允许「数字炸弹」</label></div>
-      <div class="checkbox-row"><input type="checkbox" id="cfg-game-undercover" ${(Array.isArray(c.groupGame?.games) ? c.groupGame.games : ['number-bomb', 'undercover']).includes('undercover') ? 'checked' : ''} />
-        <label for="cfg-game-undercover">允许「谁是卧底」</label></div>
-      <div class="checkbox-row"><input type="checkbox" id="cfg-game-werewolf" ${(Array.isArray(c.groupGame?.games) ? c.groupGame.games : []).includes('werewolf') ? 'checked' : ''} />
-        <label for="cfg-game-werewolf">允许「狼人杀」（6~9 人，角色：狼/预言家/女巫/守卫/平民；夜里私聊提交行动，白天讨论投票；整局都在私聊，见下面的豁免开关）</label></div>
-      <div class="checkbox-row"><input type="checkbox" id="cfg-game-reveal" ${c.groupGame?.revealWords !== false ? 'checked' : ''} />
-        <label for="cfg-game-reveal">谁是卧底/狼人杀结算时公开词与身份（关掉只公布胜方）</label></div>
-      <div class="checkbox-row"><input type="checkbox" id="cfg-game-privatedm" ${c.groupGame?.allowGamePrivateDm === true ? 'checked' : ''} />
-        <label for="cfg-game-privatedm">游戏期间私聊豁免（只对局内玩家；默认关）</label></div>
-      <div class="hint">私聊发送的两条路，任选其一即可让游戏跑起来：
-        <b>① 白名单/加好友（推荐，最稳）</b>——把想玩的人加进「聊天白名单 → 私聊」，顺手加个好友更好；
-        <b>② 打开上面的「游戏期间私聊豁免」</b>——只在本局进行中、只发给报名参加的那几个人、只发引擎文本，
-        模型自己发消息仍受白名单限制（管理员屏蔽的人永远发不进）。谁是卧底只有发词一条私聊；狼人杀整局都要私聊，
-        没有 ① 或 ② 就只有白名单里的人能收到。</div>
-      <h3 style="margin-top:18px">正在进行的局</h3>
-      <div id="gg-running"><span class="muted">正在读取…</span></div>
-      <div class="settings-actions">
-        <button class="btn btn-small" id="gg-refresh-btn" type="button">刷新</button>
-        <span class="muted">局跑歪了可以就地结束（等效于让机器人执行「结束游戏」；结束时会在群里发一句说明）</span>
-      </div>
+      <div class="hint">群游戏（数字炸弹 / 谁是卧底 / 狼人杀）的详细设置与「正在进行的局」在 <b>设置 → 群游戏</b>；
+        这里只控制它是否运行（生命周期）。默认关、白名单制、每群同时一局。</div>
       <div class="hint" id="experiment-launch-result"></div>
     </section>`;
 }
@@ -8481,6 +8443,66 @@ function renderDailyMomentsSection(c) {
 // ── 定时提醒（设置 → 定时提醒）──────────────────────────────────────────
 // 提醒本身是聊天里说"X 点提醒我 Y"由模型用 remind 工具立的；这一页管两件事：
 // 开关（关掉后工具与到期派发都停，数据保留）和已立提醒的查看/取消。
+/**
+ * 群游戏设置分区（2026-09-29 审查 P2）：这里放全部群游戏配置与「正在进行的局」。
+ * 按 `docs/EXPERIMENTAL_FEATURE_STANDARD.md`，「实验功能」页只保留启停与转正动作，
+ * 需要更多配置的特性必须有自己的页面（照本文件 renderRemindersSection 的样子做）。
+ * 启停开关仍在「实验功能」页（那是生命周期控制面），这里只显示它的状态。
+ */
+function renderGroupGameSection(c) {
+  const games = Array.isArray(c.groupGame?.games) ? c.groupGame.games : ['number-bomb', 'undercover'];
+  const enabled = c.groupGame?.enabled === true;
+  return `
+    <h3 id="settings-groupgame">群游戏</h3>
+    <div class="hint">系统负责轮次、计票与判定，模型只负责氛围与解说；卧底的词只走私聊，公开摘要里不含身份。
+      默认关、白名单制、每群同时一局。</div>
+    <div class="muted" style="margin:6px 0 10px;font-size:12px">当前状态：<b>${enabled ? '已启用' : '已停用'}</b>
+      —— 开关在「实验功能」页（生命周期），这里是详细设置与局面。</div>
+    <div class="field-row">
+      <div class="field"><label>允许开局的群（勾选机器人已加入的群）</label>
+        <div id="cfg-game-chats-box" class="group-checklist"><span class="muted">正在读取群列表…</span></div></div>
+      <div class="field"><label for="cfg-game-daily">每群每天最多开局数</label>
+        <input type="number" id="cfg-game-daily" min="1" max="50" value="${esc(c.groupGame?.dailyLimitPerChat ?? 6)}" /></div>
+    </div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-game-private" ${c.groupGame?.allowPrivateInvite === true ? 'checked' : ''} />
+      <label for="cfg-game-private">允许私聊发词/身份（谁是卧底与狼人杀都必需；只发给报名/在册的人，失败不重试）</label></div>
+    <div class="field-row">
+      <div class="field"><label for="cfg-game-maxplayers">每局人数上限</label>
+        <input type="number" id="cfg-game-maxplayers" min="2" max="30" value="${esc(c.groupGame?.maxPlayers ?? 10)}" /></div>
+      <div class="field"><label for="cfg-game-round">单回合超时（秒，0=插件默认）</label>
+        <input type="number" id="cfg-game-round" min="0" max="600" value="${esc(c.groupGame?.roundSeconds ?? 0)}" /></div>
+      <div class="field"><label for="cfg-game-discuss">白天讨论时长（秒，0=插件默认 120）</label>
+        <input type="number" id="cfg-game-discuss" min="0" max="600" value="${esc(c.groupGame?.discussSeconds ?? 0)}" /></div>
+      <div class="field"><label for="cfg-game-recruit">开局报名时长（秒，0=不报名直接发牌）</label>
+        <input type="number" id="cfg-game-recruit" min="0" max="300" value="${esc(c.groupGame?.recruitSeconds ?? 45)}" /></div>
+    </div>
+    <div class="hint">需要私聊的游戏（谁是卧底/狼人杀）默认先**报名**：想玩的在群里发一句「我玩」或「报名」，
+      够人数才发牌、发牌才发私聊——不会把只是在群里插话的围观者拉进局（把报名时长设 0 就回到"按最近发言者直接发牌"）。</div>
+    <div class="hint">白天讨论到点会自动进投票；中途**超过半数**存活玩家说一句「投吧 / 直接投」也会立刻开投
+      （说「投 3」这种带目标的算投票，不算想开投）。讨论时长与单回合超时**小于 30 秒按 30 秒生效**（0 = 用插件默认）。</div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-game-bomb" ${games.includes('number-bomb') ? 'checked' : ''} />
+      <label for="cfg-game-bomb">允许「数字炸弹」</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-game-undercover" ${games.includes('undercover') ? 'checked' : ''} />
+      <label for="cfg-game-undercover">允许「谁是卧底」</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-game-werewolf" ${(Array.isArray(c.groupGame?.games) ? c.groupGame.games : []).includes('werewolf') ? 'checked' : ''} />
+      <label for="cfg-game-werewolf">允许「狼人杀」（6~9 人，角色：狼/预言家/女巫/守卫/平民；夜里私聊提交行动，白天讨论投票；整局都在私聊，见下面的豁免开关）</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-game-reveal" ${c.groupGame?.revealWords !== false ? 'checked' : ''} />
+      <label for="cfg-game-reveal">谁是卧底/狼人杀结算时公开词与身份（关掉只公布胜方）</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-game-privatedm" ${c.groupGame?.allowGamePrivateDm === true ? 'checked' : ''} />
+      <label for="cfg-game-privatedm">游戏期间私聊豁免（只对局内玩家；默认关）</label></div>
+    <div class="hint">私聊发送的两条路，任选其一即可让游戏跑起来：
+      <b>① 白名单/加好友（推荐，最稳）</b>——把想玩的人加进「聊天白名单 → 私聊」，顺手加个好友更好；
+      <b>② 打开本页的「游戏期间私聊豁免」</b>——只在本局进行中、只发给报名参加的那几个人、只发引擎文本，
+      模型自己发消息仍受白名单限制（管理员屏蔽的人永远发不进）。谁是卧底只有发词一条私聊；狼人杀整局都要私聊，
+      没有 ① 或 ② 就只有白名单里的人能收到。</div>
+    <h3 style="margin-top:18px">正在进行的局</h3>
+    <div id="gg-running"><span class="muted">正在读取…</span></div>
+    <div class="settings-actions">
+      <button class="btn btn-small" id="gg-refresh-btn" type="button">刷新</button>
+      <span class="muted">局跑歪了可以就地结束（等效于让机器人执行「结束游戏」；结束时会在群里发一句说明）</span>
+    </div>`;
+}
+
 function renderRemindersSection(c) {
   return `
     <h3 id="settings-reminders">定时提醒</h3>
@@ -8533,7 +8555,7 @@ async function loadGroupGameView() {
     return;
   }
   if (!r?.enabled) {
-    box.innerHTML = '<span class="muted">群游戏当前是关闭的（上面的开关打开后这里才会显示局面）</span>';
+    box.innerHTML = '<span class="muted">群游戏当前是关闭的（在「设置 → 实验功能」打开开关后，这里才会显示进行中的局）</span>';
     return;
   }
   const list = Array.isArray(r.running) ? r.running : [];
@@ -12261,26 +12283,34 @@ async function saveConfig({ quiet = false } = {}) {
       ...(c.incidentPilot || {}),
       enabled: chk('#cfg-incident-pilot-enabled', c.incidentPilot?.enabled === true)
     };
-      patch.groupGame = {
-        ...(c.groupGame || {}),
-        enabled: chk('#cfg-game-enabled', c.groupGame?.enabled === true),
-        allowPrivateInvite: chk('#cfg-game-private', c.groupGame?.allowPrivateInvite === true),
-        // 游戏期间私聊豁免：只影响引擎发给"本局在册玩家"的私聊；模型发送永远受白名单
-        allowGamePrivateDm: chk('#cfg-game-privatedm', c.groupGame?.allowGamePrivateDm === true),
-        dailyLimitPerChat: clampInt(val('#cfg-game-daily', c.groupGame?.dailyLimitPerChat ?? 6), 1, 50, 6),
-        maxPlayers: clampInt(val('#cfg-game-maxplayers', c.groupGame?.maxPlayers ?? 10), 2, 30, 10),
-        roundSeconds: clampInt(val('#cfg-game-round', c.groupGame?.roundSeconds ?? 0), 0, 600, 0),
-        discussSeconds: clampInt(val('#cfg-game-discuss', c.groupGame?.discussSeconds ?? 0), 0, 600, 0),
-        // 清空输入框 = 回到默认 45（与引擎"键缺失按 45"一致）；写 0 才是关闭报名
-        recruitSeconds: clampInt(val('#cfg-game-recruit', c.groupGame?.recruitSeconds ?? 45) || 45, 0, 300, 45),
-        revealWords: chk('#cfg-game-reveal', c.groupGame?.revealWords !== false),
-        games: [
-          ['number-bomb', '#cfg-game-bomb'],
-          ['undercover', '#cfg-game-undercover'],
-          ['werewolf', '#cfg-game-werewolf']
-        ].filter(([, sel]) => chk(sel, sel === '#cfg-game-werewolf' ? false : true)).map(([id]) => id),
-        ...(pickedGroups('cfg-game-chats-box') ? { chats: pickedGroups('cfg-game-chats-box') } : {})
-      };
+    // 群游戏在本页只保留生命周期开关；详细配置与「正在进行的局」在「设置 → 群游戏」。
+    // 两个页面各写一半 patch 段容易漏字段，所以这里只写 enabled 一个字段。
+    patch.groupGame = {
+      ...(c.groupGame || {}),
+      enabled: chk('#cfg-game-enabled', c.groupGame?.enabled === true)
+    };
+  }
+
+  if (sec === 'groupGame') {
+    patch.groupGame = {
+      ...(c.groupGame || {}),
+      allowPrivateInvite: chk('#cfg-game-private', c.groupGame?.allowPrivateInvite === true),
+      // 游戏期间私聊豁免：只影响引擎发给"本局在册玩家"的私聊；模型发送永远受白名单
+      allowGamePrivateDm: chk('#cfg-game-privatedm', c.groupGame?.allowGamePrivateDm === true),
+      dailyLimitPerChat: clampInt(val('#cfg-game-daily', c.groupGame?.dailyLimitPerChat ?? 6), 1, 50, 6),
+      maxPlayers: clampInt(val('#cfg-game-maxplayers', c.groupGame?.maxPlayers ?? 10), 2, 30, 10),
+      roundSeconds: clampInt(val('#cfg-game-round', c.groupGame?.roundSeconds ?? 0), 0, 600, 0),
+      discussSeconds: clampInt(val('#cfg-game-discuss', c.groupGame?.discussSeconds ?? 0), 0, 600, 0),
+      // 清空输入框 = 回到默认 45（与引擎"键缺失按 45"一致）；写 0 才是关闭报名
+      recruitSeconds: clampInt(val('#cfg-game-recruit', c.groupGame?.recruitSeconds ?? 45) || 45, 0, 300, 45),
+      revealWords: chk('#cfg-game-reveal', c.groupGame?.revealWords !== false),
+      games: [
+        ['number-bomb', '#cfg-game-bomb'],
+        ['undercover', '#cfg-game-undercover'],
+        ['werewolf', '#cfg-game-werewolf']
+      ].filter(([, sel]) => chk(sel, sel === '#cfg-game-werewolf' ? false : true)).map(([id]) => id),
+      ...(pickedGroups('cfg-game-chats-box') ? { chats: pickedGroups('cfg-game-chats-box') } : {})
+    };
   }
 
   if (sec === 'reminders') {
