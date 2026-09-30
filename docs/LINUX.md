@@ -201,6 +201,36 @@ systemd validation or health checking fails, the installer restores the previous
 code, configuration and service unit before restarting the old service. Use
 `--no-backup` only when an external rollback mechanism is already in place.
 
+### 部署被中断后怎么恢复
+
+`deploy.sh` 在停服务之前写 `DATA_DIR/.deploy-in-progress`，健康检查通过后删掉它。
+`SIGKILL`、OOM 或掉电会绕过所有 trap，于是可能留下"服务停着、代码只拷了一半"的状态；
+少数情况下 systemd 还会从这个半更新的树里把服务拉起来（带着混合代码静默运行）。
+判据与恢复步骤：
+
+1. 看标记在不在：`cat "$DATA_DIR/.deploy-in-progress"`。里面有 `pid`、
+   `startedAt`、`installDir` 和这次部署前生成的 `snapshot` 路径。
+2. 应用启动时会自己检查它：若标记里的 `pid` 已经不存在（说明那次部署真的死了），
+   会在服务日志里打出 `[部署] 检测到上次部署被中断`，并在控制台「异常处理」记一条
+   `DEPLOY_INTERRUPTED`。pid 还在＝那次部署仍在进行（正常），不会误报。
+3. 恢复（用标记里的 `snapshot` 路径；快照是**整个安装目录**）：
+
+   ```
+   systemctl --user stop qq-agent-linux
+   rsync -a --delete --exclude=/.runtime/ --exclude=/.deployment.json \
+     --exclude=/.deployment-node --exclude=/node_modules/ \
+     "<snapshot>/app/" "$INSTALL_DIR/"
+   systemctl --user start qq-agent-linux
+   curl -s http://127.0.0.1:3210/healthz
+   rm -f "$DATA_DIR/.deploy-in-progress"
+   ```
+
+   快照里不含数据目录（消息库、config.json 都在 `$DATA_DIR`，本次 rsync 不会碰它们），
+   所以这一条只回滚代码。若连 systemd unit 也坏了，unit 与部署前的 config 备份在
+   `$DATA_DIR/.deploy.lock/state/`（部署被强杀时会留在原地；已被接管清理的话，
+   单位文件可由 `deploy.sh` 重新生成）。
+4. 确认服务正常后再删标记；不删的话每次启动都会继续告警。
+
 The deployment also installs `${SERVICE}-update.service` and
 `${SERVICE}-update.timer`. The timer wakes hourly, while the persisted
 `autoUpdate.intervalHours` setting controls whether a GitHub check is due.

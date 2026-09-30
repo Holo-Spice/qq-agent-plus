@@ -37,6 +37,11 @@ const paths = autoUpdatePaths(dataDir);
 const configFile = path.join(dataDir, 'config.json');
 const deploymentFile = path.join(appDir, '.deployment.json');
 let lockHandle = null;
+// 只有真正抢到锁的那个进程才允许释放它。
+// 抢锁失败的一方（UPDATE_BUSY 时 lockHandle 仍是 null）如果也走一遍释放，会把**胜出方**的
+// 锁文件与它正在用的源码包一起删掉——随后第三个进程能进、它调 deploy.sh 又会被 .deploy.lock
+// 挡住而判失败，disableOnFailure 打开时还会顺带把自动更新关掉（2026-09-29 审查 P1）。
+let lockOwned = false;
 let workDir = '';
 let phase = 'startup';
 let mode = 'scheduled';
@@ -156,9 +161,14 @@ function acquireLock() {
     lockHandle = fs.openSync(paths.lock, 'wx', 0o600);
   }
   fs.writeFileSync(lockHandle, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+  lockOwned = true;
 }
 
 function releaseLock() {
+  // 没抢到锁就什么都不动：锁文件、工作目录、源码包都不是这次运行的
+  // （见上面 lockOwned 的说明；这条 if 之前是漏的，2026-09-29 审查 P1）
+  if (!lockOwned) return;
+  lockOwned = false;
   if (lockHandle !== null) {
     try { fs.closeSync(lockHandle); } catch { /* ignore */ }
     lockHandle = null;

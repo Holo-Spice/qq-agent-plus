@@ -929,3 +929,121 @@ esac
   assert.equal(state.status, 'succeeded');
   assert.equal(state.transport, 'api');
 });
+
+test('并发更新：抢锁失败的一方不碰胜出方的锁与源码包（2026-09-29 审查 P1）', async (t) => {
+  // 背景：releaseLock() 里的 unlink/rmSync 原先写在 `if (lockHandle !== null)` 之外，
+  // 于是抢锁失败的一方（UPDATE_BUSY 时 lockHandle 仍是 null）也会把**胜出方**的锁文件和
+  // 它在用的源码包删掉。随后第三个进程能进、它调 deploy.sh 会被 .deploy.lock 挡住而判失败，
+  // 在 disableOnFailure 打开时还会把自动更新一起关掉。这条用例钉住"失败方什么都不动"。
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-update-lock-'));
+  const appDir = path.join(root, 'app');
+  const dataDir = path.join(root, 'data');
+  const binDir = path.join(root, 'bin');
+  const candidate = path.join(root, 'candidate');
+  const marker = path.join(root, 'deployed.txt');
+  const releaseFile = path.join(root, 'release');
+  const previousRevision = 'a'.repeat(40);
+  const targetRevision = 'b'.repeat(40);
+  for (const directory of [appDir, dataDir, binDir, candidate, path.join(candidate, 'src'), path.join(candidate, 'scripts'), path.join(candidate, 'test')]) {
+    fs.mkdirSync(directory, { recursive: true });
+  }
+  fs.mkdirSync(autoUpdatePaths(dataDir).repository, { recursive: true });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({
+    autoUpdate: {
+      enabled: true,
+      ownerUin: '900001',
+      repository: 'https://github.com/sakurawwwxh/qq-agent-plus.git',
+      branch: 'main',
+      intervalHours: 6
+    },
+    server: { host: '127.0.0.1', port: 3210, token: 'token' }
+  }));
+  fs.writeFileSync(path.join(dataDir, 'deployed-revision'), `${previousRevision}\n`);
+  writeDeployment(appDir, dataDir);
+  fs.writeFileSync(path.join(candidate, 'package.json'), JSON.stringify({ name: 'qq-agent', type: 'module' }));
+  fs.writeFileSync(path.join(candidate, 'package-lock.json'), '{}');
+  fs.writeFileSync(path.join(candidate, 'src/server.js'), '');
+  fs.writeFileSync(path.join(candidate, 'scripts/auto-update.mjs'), '');
+  fs.writeFileSync(
+    path.join(candidate, 'test/smoke.test.mjs'),
+    "import { test } from 'node:test';\ntest('candidate', () => {});\n"
+  );
+  // 假 deploy.sh：等 release 文件出现才收尾 —— 让 A 稳稳地"持有锁运行中"
+  fs.writeFileSync(path.join(candidate, 'deploy.sh'), `#!/bin/sh
+while [ ! -f "$FAKE_DEPLOY_RELEASE" ]; do sleep 0.2; done
+printf '%s\n' "$QQ_AGENT_SOURCE_REVISION" > "$FAKE_DEPLOY_MARKER"
+`, { mode: 0o700 });
+  const fakeGit = path.join(binDir, 'git');
+  fs.writeFileSync(fakeGit, `#!/bin/sh
+args="$*"
+case "$args" in
+  *" remote") printf '%s\n' 'origin' ;;
+  *"remote set-url origin"*) ;;
+  *" ls-remote "*) printf '%s\t%s\n' '${targetRevision}' 'refs/heads/main' ;;
+  *" fetch "*) ;;
+  *" rev-parse "*) printf '%s\n' '${targetRevision}' ;;
+  *" checkout "*)
+    work=''
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--work-tree" ]; then work="$2"; shift 2; else shift; fi
+    done
+    cp -R "$FAKE_CANDIDATE"/. "$work"/
+    ;;
+  *) exit 9 ;;
+esac
+`, { mode: 0o700 });
+  const fakeNpm = path.join(binDir, 'npm');
+  fs.writeFileSync(fakeNpm, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+
+  const github = await startFakeGitHub({ status: 'ahead' });
+  t.after(() => github.close());
+  const env = {
+    ...process.env,
+    PATH: `${binDir}:${process.env.PATH || ''}`,
+    QQ_AGENT_UPDATE_NPM: fakeNpm,
+    FAKE_CANDIDATE: candidate,
+    FAKE_DEPLOY_MARKER: marker,
+    FAKE_DEPLOY_RELEASE: releaseFile,
+    QQ_AGENT_GITHUB_API: github.base
+  };
+  const args = [
+    path.join(repo, 'scripts/auto-update.mjs'),
+    '--app-dir', appDir,
+    '--data-dir', dataDir,
+    '--service', 'qq-agent-test'
+  ];
+  const lockFile = autoUpdatePaths(dataDir).lock;
+
+  const first = spawn(process.execPath, args, { cwd: repo, env });
+  let firstOut = '';
+  first.stdout.on('data', (chunk) => { firstOut += String(chunk); });
+  let firstErr = '';
+  first.stderr.on('data', (chunk) => { firstErr += String(chunk); });
+  const firstExit = new Promise((resolve) => first.on('exit', (code) => resolve(code ?? -1)));
+  t.after(() => { try { first.kill('SIGKILL'); } catch { /* ignore */ } });
+
+  // 等 A 真的拿到锁（写锁的是它自己，内容里有它的 pid）
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline && !fs.existsSync(lockFile)) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(fs.existsSync(lockFile), 'A 应已持有锁：' + firstOut + firstErr);
+  const ownerPid = JSON.parse(fs.readFileSync(lockFile, 'utf8')).pid;
+  assert.equal(ownerPid, first.pid, '锁里记的应是 A 的 pid');
+
+  // B 在 A 持锁期间启动：应干净退出（busy 不是失败），且**不能动 A 的锁**
+  const second = spawnSync(process.execPath, args, { cwd: repo, env, encoding: 'utf8', timeout: 20000 });
+  assert.equal(second.status, 0, `抢锁失败应按 0 退出：${second.stderr || second.stdout}`);
+  assert.match(`${second.stdout}${second.stderr}`, /Another update process is running/, '应说明是被别的更新进程挡住');
+  assert.ok(fs.existsSync(lockFile), 'A 的锁文件必须还在（B 抢锁失败就什么都不该动）');
+
+  // 放 A 收尾：正常完成、清掉自己的锁
+  fs.writeFileSync(releaseFile, 'go\n');
+  assert.equal(await firstExit, 0, 'A 应正常完成：' + firstOut + firstErr);
+  assert.equal(fs.readFileSync(marker, 'utf8').trim(), targetRevision, 'A 完成时确实部署了');
+  assert.equal(fs.existsSync(lockFile), false, 'A 完成后清掉自己的锁');
+  const state = readAutoUpdateState(dataDir);
+  assert.equal(state.status, 'succeeded');
+});

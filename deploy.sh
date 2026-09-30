@@ -316,6 +316,23 @@ if [[ -f "$INSTALL_DIR/.deployment-node" ]]; then
   cp -p "$INSTALL_DIR/.deployment-node" "$LOCK_DIR/state/deployment-node"
 fi
 
+# 部署进行中标记：停服务 → rsync --delete → npm ci → 起服务 → 健康检查这段窗口里，
+# 一旦被 SIGKILL/OOM/掉电打断，trap 不会执行 —— 服务停着、代码可能是半拷贝的，
+# 而下次开机 systemd 会把半更新的树当成正常代码拉起来（比崩掉更难查）。
+# 标记落在数据目录（安装目录之外，rsync 不会碰它），应用启动时会读它并告警。
+IN_PROGRESS_MARKER="$DATA_DIR/.deploy-in-progress"
+mark_deploy_in_progress() {
+  (
+    umask 077
+    printf '{"pid":%s,"startedAt":"%s","installDir":"%s","dataDir":"%s","service":"%s","snapshot":"%s"}\n' \
+      "$$" "$(date -Is 2>/dev/null || date)" "$INSTALL_DIR" "$DATA_DIR" "$SERVICE" "${ROLLBACK_DIR:-}" \
+      > "$IN_PROGRESS_MARKER"
+  ) 2>/dev/null || true
+}
+clear_deploy_marker() {
+  rm -f -- "$IN_PROGRESS_MARKER" 2>/dev/null || true
+}
+
 rollback_deployment() {
   local status=$?
   # 显式调用点（npm 缺失、健康检查失败）是在 printf 之后进来的，此时 $? 已经是 0；
@@ -323,6 +340,7 @@ rollback_deployment() {
   ((status != 0)) || status=1
   trap - ERR INT TERM
   set +e
+  clear_deploy_marker          # 回滚完成即视为"这次部署已收尾"，别留下会让启动告警的标记
   printf '\nDeployment failed; restoring the previous installation...\n' >&2
   systemctl --user stop "$SERVICE.service" >/dev/null 2>&1
   systemctl --user disable --now "$UPDATE_SERVICE.timer" >/dev/null 2>&1
@@ -381,6 +399,8 @@ rollback_deployment() {
 trap rollback_deployment ERR INT TERM
 
 if [[ "$WAS_ACTIVE" == true ]]; then
+  # 从这里到健康检查通过是"服务可能停着、代码可能半拷贝"的窗口：先落标记
+  mark_deploy_in_progress
   systemctl --user stop "$SERVICE.service"
 fi
 if [[ "$ROOT" != "$INSTALL_DIR" ]]; then
@@ -445,6 +465,7 @@ for _ in {1..90}; do
 done
 [[ "$HEALTHY" == true ]] || { printf 'Service health check failed\n' >&2; rollback_deployment; exit 1; }
 trap - ERR INT TERM
+clear_deploy_marker
 # 每份快照是整个安装目录（含 node_modules），而自动更新会无人值守地反复部署：
 # 不清理会把数据盘慢慢填满。保留最近的 3 份。
 if [[ "${QQ_AGENT_SOURCE_REVISION:-}" =~ ^[0-9a-f]{40}$ ]]; then
