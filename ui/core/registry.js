@@ -14,7 +14,10 @@
 //
 // 钩子抛错只记一条 warn 并继续 —— 一个失手的钩子不该让整块 UI 空白（异常隔离）。
 // 载入顺序：core/registry.js 必须最先（app.js 载入时就会 register）。
-window.QARegistry = (function createRegistry() {
+// 2026-10-01（ESM 化）：改成顶层 const + 显式挂 window。ui/ 内部一律 `import { QARegistry }`，
+// 不再靠"全局对象上的属性恰好能被裸标识符找到"这层隐式解析；window 上那份是**有意保留**
+// 的对外面（白盒测试、控制台排查、将来可能的第三方外挂）。
+const QARegistry = (function createRegistry() {
   const bases = new Map();
   const overrides = new Map();
   const transforms = new Map();
@@ -87,3 +90,8 @@ window.QARegistry = (function createRegistry() {
     }
   };
 })();
+
+window.QARegistry = QARegistry;
+
+
+export { QARegistry };

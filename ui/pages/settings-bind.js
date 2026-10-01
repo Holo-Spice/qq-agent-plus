@@ -4,21 +4,52 @@
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（脚本内已核对，勿手改缩进）。
 'use strict';
 
+
+import { applyTheme, currentThinkingRaw, loadSettings, refreshStatus, renderSettings } from '../app.js';
+import { api } from '../core/api.js';
+import { ASR_SERVICES, MODEL_SERVICES_UI, QZONE_RUN_LABELS } from '../core/constants.js';
+import { askForConfirmation, requestExperimentOwnerUin, syncClampedInputs } from '../core/dom-util.js';
+import { $, $$, esc } from '../core/dom.js';
+import {
+  asrHostOf, hostOfUrl, mulOf, paramActiveForProbability, segOfProbability, sliderDesc
+} from '../core/format.js';
+import { state } from '../core/state.js';
+import { loadExperimentalFeatureStatuses } from './features.js';
+import { openMemoryModelPicker } from './memory.js';
+import {
+  launchExperimentalFeature, loadDailyMomentsStatus, loadGroupGameView, loadQzoneInteractionStatus,
+  loadRemindersView, momentStatusLabel, renderGroupChecklist, renderMomentWindowRow
+} from './moments.js';
+import {
+  applyPersonaDraft, currentPersonaId, defaultPersonaFold, openPersonaCreateModal, parsePersonaCard,
+  personaBaseCardId, personaSectionBody, syncPersonaButtons
+} from './persona.js';
+import { saveConfig } from './settings-save.js';
+import { bindTtsControls } from './settings-voice.js';
+import {
+  openBlocklistModal, openModelAddModal, openModelDeleteModal, openModelPicker, openPriceDialog,
+  openWhitelistPicker, renderTimeRuleEditor, startListPoller, syncThinkingUi
+} from './settings.js';
+import { loadTimeControlStatus, updateTimeControlLiveState } from './status.js';
+import {
+  addChannelFeed, onChannelFeedAction, openBatchPriceModal, refreshModelPriceCard, renderChannelFeeds,
+  renderPriceFeedStatus, runChannelProbe
+} from './usage.js';
 /**
  * 把"正在编辑的小节"落回草稿。分节编辑框不是唯一数据源（#cfg-roletext 才是），
  * 所以保存、折叠、恢复这些会重画视图的动作之前都得先冲一次，否则刚打的字会消失。
  * @returns {boolean} 有改动被落回时 true
  */
 function flushPersonaSectionEdit() {
-  if (personaEditingSection < 0) return false;
+  if (state.personaEditingSection < 0) return false;
   const roleBox = $('#cfg-roletext');
-  const box = document.querySelector(`#persona-card-view .pd-edit-text[data-sec="${personaEditingSection}"]`);
+  const box = document.querySelector(`#persona-card-view .pd-edit-text[data-sec="${state.personaEditingSection}"]`);
   if (!roleBox || !box) return false;
   // 输入框内容与"按渲染规则解析出来的正文"逐字一致 → 这一节根本没改过，别写回。
   // replacePersonaSectionBody 会规范化行尾空白与多余空行：原样写回也会让正文与卡文件不再逐字节相同，
   // 保存时 currentPersonaId() 按整串比较就把它当成"自定义" → 静默解绑内置卡（用户什么都没改）。
-  if (box.value === personaSectionBody(roleBox.value, personaEditingSection)) return false;
-  const next = replacePersonaSectionBody(roleBox.value, personaEditingSection, box.value);
+  if (box.value === personaSectionBody(roleBox.value, state.personaEditingSection)) return false;
+  const next = replacePersonaSectionBody(roleBox.value, state.personaEditingSection, box.value);
   if (next === roleBox.value) return false;
   roleBox.value = next;
   return true;
@@ -204,7 +235,7 @@ function bindSettingsSaveAndSections() {
     // 人设页的分节编辑框不是唯一数据源：#cfg-roletext 才是。保存前先把正在编辑的
     // 那一节落回草稿，否则"边编辑边点保存"会存下旧正文（界面还提示"已保存"）。
     if (flushPersonaSectionEdit()) {
-      personaEditNote = '';
+      state.personaEditNote = '';
       syncPersonaButtons();
     }
     try {
@@ -218,7 +249,7 @@ function bindSettingsSaveAndSections() {
       syncClampedInputs();
       // 保存成功后，人设页那条"还没生效"的提示就没意义了，清掉它
       if (state.settingsSection === 'persona') {
-        personaEditNote = '';
+        state.personaEditNote = '';
         const note = $('#persona-edit-note');
         if (note) note.textContent = '';
       }
@@ -1560,11 +1591,11 @@ function bindSettingsPersonaAndVision() {
   // 角色正文：整段正文每敲一键都要重画分节视图（约 10ms），打字时按 140ms 合并成一次；
   // 失焦/提交立刻同步，不会留下过期视图。
   $('#cfg-roletext')?.addEventListener('input', () => {
-    if (personaViewTimer) clearTimeout(personaViewTimer);
-    personaViewTimer = setTimeout(() => { personaViewTimer = null; syncPersonaButtons(); }, 140);
+    if (state.personaViewTimer) clearTimeout(state.personaViewTimer);
+    state.personaViewTimer = setTimeout(() => { state.personaViewTimer = null; syncPersonaButtons(); }, 140);
   });
   $('#cfg-roletext')?.addEventListener('change', () => {
-    if (personaViewTimer) { clearTimeout(personaViewTimer); personaViewTimer = null; }
+    if (state.personaViewTimer) { clearTimeout(state.personaViewTimer); state.personaViewTimer = null; }
     syncPersonaButtons();
   });
   // 卡库：点一张卡（或回车/空格）就把它的正文填进草稿。事件挂在容器上 ——
@@ -1606,28 +1637,28 @@ function bindSettingsPersonaAndVision() {
           }
           // 切到另一节继续编辑时，先把当前这节未保存的改动落回草稿，别让输入白白丢掉
           if (flushPersonaSectionEdit()) {
-            personaEditNote = '上一节已更新（还没生效）：确认无误后点底部那条「保存设置」。';
+            state.personaEditNote = '上一节已更新（还没生效）：确认无误后点底部那条「保存设置」。';
           }
-          personaEditingSection = personaEditingSection === idx ? -1 : idx;
+          state.personaEditingSection = state.personaEditingSection === idx ? -1 : idx;
         } else if (button.classList.contains('pd-sec-save')) {
           const box = personaView.querySelector(`.pd-edit-text[data-sec="${idx}"]`);
           if (box) {
             roleBox.value = replacePersonaSectionBody(roleBox.value, idx, box.value);
-            personaEditingSection = -1;
+            state.personaEditingSection = -1;
             // 刚保存的这一节保持展开：别让它立刻折回去，看起来像"没保存上"
-            personaCollapsedSections.delete(idx);
-            personaEditNote = '这一节已更新（还没生效）：确认无误后点底部那条「保存设置」。';
+            state.personaCollapsedSections.delete(idx);
+            state.personaEditNote = '这一节已更新（还没生效）：确认无误后点底部那条「保存设置」。';
           }
         } else if (button.classList.contains('pd-sec-cancel')) {
-          personaEditingSection = -1;
+          state.personaEditingSection = -1;
         } else if (button.classList.contains('pd-sec-revert')) {
           // 先落回正在编辑的那一节（可能是另一节），再恢复本节
           const flushed = flushPersonaSectionEdit();
           if (baseTpl?.builtin) {
             roleBox.value = replacePersonaSectionBody(roleBox.value, idx, personaSectionBody(baseTpl.text, idx));
-            personaEditingSection = -1;
-            personaCollapsedSections.delete(idx);
-            personaEditNote = `${flushed ? '上一节已更新；' : ''}这一节已恢复成卡文件「${baseTpl.name}」里的写法（还没生效）：记得点底部的「保存设置」。`;
+            state.personaEditingSection = -1;
+            state.personaCollapsedSections.delete(idx);
+            state.personaEditNote = `${flushed ? '上一节已更新；' : ''}这一节已恢复成卡文件「${baseTpl.name}」里的写法（还没生效）：记得点底部的「保存设置」。`;
           }
         }
         syncPersonaButtons();
@@ -1639,12 +1670,12 @@ function bindSettingsPersonaAndVision() {
       const idx = Number(sec.dataset.sec);
       if (!Number.isFinite(idx)) return;
       // 正在编辑的那节不许收起：一收起就会重画视图，输入框里没保存的字会丢
-      if (idx === personaEditingSection) return;
+      if (idx === state.personaEditingSection) return;
       // 收起/展开会重画整个视图（viewKey 里含折叠集合）：先把正在编辑的另一节落回草稿，
       // 否则它的输入框会被按旧正文重建 —— 刚敲的字静默消失
       flushPersonaSectionEdit();
-      if (personaCollapsedSections.has(idx)) personaCollapsedSections.delete(idx);
-      else personaCollapsedSections.add(idx);
+      if (state.personaCollapsedSections.has(idx)) state.personaCollapsedSections.delete(idx);
+      else state.personaCollapsedSections.add(idx);
       syncPersonaButtons();
     });
   }
@@ -1656,9 +1687,9 @@ function bindSettingsPersonaAndVision() {
     const roleBox = $('#cfg-roletext');
     if (!baseTpl?.builtin || !roleBox) return;
     roleBox.value = baseTpl.text;
-    personaEditingSection = -1;
-    personaCollapsedSections = defaultPersonaFold(baseTpl.text);
-    personaEditNote = `正文已恢复成卡文件「${baseTpl.name}」的原文（还没生效）：点底部的「保存设置」确认。`;
+    state.personaEditingSection = -1;
+    state.personaCollapsedSections = defaultPersonaFold(baseTpl.text);
+    state.personaEditNote = `正文已恢复成卡文件「${baseTpl.name}」的原文（还没生效）：点底部的「保存设置」确认。`;
     syncPersonaButtons();
   });
   const expandBtn = $('#persona-expand-btn');
@@ -1667,11 +1698,11 @@ function bindSettingsPersonaAndVision() {
     flushPersonaSectionEdit();
     const total = parsePersonaCard($('#cfg-roletext')?.value || '').sections.length;
     // 只要还有展开的就全收，全收了就全展 —— 一个按钮两种状态，省一个开关
-    if (personaCollapsedSections.size < total) {
-      personaCollapsedSections = new Set(Array.from({ length: total }, (_, i) => i));
+    if (state.personaCollapsedSections.size < total) {
+      state.personaCollapsedSections = new Set(Array.from({ length: total }, (_, i) => i));
       expandBtn.textContent = '全部展开';
     } else {
-      personaCollapsedSections = new Set();
+      state.personaCollapsedSections = new Set();
       expandBtn.textContent = '全部收起';
     }
     syncPersonaButtons();
@@ -1685,7 +1716,7 @@ function bindSettingsPersonaAndVision() {
     if (!collapsed) {
       // 开整段编辑前，先把分节编辑框里的内容落回草稿，并收起它（两种编辑框只留一个）
       flushPersonaSectionEdit();
-      personaEditingSection = -1;
+      state.personaEditingSection = -1;
       syncPersonaButtons();
       editToggle.textContent = '收起全文编辑';
       $('#cfg-roletext')?.focus();
@@ -1754,3 +1785,6 @@ function bindSettingsPersonaAndVision() {
   const pickFriendsBtn = $('#pick-friends-btn');
   if (pickFriendsBtn) pickFriendsBtn.addEventListener('click', () => openWhitelistPicker('friends'));
 }
+
+
+export { bindCrossSectionControls, bindSettingsEvents, captureTimeControlRule, isSplitThinking };

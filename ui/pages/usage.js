@@ -3,6 +3,17 @@
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（test/ui-modules.test.mjs 的守恒断言盯住）。
 'use strict';
 
+
+import { closeModelModal, loadSettings, modelModalShell } from '../app.js';
+import { api } from '../core/api.js';
+import { TOOL_CAT_ORDER, TOOL_META, USAGE_RANGES } from '../core/constants.js';
+import { $, $$, esc } from '../core/dom.js';
+import {
+  chatNameOf, effectivePriceFor, fmtTime, fmtTok, fmtTokens, fmtYuan, formatChatTitle, hasOwnPrice,
+  matchPriceTable, mulOf, priceTxt
+} from '../core/format.js';
+import { state } from '../core/state.js';
+import { openPriceDialog } from './settings.js';
 /** 设置页「远程价格表」状态行：来源（在线/缓存/内置）、时间、条目数、错误。 */
 /**
  * 渠道价目表列表（设置页）：每个渠道的地址、条数、上次时间、错误 + 拉取/删除。
@@ -282,7 +293,7 @@ function refreshModelPriceCard() {
 
 /** 保存定价弹窗：只写 modelPrices 的一条（键 = 渠道：模型 或 模型）。 */
 async function savePriceDialog() {
-  const st = priceDialogState;
+  const st = state.priceDialogState;
   const result = $('#price-dialog-result');
   if (!st?.model) return;
   const vendor = String($('#price-dialog-channel')?.value || '');
@@ -332,7 +343,7 @@ async function savePriceDialog() {
 
 /** 删除当前正在生效的那条自定义/渠道价。 */
 async function deletePriceDialog() {
-  const st = priceDialogState;
+  const st = state.priceDialogState;
   const result = $('#price-dialog-result');
   if (!st?.model) return;
   const vendor = String($('#price-dialog-channel')?.value || '');
@@ -667,7 +678,7 @@ function renderUsagePage(stats, st, prices) {
 
   $$('#usage-page [data-range]').forEach((el) => {
     el.addEventListener('click', () => {
-      usageRange = el.dataset.range;
+      state.usageRange = el.dataset.range;
       loadUsageView({ force: true });
     });
   });
@@ -844,7 +855,7 @@ function updateUsagePage(stats, st, prices) {
 
   // 范围按钮高亮
   $$('#usage-page [data-range]').forEach((el) => {
-    el.classList.toggle('btn-primary', el.dataset.range === String(usageRange));
+    el.classList.toggle('btn-primary', el.dataset.range === String(state.usageRange));
   });
 
   // 单日/24小时 → 隐藏"按天"
@@ -1001,7 +1012,7 @@ async function loadUsageView({ force = false } = {}) {
   if (!force) {
     try {
       const [stats, st] = await Promise.all([
-        api(`/api/usage/stats?range=${usageRange}`),
+        api(`/api/usage/stats?range=${state.usageRange}`),
         api('/api/status')
       ]);
       // 用户可能已经切走页签了，那就别动了
@@ -1016,15 +1027,15 @@ async function loadUsageView({ force = false } = {}) {
   }
 
   // ── 强制重建 ──
-  const token = ++usageLoadToken;
-  const range = usageRange;
+  const token = ++state.usageLoadToken;
+  const range = state.usageRange;
 
   // ★ 先用上一次的数据立即渲染（如果有的话），而不是先画骨架等网络。
   //   后端统计的冷启动实测约 200ms（要遍历全部会话文件），热数据只要 24ms；
   //   但缓存 TTL 只有 5 秒、轮询 4 秒一次，切回用量页时缓存经常已经过期，
   //   于是每次都要等那 200ms —— 表现就是"点过去黑一下"。
   //   有旧数据时直接先画出来（0ms 可见），再在后台拉新的覆盖。
-  const cached = usageLastData && usageLastData.range === range ? usageLastData : null;
+  const cached = state.usageLastData && state.usageLastData.range === range ? state.usageLastData : null;
   if (cached) {
     state.usageStats = cached.stats;
     renderUsagePage(cached.stats, cached.st, cached.prices);
@@ -1046,11 +1057,11 @@ async function loadUsageView({ force = false } = {}) {
     if (cfgData) state.config = cfgData;
     const prices = state.modelPrices || {};
     // 竞态：期间用户切走了页签、或又点了别的时间范围 → 这次结果作废
-    if (token !== usageLoadToken) return;
-    if (state.tab !== 'usage' || usageRange !== range) return;
+    if (token !== state.usageLoadToken) return;
+    if (state.tab !== 'usage' || state.usageRange !== range) return;
 
     state.usageStats = stats;
-    usageLastData = { range, stats, st, prices };
+    state.usageLastData = { range, stats, st, prices };
 
     if (cached) {
       // 已有页面：只更新数值，不重建（避免打断用户的滚动/交互）
@@ -1062,7 +1073,7 @@ async function loadUsageView({ force = false } = {}) {
       renderUsagePage(stats, st, prices);
     }
   } catch (e) {
-    if (token !== usageLoadToken) return;
+    if (token !== state.usageLoadToken) return;
     // 旧数据还在页面上就别用错误覆盖它（用户至少能看到上一次的数字）
     if (!cached) box.innerHTML = `<div class="empty-hint">用量加载失败：${esc(e?.message || e)}</div>`;
   }
@@ -1133,7 +1144,7 @@ function openUsageBreakdown(dim, key) {
   async function load() {
     bodyEl.innerHTML = '<tr><td colspan="6" class="muted">加载中…</td></tr>';
     try {
-      const r = await api(`/api/usage/breakdown?range=${encodeURIComponent(usageRange)}&dim=${dim}&key=${encodeURIComponent(key)}&by=${activeBy}`);
+      const r = await api(`/api/usage/breakdown?range=${encodeURIComponent(state.usageRange)}&dim=${dim}&key=${encodeURIComponent(key)}&by=${activeBy}`);
       peakEl.innerHTML = peakSplitHtml(r.totals);
       colEl.textContent = { model: '模型', chat: '会话', day: '日期' }[activeBy] || '项目';
       // 成本列：包月/本地/未定价不能只显示 ¥0.00（会被读成免费）
@@ -1337,3 +1348,9 @@ function openToolBreakdown() {
     foot: '<div class="muted" style="font-size:11.5px">工具调用本身不额外计费，成本来自它们消耗的 token。</div>'
   });
 }
+
+
+export {
+  addChannelFeed, deletePriceDialog, loadUsageView, onChannelFeedAction, openBatchPriceModal,
+  refreshModelPriceCard, renderChannelFeeds, renderPriceFeedStatus, runChannelProbe, savePriceDialog
+};

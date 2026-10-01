@@ -4,6 +4,32 @@
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（脚本内已核对，勿手改缩进）。
 'use strict';
 
+
+import {
+  closeModelModal, currentThinkingRaw, getThemePref, loadSettings, modelModalShell, refreshStatus,
+  renderExperimentalSettingsSection, renderSettings, renderThinkingSeg, thinkingStops
+} from '../app.js';
+import { api } from '../core/api.js';
+import {
+  MODEL_SERVICES_UI, THEME_ICON, THEME_LABEL, THEME_VALUES, TIME_DAYS, TIME_RULE_LABELS
+} from '../core/constants.js';
+import { askForConfirmation, extraBodyText, splitRowsHtml } from '../core/dom-util.js';
+import { $, $$, esc } from '../core/dom.js';
+import {
+  effectivePriceFor, hostOfUrl, initialServiceNote, onebotIssueText, onebotStatusLineHtml, parseList,
+  uiServiceOfUrl
+} from '../core/format.js';
+import { refreshIntervalMs, state } from '../core/state.js';
+import { loadChats, renderChatSection } from './chat.js';
+import {
+  renderDailyMomentsSection, renderGroupGameSection, renderQzoneInteractionSection, renderRemindersSection
+} from './moments.js';
+import { renderPersonaSection } from './persona.js';
+import { loadSessions } from './sessions.js';
+import { bindCrossSectionControls, bindSettingsEvents, isSplitThinking } from './settings-bind.js';
+import { renderAsrSection } from './settings-voice.js';
+import { refreshAutoUpdateStatus, timeControlTargetOptions } from './status.js';
+import { loadUsageView } from './usage.js';
 /** 把设置解析成实际要应用的主题名。 */
 function resolveTheme(pref) {
   if (THEME_VALUES.includes(pref) && pref !== 'system') return pref;
@@ -14,8 +40,8 @@ function resolveTheme(pref) {
 }
 
 function startListPoller() {
-  if (listPoller) clearInterval(listPoller);
-  listPoller = setInterval(() => {
+  if (state.listPoller) clearInterval(state.listPoller);
+  state.listPoller = setInterval(() => {
     if (state.tab === 'control') refreshAutoUpdateStatus();
     if (state.tab === 'sessions') loadSessions({ quiet: true });
     if (state.tab === 'chats') loadChats({ quiet: true });
@@ -1227,7 +1253,7 @@ function openPriceDialog({ model, vendor } = {}) {
   const customMap = api.modelPrices || {};
   const currentVendor = String(vendor || state.modelPrices?.currentVendor || '');
   const modelId = String(model || api.model || '').trim();
-  priceDialogState = { model: modelId, vendor: currentVendor };
+  state.priceDialogState = { model: modelId, vendor: currentVendor };
 
   const channels = new Set();
   for (const key of Object.keys(customMap)) {
@@ -1272,3 +1298,10 @@ function openPriceDialog({ model, vendor } = {}) {
   if (delBtn) delBtn.style.display = (eff.source === 'channel' || eff.source === 'custom') ? '' : 'none';
   if (!dlg.open) dlg.showModal();
 }
+
+
+export {
+  openBlocklistModal, openModelAddModal, openModelDeleteModal, openModelPicker, openPriceDialog,
+  openWhitelistPicker, renderSettingsImpl, renderTimeRuleEditor, resolveTheme, startListPoller,
+  syncPriceDialogBilling, syncThinkingUi
+};

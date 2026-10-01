@@ -4,6 +4,22 @@
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（脚本内已核对，勿手改缩进）。
 'use strict';
 
+
+import { getThemePref } from '../app.js';
+import { api } from '../core/api.js';
+import { ASR_SERVICES } from '../core/constants.js';
+import {
+  identityPilotSettingsPatch, setStatusLabel, syncGraduatedFeatureNavigation
+} from '../core/dom-util.js';
+import { $, $$ } from '../core/dom.js';
+import {
+  asrHostOf, clampInt, hasOwnPrice, hostOfUrl, memThreshold, mulOf, normalizeAsrMax, parseList,
+  sliderToTierUI
+} from '../core/format.js';
+import { pickedGroups, state } from '../core/state.js';
+import { currentPersonaId } from './persona.js';
+import { captureTimeControlRule } from './settings-bind.js';
+import { syncThinkingUi } from './settings.js';
 async function saveConfig({ quiet = false } = {}) {
   const c = state.config;
   // 只在当前区块的元素存在时才读取，避免“每个区块保存时读取其他区块元素”导致的 null 报错。
@@ -742,3 +758,6 @@ async function saveConfig({ quiet = false } = {}) {
   if (!quiet) setStatusLabel('#model-label', `模型：${state.config.api.model || '未设置'}`);
   return data;
 }
+
+
+export { saveConfig };

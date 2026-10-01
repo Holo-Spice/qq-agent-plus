@@ -3,6 +3,17 @@
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（test/ui-modules.test.mjs 的守恒断言盯住）。
 'use strict';
 
+
+import { closeModelModal, modelModalShell, refreshStatus } from '../app.js';
+import { api } from '../core/api.js';
+import { CHAT_MSG_PAGE, STICKER_LEVELS } from '../core/constants.js';
+import { askForConfirmation, initChatScrollLoader, patchKeyedList } from '../core/dom-util.js';
+import { $, $$, esc } from '../core/dom.js';
+import {
+  chatNameOf, fmtTime, fmtTok, formatChatTitle, groupSliderPosForUi, paramActiveForProbability,
+  segOfProbability, sliderDesc, sliderToTierUI, sliderToTierUI_tierToSlider, stickerMaxSelectOptions
+} from '../core/format.js';
+import { state } from '../core/state.js';
 function renderConversationModePanels(conversation = {}) {
   const activeMode = ['legacy', 'threaded', 'lifecycle'].includes(conversation.mode)
     ? conversation.mode
@@ -610,12 +621,12 @@ function renderChatMessages() {
 
 function chatMessagesNewestFirst() {
   const src = state.chatMessages || [];
-  if (chatMsgSortCache.src !== src) {
+  if (state.chatMsgSortCache.src !== src) {
     const sorted = src.slice().sort((a, b) => (Number(a.ts) || 0) - (Number(b.ts) || 0));
     sorted.reverse();
-    chatMsgSortCache = { src, newestFirst: sorted };
+    state.chatMsgSortCache = { src, newestFirst: sorted };
   }
-  return chatMsgSortCache.newestFirst;
+  return state.chatMsgSortCache.newestFirst;
 }
 
 /** 单行消息 HTML（全量渲染与滚动追加共用同一个模板，保证两处长得一样）。 */
@@ -706,3 +717,6 @@ function conversationModeForChat(chatKey, cfg = state.config) {
     ? conversation.groupModes[match[1]]
     : (conversation.mode || 'legacy');
 }
+
+
+export { appendChatMessageRows, loadChats, renderChatSection, updateChatMessagesBody };

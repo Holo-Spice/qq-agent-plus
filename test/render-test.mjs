@@ -6,6 +6,7 @@ import os from 'node:os';
 import vm from 'node:vm';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { toClassicScript } from './helpers/ui-module-source.mjs';
 
 // 必须指到临时数据目录：这个用例会 import src/console/app.js，控制台启动时会把身份与
 // 异常两个试点的 SQLite 建在 DATA_DIR 下。不重定向就会动到开发机（甚至部署机）自己的
@@ -22,7 +23,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const indexHtml = fs.readFileSync(path.join(ROOT, 'ui', 'index.html'), 'utf8');
 // script 清单的唯一真相源 = index.html（与 ui-smoke / ui-modules 同一口径）
-const htmlScriptFiles = () => [...indexHtml.matchAll(/<script\s+src="([^"]+)"/g)].map((m) => m[1].replace(/^\//, ''));
+const htmlScriptFiles = () => [...indexHtml.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map((m) => m[1].replace(/^\//, ''));
 // 本用例的沙箱只铺到 app.js 为止（8 个外挂插件要 NodeFilter 等真实 DOM 能力，由 ui-smoke
 // 用 happy-dom 覆盖）。拆模块后 app.js 之前多出 core/pages 若干文件，按清单顺序取到 app.js（含）即止。
 const htmlFilesUpToApp = () => {
@@ -151,7 +152,10 @@ try {
   // 在这里写死文件名就会静默缺文件 —— 轻则 ReferenceError，重则少加载一个页面文件而
   // 渲染函数悄悄退化成"未定义"，测试却照绿。
   for (const srcFile of htmlFilesUpToApp()) {
-    const srcCode = fs.readFileSync(path.join(ROOT, 'ui', srcFile), 'utf8');
+    const raw = fs.readFileSync(path.join(ROOT, 'ui', srcFile), 'utf8');
+    // ui/ 是 ES module（浏览器里 type="module"）；沙箱按老语义 = 去掉 import/export 后跑
+    // classic script，见 test/helpers/ui-module-source.mjs 的说明。
+    const srcCode = toClassicScript(raw, srcFile);
     new vm.Script(srcCode, { filename: `ui/${srcFile}` }).runInContext(ctx);
   }
 
@@ -378,7 +382,7 @@ try {
   const editorRoleBox = document.querySelector('#cfg-roletext');
   const messyCard = '## 一、你是谁\n\n\n你是群里的猫娘，带喵。   \n\n## 二、说话方式\n\n短句。\n';
   const editorField = (idx) => document.querySelector(`#persona-card-view .pd-edit-text[data-sec="${idx}"]`);
-  vm.runInContext('personaEditingSection = 0;', ctx);
+  vm.runInContext('state.personaEditingSection = 0;', ctx);
   editorRoleBox.value = messyCard;
   editorField(0).value = ctx.personaSectionBody(messyCard, 0);
   const flushedNoop = ctx.flushPersonaSectionEdit();
@@ -400,7 +404,7 @@ try {
   const collapseRoleBox = document.querySelector('#cfg-roletext');
   collapseRoleBox.value = catText;
   ctx.syncPersonaButtons();
-  vm.runInContext('personaEditingSection = 1;', ctx);
+  vm.runInContext('state.personaEditingSection = 1;', ctx);
   editorField(1).value = '正在编辑、还没保存的正文';
   // 这些点击行为挂在 bindSettingsEvents 里：测试要显式绑一次（真实控制台是渲染设置页时绑的）。
   // 绑定过程中会同步"视觉开关"，它读 state.config —— 前面的用例把它清过，这里补上。
@@ -412,14 +416,14 @@ try {
   for (const handler of document.querySelector('#persona-card-view')._listeners?.click || []) {
     handler({ target: fakeTarget });
   }
-  const collapsedNow = vm.runInContext('[...personaCollapsedSections].join(",")', ctx);
-  const stillEditing = vm.runInContext('personaEditingSection', ctx) === 1;
+  const collapsedNow = vm.runInContext('[...state.personaCollapsedSections].join(",")', ctx);
+  const stillEditing = vm.runInContext('state.personaEditingSection', ctx) === 1;
   const collapseOk = collapseRoleBox.value.includes('正在编辑、还没保存的正文')
     && collapsedNow.split(',').includes('0') && stillEditing;
   collapseOk ? pass++ : fail++;
   console.log('  ' + (collapseOk ? 'OK   ' : 'FAIL ') + '收起别的小节前先落草稿（编辑中的字不会丢）'
     + (collapseOk ? '' : ` -> 折叠=${collapsedNow} 含草稿=${collapseRoleBox.value.includes('正在编辑、还没保存的正文')} 编辑态=${stillEditing}`));
-  vm.runInContext('personaEditingSection = -1; personaCollapsedSections = new Set();', ctx);
+  vm.runInContext('state.personaEditingSection = -1; state.personaCollapsedSections = new Set();', ctx);
   collapseRoleBox.value = '';
 
   // 记忆页每条印象的来源标记：多老 + 谁写的
@@ -2368,17 +2372,17 @@ try {
           await realApp.stop();
 
           // 切到别的 range 时，旧数据不能冒用（range 对不上会显示错的区间）
-          vm.runInContext("usageRange = 'today';", ctx);
+          vm.runInContext("state.usageRange = 'today';", ctx);
           usageBox.innerHTML = '';
           let usedOld = false;
           const origPage = ctx.renderUsagePage || sandbox.renderUsagePage;
           ctx.renderUsagePage = sandbox.renderUsagePage = (...a) => { usedOld = true; return origPage(...a); };
           // 先清掉缓存，模拟"新 range 没有旧数据"
-          vm.runInContext('usageLastData = null;', ctx);
+          vm.runInContext('state.usageLastData = null;', ctx);
           usageBox.innerHTML = '';
           await loadUsage({ force: true });
           ctx.renderUsagePage = sandbox.renderUsagePage = origPage;
-          vm.runInContext("usageRange = '7';", ctx);
+          vm.runInContext("state.usageRange = '7';", ctx);
           const ok3 = usedOld;
           ok3 ? pass++ : fail++;
           console.log('  ' + (ok3 ? 'OK   ' : 'FAIL ') + '切换 range 会重新渲染（不误用旧区间数据）');
@@ -2404,7 +2408,7 @@ try {
         messages: [], sent: [], usage: { calls: 0 }, rounds: 0 };
       state.sessions = [{ id: 's_sse_1', chatKey: 'group:1', status: 'running', startedAt: 1, messages: [], sent: [] }];
       state.chats = [];
-      lastDetailFp = null;
+      state.lastDetailFp = null;
     `, ctx);
     ctx.connectSSE();   // 把处理器注册进 sseRegistry（init 里那次可能还没执行到）
     const fireSse = (type, data) => { for (const fn of sseRegistry[type] || []) fn({ data: JSON.stringify(data) }); };
@@ -2815,7 +2819,7 @@ try {
     // 这个页面脚本在真实控制台里随 index.html 加载；这里在同一个 vm 里执行它，
     // 然后直接触发"保存"按钮绑定的那个处理器。
     if (typeof sandbox.addEventListener !== 'function') sandbox.addEventListener = () => {};
-    const gmCode = fs.readFileSync(path.join(ROOT, 'ui', 'global-memory.js'), 'utf8');
+    const gmCode = toClassicScript(fs.readFileSync(path.join(ROOT, 'ui', 'global-memory.js'), 'utf8'), 'global-memory.js');
     new vm.Script(gmCode, { filename: 'ui/global-memory.js' }).runInContext(ctx);
 
     const qqInput = document.getElementById('gm-anynote-qq');

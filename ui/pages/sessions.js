@@ -3,6 +3,22 @@
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（test/ui-modules.test.mjs 的守恒断言盯住）。
 'use strict';
 
+
+import { renderLifecycleOverview } from '../app.js';
+import { api } from '../core/api.js';
+import {
+  CONVERSATION_MODE_LABEL, SESSION_PAGE, STATUS_LABEL, THREAD_STATE_LABEL
+} from '../core/constants.js';
+import { patchKeyedList } from '../core/dom-util.js';
+import { $, $$, esc } from '../core/dom.js';
+import {
+  chatNameOf, fmtClock, fmtRate, fmtTime, fmtTok, fmtTokens, fmtWaitRemain, fmtYuan, formatChatTitle,
+  formatReleaseNotes
+} from '../core/format.js';
+import {
+  lifecycleRemainingText, lifecycleRunsFor, lifecycleStateOf, triggerKindLabel
+} from '../core/lifecycle-labels.js';
+import { startLifecycleTicker, startWaitTicker, state } from '../core/state.js';
 function sessionStatusText(s) {
   const base = STATUS_LABEL[s.status] || s.status;
   return s.conversationMode === 'lifecycle' && ['done', 'noreply'].includes(s.status)
@@ -275,7 +291,7 @@ async function selectSession(id, { preserveDetail = false } = {}) {
   state.currentSessionId = id;
   sessionView?.classList.add('mobile-detail-open');
   state.sessionDetail = null;
-  lastDetailFp = null;
+  state.lastDetailFp = null;
   updateSessionListSelection();
   if (!preserveDetail && detail) {
     detail.innerHTML = '<div class="empty-hint">加载中…</div>';
@@ -511,9 +527,9 @@ function renderSessionDetail(s, {
   // 内容没变（轮询/SSE 重复推送）→ 完全不动 DOM，保住滚动位置和展开状态
   // json 模式切换也要触发重渲染
   const fp = `${s.id}|${s.status}|${s.conversationMode || 'legacy'}|${s.threadState || ''}|${s.lifecycle?.state || ''}|${s.lifecycle?.deadline || 0}|${s.triggerKind || ''}|${s.rounds || 0}|${s.inputRound || 0}|${s.inputPayloadChars || 0}|${(s.messages || []).length}|${(s.sent || []).length}|${s.error ? 1 : 0}|${s.activity || ''}|${s.sessionMetrics?.estimatedCost || 0}|${state.sessionInspectorTab}|${state.sessionJsonMode === s.id ? 'json' : 'ui'}`;
-  if (lastDetailFp === fp) return;
-  const firstRender = lastDetailFp === null;
-  lastDetailFp = fp;
+  if (state.lastDetailFp === fp) return;
+  const firstRender = state.lastDetailFp === null;
+  state.lastDetailFp = fp;
 
   // 保留用户的阅读位置；仅当用户本来就贴着底部时才跟随新内容（聊天式）
   const wasAtBottom = detail.scrollHeight - detail.scrollTop - detail.clientHeight < 48;
@@ -645,13 +661,13 @@ function renderSessionDetail(s, {
   const jsonBtn = $('#json-mode-btn');
   if (jsonBtn) jsonBtn.addEventListener('click', () => {
     state.sessionJsonMode = state.sessionJsonMode === s.id ? null : s.id;
-    lastDetailFp = null;   // 强制重渲染
+    state.lastDetailFp = null;   // 强制重渲染
     renderSessionDetail(s);
   });
   detail.querySelectorAll('[data-context-tab]').forEach((button) => {
     button.addEventListener('click', () => {
       state.sessionInspectorTab = button.dataset.contextTab;
-      lastDetailFp = null;
+      state.lastDetailFp = null;
       renderSessionDetail(s);
     });
   });
@@ -694,3 +710,6 @@ function renderSessionDetail(s, {
   // 而下面的 4s 主轮询（loadSessions）已经会对 running/waiting 的会话刷新详情，
   // 功能完全覆盖，2s 递归属于纯重复请求。
 }
+
+
+export { loadSessionDetail, loadSessions, renderSessionDetail, renderSessionList };

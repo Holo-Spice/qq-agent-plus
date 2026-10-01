@@ -4,6 +4,13 @@
 'use strict';
 
 // ── 记忆视图 ──
+
+import { closeModelModal, loadSettings, modelModalShell } from '../app.js';
+import { api } from '../core/api.js';
+import { askForConfirmation, impressionMetaLabel } from '../core/dom-util.js';
+import { $, $$, esc } from '../core/dom.js';
+import { chatNameOf, fmtTime, formatChatTitle } from '../core/format.js';
+import { startConsolidateTicker, state } from '../core/state.js';
 async function loadMemoryView() {
   try {
     const [cfg, chats] = await Promise.all([api('/api/config'), api('/api/chats')]);
@@ -517,3 +524,6 @@ function openMemoryModelPicker() {
   renderRight();
   overlay.querySelector('#mm-cancel').addEventListener('click', () => closeModelModal(overlay));
 }
+
+
+export { loadMemoryView, openMemoryModelPicker, renderMemoryList, saveMemberNote };

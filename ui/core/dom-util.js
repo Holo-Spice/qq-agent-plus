@@ -5,6 +5,22 @@
 
 // after：原实现跑完再触发副作用钩子。包在**外层**而不是插进函数体里 —— 这几个渲染函数都有
 // `if (!box) return;` 之类的提前返回，插进体内会让钩子在那种路径下不触发，而改写全局时是触发的。
+
+import {
+  closeModelModal, currentThinkingRaw, modelModalShell, renderThinkingSeg, thinkingStops
+} from '../app.js';
+import { api } from './api.js';
+import {
+  CHAT_MSG_MORE, CHAT_MSG_PAGE, LOADING_REVEAL_MS, SESSION_PAGE, THINKING_PURPOSES
+} from './constants.js';
+import { $, esc } from './dom.js';
+import {
+  normalizeAsrMax, normalizeStickerMax, onebotIssueText, onebotStatusLineHtml, uiServiceOfUrl
+} from './format.js';
+import { QARegistry } from './registry.js';
+import { loadingLogs, loadingStatus, pendingSessionDetail, state } from './state.js';
+import { appendChatMessageRows, loadChats, updateChatMessagesBody } from '../pages/chat.js';
+import { renderSessionDetail, renderSessionList } from '../pages/sessions.js';
 function afterRender(name, impl, args) {
   const result = impl(...args);
   QARegistry.after(name, args);
@@ -56,32 +72,32 @@ function askForConfirmation(message) {
 }
 
 function setLoadingStatus(text) {
-  bootLogs.push(`[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] ${text}`);
+  state.bootLogs.push(`[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] ${text}`);
   if (loadingStatus) loadingStatus.textContent = text;
-  if (loadingLogs) loadingLogs.textContent = bootLogs.slice(-12).join('\n');
+  if (loadingLogs) loadingLogs.textContent = state.bootLogs.slice(-12).join('\n');
 }
 
 function revealLoading() {
-  if (appReady || loadingRevealed) return;
+  if (state.appReady || state.loadingRevealed) return;
   if (!document.getElementById('loading-overlay')) return;
-  loadingRevealed = true;
+  state.loadingRevealed = true;
   document.documentElement.classList.remove('boot-silent');
   document.documentElement.classList.add('boot-show');
 }
 
 function revealLoadingIfSlow() {
-  if (loadingRevealTimer) clearTimeout(loadingRevealTimer);
-  loadingRevealTimer = setTimeout(revealLoading, LOADING_REVEAL_MS);
+  if (state.loadingRevealTimer) clearTimeout(state.loadingRevealTimer);
+  state.loadingRevealTimer = setTimeout(revealLoading, LOADING_REVEAL_MS);
 }
 
 function hideLoading() {
-  appReady = true;
-  if (loadingRevealTimer) clearTimeout(loadingRevealTimer);
+  state.appReady = true;
+  if (state.loadingRevealTimer) clearTimeout(state.loadingRevealTimer);
   try { clearTimeout(window.__bootRevealFallback); } catch { /* 忽略 */ }
   document.documentElement.classList.remove('boot-show');
   const el = document.getElementById('loading-overlay');
   if (!el) return;
-  if (!loadingRevealed) { el.remove(); return; }   // 从没显示过，直接摘掉
+  if (!state.loadingRevealed) { el.remove(); return; }   // 从没显示过，直接摘掉
   setTimeout(() => el.remove(), 260);              // 等淡出动画
 }
 
@@ -196,10 +212,10 @@ function updateOnebotStatusLine() {
 }
 
 function scheduleSessionRender() {
-  if (sessionRenderScheduled) return;
-  sessionRenderScheduled = true;
+  if (state.sessionRenderScheduled) return;
+  state.sessionRenderScheduled = true;
   setTimeout(() => {
-    sessionRenderScheduled = false;
+    state.sessionRenderScheduled = false;
     if (state.tab === 'sessions') renderSessionList();
     const id = state.currentSessionId;
     const patch = id ? pendingSessionDetail.get(id) : null;
@@ -223,9 +239,9 @@ function scheduleSessionRender() {
 }
 
 function scheduleChatsRefresh() {
-  if (chatsRefreshTimer) return;
-  chatsRefreshTimer = setTimeout(() => {
-    chatsRefreshTimer = null;
+  if (state.chatsRefreshTimer) return;
+  state.chatsRefreshTimer = setTimeout(() => {
+    state.chatsRefreshTimer = null;
     if (state.tab === 'chats') loadChats({ quiet: true });
   }, 1500);
 }
@@ -527,3 +543,12 @@ function syncClampedInputs() {
     asrMax.value = String(normalizeAsrMax(state.config?.asr?.maxPerHour));
   }
 }
+
+
+export {
+  afterRender, askForConfirmation, experimentalFeatureLaunchPatch, extraBodyText, hideLoading,
+  identityPilotSettingsPatch, impressionMetaLabel, initChatScrollLoader, initSessionScrollLoader,
+  patchKeyedList, pollUntilReady, readAssetImage, requestExperimentOwnerUin, revealLoadingIfSlow,
+  scheduleChatsRefresh, scheduleSessionRender, setBoxError, setHtmlIfChanged, setLoadingStatus,
+  setStatusLabel, splitRowsHtml, syncClampedInputs, syncGraduatedFeatureNavigation, updateOnebotStatusLine
+};

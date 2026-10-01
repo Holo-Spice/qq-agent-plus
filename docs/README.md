@@ -34,7 +34,7 @@
 | [KNOWN-ISSUES.md](KNOWN-ISSUES.md) | 当前已知但未修复的问题，以及历史上的基线失败记录 |
 | [PERSONAS.md](PERSONAS.md) | 内置角色卡清单、选择与保存、语气档位（原版群友 / 自然可靠）与生效范围 |
 | [UI-SMOKE.md](UI-SMOKE.md) | 改了 `ui/` 之后的手工烟测清单（自动化只覆盖「渲染不抛 + 钩子接上了」） |
-| [adr/](adr/) | 架构决策记录（已定决策 + 理由 + 后果）：无构建工具、人物记忆全局共享、systemd user 托管、UI classic script 与 QARegistry |
+| [adr/](adr/) | 架构决策记录（已定决策 + 理由 + 后果）：无构建工具、人物记忆全局共享、systemd user 托管、跨文件接管走 QARegistry、ui/ 全量转 ES module |
 | [../AGENTS.md](../AGENTS.md) | 面向 AI 协作者的约定：代码风格、验证方式、提交要求 |
 
 ## 调研与方向稿

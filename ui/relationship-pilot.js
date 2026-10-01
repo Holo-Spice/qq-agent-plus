@@ -2,6 +2,9 @@
 
 // 关系状态 V1：只在“设置 → 实验功能”里出现。V1 永远是 Shadow Mode：
 // 可以评估并记录，但绝不改变主聊天 prompt / 回复策略。
+
+import { api } from './core/api.js';
+import { esc } from './core/dom.js';
 (function relationshipPilotSettings() {
   let rendering = false;
   let timer = null;

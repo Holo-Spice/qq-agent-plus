@@ -45,18 +45,27 @@ In particular:
 
 ## 控制台前端（ui/）约定
 
-控制台是 classic script（无构建工具，见 `docs/adr/0001-no-build-tools.md`），跨文件靠全局共享。
+控制台是**原生 ES module**（无构建工具，见 `docs/adr/0001-no-build-tools.md`；
+2026-10-01 从 classic script 转过来，见 `docs/adr/0005-ui-es-modules.md`）。
 动 `ui/` 时守四条：
 
+- **跨文件引用一律 `import`**：每个文件顶部显式列出它用到的外部名字，尾部 `export` 出被别的文件
+  用到的名字。**不许再有"靠全局共享的名字"** —— `test/ui-module-graph.test.mjs` 会当场判红
+  （未解析引用只剩浏览器内建才放行）。新增文件要同时进 `ui/index.html` 的清单（`test/ui-modules.test.mjs` 盯）。
 - **接管渲染入口走 `QARegistry`**（`ui/core/registry.js`）：`onTransform` / `onAfter` / `override`；
-  原实现用 `QARegistry.base(name)` 取回。**不要**再写 `window[name] = wrapped` 或裸赋值
-  `refreshStatus = ...` —— `test/ui-contract.test.mjs` 会当场判红（模块化后那种覆盖会静默失效）。
-- **新增跨文件全局必须同时改 `eslint.config.mjs` 的 `uiSharedGlobals`**，否则契约用例判红；
-  能改成局部实现就别加全局。
+  原实现用 `QARegistry.base(name)` 取回。**不要**写 `window[name] = wrapped` 或裸赋值
+  `refreshStatus = ...` —— 契约用例判红；而且模块绑定只读，那样写连"碰巧生效"都不会有。
+- **改跨文件的可变状态要挂 `state`**（`ui/core/state.js`）：`state.x = …`。模块级 `let` + `export`
+  是禁止的（import 绑定只读，别人一写就 `TypeError`），契约用例有两条专门盯这件事。
+  另外 `state.x = …` 写在**模块顶层**就等于"求值期读 state"，环上会踩 TDZ 白屏 —— 要初始化就写进 `state.js`，
+  要延后的就放进 `init()`（它挂在 `DOMContentLoaded` 之后）。
 - **改了 `ui/` 就跑一遍 `docs/UI-SMOKE.md`**：自动化只覆盖"渲染不抛 + 钩子接上了"，
   布局与事件只有人能看。
-- **安全网**：`node test/render-test.mjs`（176）/ `node test/scroll-test.mjs`（19）/
-  `node --test test/ui-smoke.test.mjs test/ui-contract.test.mjs test/ui-registry.test.mjs test/ui-modules.test.mjs`。
+- **安全网**：`node test/render-test.mjs`（178）/ `node test/scroll-test.mjs`（19）/
+  `node test/usage-e2e.mjs`（31）/
+  `node --test test/ui-smoke.test.mjs test/ui-module-graph.test.mjs test/ui-real-modules.test.mjs test/ui-registry.test.mjs test/ui-modules.test.mjs`。
+  前四个是"剥掉 import/export 按 classic 跑"的 vm 沙箱，`ui-real-modules` 才是真模块语义
+  （求值顺序、TDZ 只有它看得见），别把两层的用途混了。
 
 ## 发布节奏
 

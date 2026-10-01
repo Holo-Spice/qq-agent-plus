@@ -90,8 +90,9 @@ const UI_BUILD = uiBuildStamp();
 
 // ── UI 静态资源的版本令牌（改进方案 §11「给 core/* 加内容哈希长缓存」）──
 // 令牌 = 文件内容的 sha256 前 12 位，按 (size, mtime) 记忆，避免每次请求重算哈希。
-// 用途在 handleHttp：下发 index.html 时把自家资源改写成 "?v=<令牌>"，带对令牌的请求回长缓存；
-// 令牌对不上或没带 → 退回回源校验（否则旧 URL 会把旧脚本钉在浏览器里）。
+// 用途在 handleHttp：下发 index.html 时把**非 js** 的自家资源改写成 "?v=<令牌>"，
+// 带对令牌的请求回 immutable 长缓存；令牌对不上或没带 → 退回回源校验。
+// js 单独一套（不带令牌、no-cache + 内容哈希 ETag）：理由见 rewriteAssetUrls 的注释。
 const ASSET_TOKEN_CACHE = new Map();
 function assetToken(fullPath) {
   const stat = fs.statSync(fullPath);
@@ -106,8 +107,16 @@ function assetToken(fullPath) {
 // 把 HTML 里"自家静态资源"的引用改成带内容哈希的 URL。只动以 / 开头、且没有查询串的路径：
 // 外链（http(s):// 或 //cdn）与已经带 ?v= 的原样保留；目标文件不存在也原样保留
 // （让正常路径去报 404，别在改写阶段把它吃掉）。
+//
+// **js 不在内**（2026-10-01，ui/ 转 ES module 之后）：浏览器按 URL 认模块 ——
+// index.html 里带 ?v= 的 /core/dom.js，与模块内相对 import（./dom.js）解析出的
+// /core/dom.js（相对路径解析不受父 URL 查询串影响），是两个不同的 URL，会各自求值一次，
+// 于是同一份 state 变成两份实例（页面看着正常、状态不共享，极难查）。
+// 所以 js 一律不带版本令牌、走 no-cache + 内容哈希 ETag 回源校验（真 304 仍然生效）；
+// css/svg/png 不是模块，继续用 ?v= 换 immutable 长缓存。
+const URL_TOKENIZED = new Set(['.css', '.svg', '.png']);
 function rewriteAssetUrls(html) {
-  return html.replace(/(\s(?:src|href))="(\/[^"?#]+\.(?:js|css|svg|png))"/g, (whole, attr, urlPath) => {
+  return html.replace(/(\s(?:src|href))="(\/[^"?#]+\.(?:css|svg|png))"/g, (whole, attr, urlPath) => {
     const target = path.join(UI_DIR, ...urlPath.slice(1).split('/'));
     const rel = path.relative(UI_DIR, target);
     if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return whole;
@@ -3586,14 +3595,15 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
           etag = `W/"${crypto.createHash('sha256').update(body).digest('hex').slice(0, 16)}"`;
         } else {
           const token = assetToken(fullPath);
-          if (askedToken && askedToken === token) {
+          if (URL_TOKENIZED.has(ext) && askedToken && askedToken === token) {
             // 令牌对得上 = 这个 URL 的内容是不可变的：长缓存，别再回源。
             cacheControl = 'public, max-age=31536000, immutable';
             etag = `"${token}"`;   // 强 ETag（内容哈希）
           } else {
-            // 没带令牌（老书签/直接访问）或令牌对不上（部署换过文件）：退回回源校验，
-            // 不给人"用旧 URL 钉住旧脚本"的机会。
-            etag = `W/"${stat.size.toString(16)}-${Math.round(stat.mtimeMs).toString(16)}"`;
+            // 其余情况一律回源校验：内容哈希做**强** ETag（比体积+时间可靠），
+            // cache-control 保持 no-cache —— 每次都会带 If-None-Match 问一句，没变就是 304。
+            // js 走的永远是这一支（见 URL_TOKENIZED 的注释：模块 URL 必须唯一）。
+            etag = `"${token}"`;
           }
         }
         // 真 304：此前只发了 ETag/Last-Modified 却从不判 If-None-Match，于是 no-cache 强制回源

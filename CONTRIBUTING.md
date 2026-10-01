@@ -31,9 +31,11 @@ bash -n deploy.sh deploy-all.sh manage.sh   # 改过 shell 才需要
 
 **改了 `ui/`（控制台前端）另外三件事**（约定写在 `AGENTS.md`）：
 
+- 跨文件引用一律 `import`（每个文件顶部列全、尾部 `export` 出被用到的）——
+  **不许再有共享全局**，`test/ui-module-graph.test.mjs` 判红；新增文件要同时进 `ui/index.html` 清单；
 - 接管渲染入口走 `QARegistry`（`onTransform` / `onAfter` / `override` + `base`），
-  **不要**再写 `window[name] = wrapped` 或裸赋值 —— `test/ui-contract.test.mjs` 会判红；
-- 新增跨文件全局必须同时改 `eslint.config.mjs` 的 `uiSharedGlobals`（同样是契约用例在盯）；
+  **不要**写 `window[name] = wrapped` 或裸赋值；跨文件可变状态挂 `state`（模块级 `let` + `export`
+  会被判红：import 绑定只读，别人一写就 TypeError）；
 - 跑一遍 `docs/UI-SMOKE.md` 的手工清单（自动化只覆盖"渲染不抛 + 钩子接上了"，布局与事件靠人看）。
 
 **回归判断口径**：Windows 上有已知的环境性失败用例（`docs/KNOWN-ISSUES.md` 记录在案）。

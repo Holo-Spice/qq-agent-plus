@@ -13,6 +13,7 @@ import vm from 'node:vm';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { toClassicScript } from './helpers/ui-module-source.mjs';
 import http from 'node:http';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -114,9 +115,10 @@ const ctx = vm.createContext(sandbox);
 // 按 index.html 的 script 清单、按序加载（唯一真相源；写死文件名会在拆模块后静默缺文件）。
 // 沙箱只铺到 app.js 为止 —— 8 个外挂插件要 NodeFilter 等真实 DOM 能力，由 ui-smoke 覆盖。
 const allScripts = [...fs.readFileSync(path.join(ROOT, 'ui', 'index.html'), 'utf8')
-  .matchAll(/<script\s+src="([^"]+)"/g)].map((m) => m[1].replace(/^\//, ''));
+  .matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map((m) => m[1].replace(/^\//, ''));
 for (const srcFile of allScripts.slice(0, allScripts.indexOf('app.js') + 1)) {
-  new vm.Script(fs.readFileSync(path.join(ROOT, 'ui', srcFile), 'utf8'), { filename: `ui/${srcFile}` }).runInContext(ctx);
+  const raw = fs.readFileSync(path.join(ROOT, 'ui', srcFile), 'utf8');
+  new vm.Script(toClassicScript(raw, srcFile), { filename: `ui/${srcFile}` }).runInContext(ctx);
 }
 
 // ── 真实加载配置与价格（模拟启动流程）──
@@ -175,7 +177,7 @@ check('输入 token 已填', prompt.length > 0, prompt);
 // ── 各 range 都试 ──
 console.log('\n=== 各时间范围 ===');
 for (const rg of ['today', '7', '30', 'all']) {
-  vm.runInContext(`usageRange = '${rg}';`, ctx);
+  vm.runInContext(`state.usageRange = '${rg}';`, ctx);
   setUsageTab();                     // 同上：每次都要重设
   await (ctx.loadUsageView || sandbox.loadUsageView)({ force: true });
   const h = String(usageBox.innerHTML || '');
@@ -186,7 +188,7 @@ for (const rg of ['today', '7', '30', 'all']) {
 
 // ── 下钻（点行）──
 console.log('\n=== 下钻明细（点行）===');
-vm.runInContext("usageRange = '7';", ctx);
+vm.runInContext("state.usageRange = '7';", ctx);
 setUsageTab();
 const stats = await realFetch('/api/usage/stats?range=7').then((r) => r.json());
 const firstDay = (stats.days || [])[0];

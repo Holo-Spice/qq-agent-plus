@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { test } from 'node:test';
+import { toClassicScript } from './helpers/ui-module-source.mjs';
 
 const REGISTRY = path.resolve('ui', 'core', 'registry.js');
 
@@ -21,7 +22,7 @@ function loadRegistry() {
   const sandbox = { console: { warn() {} } };
   sandbox.window = sandbox;
   vm.createContext(sandbox);
-  new vm.Script(fs.readFileSync(REGISTRY, 'utf8'), { filename: 'ui/core/registry.js' }).runInContext(sandbox);
+  new vm.Script(toClassicScript(fs.readFileSync(REGISTRY, 'utf8'), 'core/registry.js'), { filename: 'ui/core/registry.js' }).runInContext(sandbox);
   return sandbox;
 }
 

@@ -78,3 +78,22 @@ HTML 也认 If-Modified-Since / HTML 的 ETag 改成体积+时间 —— 逐条�
   `core/pages/i18n` 扩到**整个 `ui/`**（含 app.js 与 8 个外挂插件，最大的 `global-memory.js` 372 行）。
   同时把 eslint 的两条覆盖拆开：`no-unused-vars: off` 仍只给 `core/pages/i18n`（它们的定义
   是给别的 script 用的），别把 app.js 与插件并进去——那会让业务/插件代码的未用变量失守。
+
+**补记（2026-10-01）：ui/ 转 ES module 之后，js 不再走 URL 令牌（模块身份优先于缓存命中）**
+
+同一天 ui/ 全量转成 ES module（见 [ADR 0005](0005-ui-es-modules.md)）。这让上面第 2 条
+"内容哈希长缓存"**对 js 失效**，原因是浏览器按 **URL** 认模块：
+
+- `index.html` 里被改写成 `/core/dom.js?v=abc` 的标签，与模块内相对 import（`./dom.js`）解析出的
+  `/core/dom.js`（相对路径解析不受父 URL 查询串影响）是**两个不同的 URL** → 各自求值一次 →
+  同一份 `state` 变成两份实例：页面看着正常，状态不共享，排查起来极痛苦。
+- 反过来，如果让服务端去改写模块内的 import specifier 带上同样的令牌，也能做到 URL 唯一，
+  但那要求服务端解析 JS 源码；一旦漏掉某种 specifier 形态（`import './x.js'`、多行 import、
+  将来有人写 `export … from`），**静默**退化成上面的双实例 —— 这个失败模式太贵。
+
+所以定成：**js 不带版本令牌**，走 `no-cache` + 内容哈希**强** ETag 回源校验（真 304 仍然生效，
+只是每次开控制台会多一轮条件请求）；`css`/`svg`/`png` 不是模块，继续 `?v=` + immutable 长缓存。
+`test/static-cache.test.mjs` 已按这套口径重写（含一条"js 就算带了内容哈希也不给 immutable"）。
+
+顺带记一条与"无构建工具"的关系：转 module 没有动摇本 ADR 的决策 —— ES module 是浏览器原生能力，
+仓库里跑的仍就是浏览器里跑的（逐字节可比对），没有引入打包/转译步骤。

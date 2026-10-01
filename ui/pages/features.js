@@ -3,6 +3,23 @@
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（test/ui-modules.test.mjs 的守恒断言盯住）。
 'use strict';
 
+
+import {
+  closeModelModal, loadFriendFeaturePage, loadIdentityFeaturePage, loadIncidentFeaturePage, modelModalShell,
+  switchTab
+} from '../app.js';
+import { api } from '../core/api.js';
+import {
+  ASSET_KINDS, FRIEND_OPPORTUNITY_STATUS, FRIEND_PROPOSAL_REASON, FRIEND_PROPOSAL_STATUS,
+  INCIDENT_SEVERITY_LABELS, INCIDENT_STATE_LABELS, INCOMING_FRIEND_STATUS, SLANG_RESEARCH_STATUS
+} from '../core/constants.js';
+import {
+  askForConfirmation, identityPilotSettingsPatch, readAssetImage, setBoxError, setHtmlIfChanged,
+  syncGraduatedFeatureNavigation
+} from '../core/dom-util.js';
+import { $, $$, esc } from '../core/dom.js';
+import { chatNameOf, clampInt, fmtTime, fmtTok, formatChatTitle } from '../core/format.js';
+import { state } from '../core/state.js';
 function assetStateText(active, exists, activeText = '运行中') {
   if (active) return activeText;
   if (exists) return '已存储 · 未接入';
@@ -1401,3 +1418,10 @@ async function loadExperimentalFeatureStatuses() {
       `状态读取失败：${incidentResult.reason?.message || incidentResult.reason}`;
   }
 }
+
+
+export {
+  loadAssetObservatory, loadExperimentalFeatureStatuses, loadFriendOpportunities, loadFriendProposals,
+  loadIncomingFriendRequests, loadSlangFeaturePage, renderFriendFeaturePageImpl,
+  renderIdentityFeaturePageImpl, renderIncidentFeaturePageImpl
+};

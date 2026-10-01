@@ -3,6 +3,14 @@
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（test/ui-modules.test.mjs 的守恒断言盯住）。
 'use strict';
 
+
+import { closeModelModal, loadSettings, modelModalShell } from '../app.js';
+import { api } from '../core/api.js';
+import {
+  PERSONA_BAD_SECTIONS, PERSONA_RULE_EXAMPLES, PERSONA_SECTION_EMOJI, PERSONA_TAG_SECTIONS
+} from '../core/constants.js';
+import { $, esc } from '../core/dom.js';
+import { personaDescCache, state } from '../core/state.js';
 function findPersonaTemplateId(roleText, behaviorProfile = 'legacy', customRules = '') {
   return Object.entries(state.personaTemplates || {}).find(([, p]) =>
     p.text === roleText && (p.behaviorProfile || 'legacy') === behaviorProfile
@@ -55,14 +63,14 @@ function syncPersonaButtons() {
   const fileText = baseTpl?.builtin ? baseTpl.text : '';
   // 只有内容真的变了才重画：人设页的输入事件（改名字、改附加规则、改正文）都会走到这里，
   // 每次都重画 15KB 正文 + 5 张卡的话，打字时每敲一键都要多花约 10ms。
-  const viewKey = [draft.roleText, personaEditingSection,
-    [...personaCollapsedSections].sort((a, b) => a - b).join(','), fileText].join('\u0000');
+  const viewKey = [draft.roleText, state.personaEditingSection,
+    [...state.personaCollapsedSections].sort((a, b) => a - b).join(','), fileText].join('\u0000');
   const detail = $('#persona-card-view');
   if (detail && viewKey !== personaViewKey) {
     personaViewKey = viewKey;
     detail.innerHTML = renderPersonaCardBody(draft.roleText, {
-      collapsed: personaCollapsedSections,
-      editing: personaEditingSection,
+      collapsed: state.personaCollapsedSections,
+      editing: state.personaEditingSection,
       fileText
     });
   }
@@ -77,7 +85,7 @@ function syncPersonaButtons() {
     const dirty = Boolean(fileText)
       ? String(draft.roleText || '').trim() !== String(fileText).trim()
       : true;
-    note.textContent = dirty ? personaEditNote : '';
+    note.textContent = dirty ? state.personaEditNote : '';
   }
   const title = $('#persona-view-title');
   if (title) title.textContent = tpl?.name || (hasText ? (templatesKnown ? '自定义正文' : '角色设定') : '（还没设置角色设定）');
@@ -116,7 +124,7 @@ function syncPersonaButtons() {
   const expandBtn = $('#persona-expand-btn');
   if (expandBtn) {
     const total = parsePersonaCard(draft.roleText).sections.length;
-    expandBtn.textContent = total > 0 && personaCollapsedSections.size >= total ? '全部展开' : '全部收起';
+    expandBtn.textContent = total > 0 && state.personaCollapsedSections.size >= total ? '全部展开' : '全部收起';
   }
 }
 
@@ -124,8 +132,8 @@ function applyPersonaDraft(tpl, id = '') {
   $('#cfg-roletext').value = tpl.text;
   $('#cfg-customrules').value = tpl.customRules || '';
   $('#cfg-behavior-profile').value = tpl.behaviorProfile || 'legacy';
-  personaEditingSection = -1;
-  personaEditNote = '';
+  state.personaEditingSection = -1;
+  state.personaEditNote = '';
   // 记下"草稿是从哪张卡来的"：没保存之前 config 里还是旧绑定，
   // 「恢复本节 / 恢复整张卡」必须按草稿这张卡来，否则会把两张卡拼在一起。
   personaDraftCardId = id || findPersonaTemplateId(tpl.text, tpl.behaviorProfile || 'legacy', tpl.customRules || '');
@@ -144,13 +152,11 @@ function personaBaseCardId() {
   return picked && state.personaTemplates[picked]?.builtin ? picked : '';
 }
 
-let personaCollapsedSections = new Set();
+// personaCollapsedSections / personaEditingSection / personaEditNote 的初始化在 core/state.js：
+// 它们现在是 state 的属性，而顶层写 state 会在**模块求值期**读 `state` —— 本文件与
+// core/state.js 在同一个 import 环上，可能先求值，那样会踩 TDZ（见那边的注释与契约用例）。
 
 let personaFoldKey = null;
-
-let personaEditingSection = -1;   // 正在按小节编辑的序号；-1 = 没在编辑
-
-let personaEditNote = '';         // 小节编辑后的提示（"还得点保存设置"这类）
 
 let personaViewKey = null;        // 上次画正文视图用的内容指纹（没变就跳过重画）
 
@@ -184,8 +190,8 @@ function refreshPersonaFold(roleText) {
     && parsePersonaCard(previousKey).sections.length === parsePersonaCard(key).sections.length;
   personaFoldKey = key;
   if (!sameShape) {
-    personaCollapsedSections = defaultPersonaFold(key);
-    personaEditingSection = -1;
+    state.personaCollapsedSections = defaultPersonaFold(key);
+    state.personaEditingSection = -1;
   }
 }
 
@@ -198,7 +204,7 @@ function personaInline(text) {
 
 function parsePersonaCard(text) {
   const source = String(text || '');
-  if (personaParseCache.text === source) return personaParseCache.card;
+  if (state.personaParseCache.text === source) return state.personaParseCache.card;
   const card = { title: '', sections: [] };
   let section = null;
   const blocks = () => (section ? section.blocks : (card.intro ||= []));
@@ -247,7 +253,7 @@ function parsePersonaCard(text) {
     else if (last?.type === 'p') last.text += ` ${line.trim()}`;
     else blocks().push({ type: 'p', text: line.trim() });
   }
-  personaParseCache = { text: source, card };
+  state.personaParseCache = { text: source, card };
   return card;
 }
 
@@ -513,3 +519,9 @@ function openPersonaCreateModal() {
     }
   });
 }
+
+
+export {
+  applyPersonaDraft, currentPersonaId, defaultPersonaFold, openPersonaCreateModal, parsePersonaCard,
+  personaBaseCardId, personaSectionBody, renderPersonaSection, syncPersonaButtons
+};

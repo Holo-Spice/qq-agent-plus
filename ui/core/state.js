@@ -3,6 +3,11 @@
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（test/ui-modules.test.mjs 的守恒断言盯住）。
 'use strict';
 
+
+import { updateProgressElapsed } from '../app.js';
+import { $, $$ } from './dom.js';
+import { lifecycleRemainingText } from './lifecycle-labels.js';
+import { renderMemoryList } from '../pages/memory.js';
 const state = {
   tab: 'sessions',
   integrationStatus: null,
@@ -43,24 +48,34 @@ const state = {
   consolidateResult: {}   // chatKey -> { note, at, failed? }
 };
 
+// ── 跨文件共享的可变单元 ──
+// 2026-10-01 ESM 化：这些原先是模块级 `let`，靠 classic script 的全局词法环境互相读写。
+// ES module 的 import 绑定**只读**（写它 TypeError），所以一概挂到 state 上（属性可写）。
+// ⚠ 初始化必须留在**本文件**：`state.X = ...` 是模块求值期就执行的一行，谁写谁就得保证
+// state 已经初始化。core/state.js ↔ app.js ↔ pages/* 在同一个 import 环上，别的文件
+// （尤其 pages/persona.js）完全可能先求值 —— 那时 state 还在 TDZ 里，浏览器直接白屏。
+// 这件事由 test/ui-module-graph.test.mjs 的 TDZ 用例盯着（它就是这么发现 persona 那三格的）。
+state.personaCollapsedSections = new Set();
+state.personaEditingSection = -1;   // 正在按小节编辑的序号；-1 = 没在编辑
+state.personaEditNote = '';         // 小节编辑后的提示（"还得点保存设置"这类）
+
 /**
  * 用量页当前选中的时间范围（对应 USAGE_RANGES 里的值）。
- * 用 let 而不是 const：点范围按钮会改它，改完要重新拉取数据。
  */
-let usageRange = '7';
+state.usageRange = '7';
 
 // ── 启动 loading 壳：页面先渲染，等服务可用后自动隐藏 ──
 const loadingStatus = $('#loading-status');
 
 const loadingLogs = $('#loading-logs');
 
-let appReady = false;
+state.appReady = false;
 
-let bootLogs = [];
+state.bootLogs = [];
 
-let loadingRevealed = false;
+state.loadingRevealed = false;
 
-let loadingRevealTimer = null;
+state.loadingRevealTimer = null;
 
 // 进度里的耗时每秒刷新；只在控制页且更新仍在跑时工作，跑完或切页后自动停。
 // 注意：这里直接写 textContent —— setText 是 updateControlHubFields 里的局部函数，
@@ -95,23 +110,23 @@ function startUpdateProgressTicker() {
 //    setTimeout 在后台页面仍会执行（最多被节流到 1s），远比不执行强。
 const pendingSessionDetail = new Map();   // sessionId -> 合并后的 patch
 
-let sessionRenderScheduled = false;
+state.sessionRenderScheduled = false;
 
 // 存档页的刷新合并：chat-update 是"每条落库消息推一次"，而选中某个群时每次都会重拉
 // 该会话整段历史（limit=100000）并重建整张消息表 —— 活跃群里等于每分钟几十次全量
 // 下载 + 重绘，界面明显卡顿（2026-09-29 审查 P2）。合并到 1.5 秒一次；
 // keepView 仍然生效，所以滚出来的内容不会被刷回去。
-let chatsRefreshTimer = null;
+state.chatsRefreshTimer = null;
 
 // 顶栏状态同样合并：chat-update 是每条消息一次，而 status-refresh.js 重写过的 refreshStatus
 // 在人物印象 / 异常处理页会各自整页重拉（5 个接口 / 2 个接口 + 整串模板重算）——
 // 只合并存档页的话，这两个页面的请求量一点没少（2026-09-29 审查 P2）。
-let statusRefreshTimer = null;
+state.statusRefreshTimer = null;
 
 // 会话列表定时刷新：只要停在会话页，就持续更新列表（运行中会话也会轮询详情）
 // 间隔取自配置的 ui.refreshMs（设置页「界面刷新间隔」）；此前这里硬编码 4000，
 // 配置项从未被读取 —— 用户改了完全没效果。
-let listPoller = null;
+state.listPoller = null;
 
 function refreshIntervalMs() {
   const n = Number(state.config?.ui?.refreshMs);
@@ -158,7 +173,7 @@ function startLifecycleTicker() {
 }
 
 // 上次渲染会话详情的指纹：内容没变就不重渲染（轮询期间避免闪烁与滚动重置）
-let lastDetailFp = null;
+state.lastDetailFp = null;
 
 /**
  * 排序缓存：state.chatMessages 的引用不变就复用上次的排序结果。
@@ -172,7 +187,7 @@ let lastDetailFp = null;
  * 消息顺序不对。先按 ts 稳定升序排一遍（Array.sort 在现代引擎里是稳定的），
  * 再反转，就能保证"新的在上"且同秒内顺序也正确。
  */
-let chatMsgSortCache = { src: null, newestFirst: [] };
+state.chatMsgSortCache = { src: null, newestFirst: [] };
 
 /** 峰谷拆分条（弹窗外部上方展示；没用到分时段计价的模型则不显示）。 */
 /**
@@ -190,9 +205,9 @@ let chatMsgSortCache = { src: null, newestFirst: [] };
  * 2. 骨架屏**立即**显示，不等数据回来 —— 用户切过去马上看到布局，不会"黑一会"
  * 3. 竞态防护：请求期间用户可能切走或改了时间范围，回来时丢弃过期结果
  */
-let usageLoadToken = 0;          // 每次加载递增，用于丢弃过期结果
+state.usageLoadToken = 0;          // 每次加载递增，用于丢弃过期结果
 
-let usageLastData = null;        // 上一次加载成功的数据：{ range, stats, st, prices }
+state.usageLastData = null;        // 上一次加载成功的数据：{ range, stats, st, prices }
 
 // 整理中的计时刷新：让"已 Ns"持续走动，并在没有活跃任务时自动停掉。
 // 整理可能持续几十秒，用户切走再切回时靠它维持可见状态。
@@ -221,9 +236,9 @@ function startConsolidateTicker() {
 }
 
 /** 定价弹窗当前编辑的对象：{ model, vendor }。 */
-let priceDialogState = null;
+state.priceDialogState = null;
 
-let personaViewTimer = null;      // 正文输入时的合并渲染定时器
+state.personaViewTimer = null;      // 正文输入时的合并渲染定时器
 
 /**
  * 把角色正文解析成 { title, sections: [{ num, name, blocks, from, to }] }。
@@ -238,7 +253,7 @@ let personaViewTimer = null;      // 正文输入时的合并渲染定时器
  * （默认折叠、卡库简介、正文渲染、取单节正文…），3~4KB 的正文每次重解析不划算。
  * 调用方都只读返回值，不要改它。
  */
-let personaParseCache = { text: null, card: null };
+state.personaParseCache = { text: null, card: null };
 
 /** 卡库里的一张卡：草稿中的那张会高亮，真正生效且绑着卡文件的那张挂「使用中」。 */
 /** 卡库简介（取自「你是谁」第一段）按卡正文缓存 —— 卡库每次重画都要用 5 次。 */
@@ -254,3 +269,9 @@ function pickedGroups(boxId) {
   if (box.dataset.loaded !== '1') return null;
   return [...box.querySelectorAll('input.group-check:checked')].map((n) => n.value);
 }
+
+
+export {
+  loadingLogs, loadingStatus, pendingSessionDetail, personaDescCache, pickedGroups, refreshIntervalMs,
+  startConsolidateTicker, startLifecycleTicker, startUpdateProgressTicker, startWaitTicker, state
+};

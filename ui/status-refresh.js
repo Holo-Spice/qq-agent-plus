@@ -7,6 +7,21 @@
 //
 // 经 QARegistry 接管（改进方案 §11 C2「去插件化」）：原先这里是裸赋值
 // `refreshStatus = ...`，靠改写全局生效 —— 模块化后那样的覆盖会静默失效。
+
+import {
+  closeModelModal, loadFriendFeaturePage, loadIdentityFeaturePage, loadIncidentFeaturePage, modelModalShell,
+  renderBanner
+} from './app.js';
+import { api } from './core/api.js';
+import { setStatusLabel, updateOnebotStatusLine } from './core/dom-util.js';
+import { $, esc } from './core/dom.js';
+import { fmtTokens, mulOf, onebotIssueText } from './core/format.js';
+import { lifecycleStateOf } from './core/lifecycle-labels.js';
+import { QARegistry } from './core/registry.js';
+import { state } from './core/state.js';
+import { loadExperimentalFeatureStatuses } from './pages/features.js';
+import { loadDailyMomentsStatus, loadQzoneInteractionStatus } from './pages/moments.js';
+import { lifecycleAggregate, loadTimeControlStatus } from './pages/status.js';
 QARegistry.override('refreshStatus', async function refreshStatus() {
   try {
     state.status = await api('/api/status');

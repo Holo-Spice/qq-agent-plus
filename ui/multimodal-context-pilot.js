@@ -2,6 +2,8 @@
 
 // 多模态生命周期续接仍处于实验阶段，不占用独立产品页；只在“设置 → 实验功能”里挂开关。
 // 关闭时后端保持当前 multimodal-context rollover 行为。
+
+import { api } from './core/api.js';
 (function multimodalContextPilotSettings() {
   let rendering = false;
   let timer = null;

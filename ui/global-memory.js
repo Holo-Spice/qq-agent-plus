@@ -1,5 +1,10 @@
 'use strict';
 
+
+import { api } from './core/api.js';
+import { esc } from './core/dom.js';
+import { state } from './core/state.js';
+import { saveMemberNote } from './pages/memory.js';
 (function globalPersonMemoryConsole() {
   let people = [];
   let selectedKey = '';

@@ -4,6 +4,12 @@
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（脚本内已核对，勿手改缩进）。
 'use strict';
 
+
+import { api } from '../core/api.js';
+import { ASR_SERVICES } from '../core/constants.js';
+import { esc } from '../core/dom.js';
+import { asrServiceOf, asrServiceOptions, normalizeAsrMax } from '../core/format.js';
+import { state } from '../core/state.js';
 /**
  * 语音转文字（ASR）独立分区：Key 与服务属于"外部服务配置"，跟聊天行为（聊天设置）分开放，
  * 与「搜索服务」相邻 —— 两者都是外部服务 + Key 那一类。
@@ -574,3 +580,6 @@ async function bindTtsControls() {
     } catch (e) { if (modelsHint) modelsHint.textContent = `失败：${e.message}`; }
   });
 }
+
+
+export { bindTtsControls, renderAsrSection };

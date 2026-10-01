@@ -7,6 +7,8 @@
 // 本文件必须在 app.js 之前加载（core/dom.js → core/api.js → app.js）。
 // token 常量随实现一起搬来（原在 app.js；值从未变过，外挂副本的 MARKER 同值）——
 // 放这里后 app.js 不再需要它，全项目单一出处。
+
+import { $ } from './dom.js';
 const CONSOLE_MARKER = 'qq-agent-console';
 
 async function api(path, options = {}) {
@@ -27,3 +29,6 @@ async function api(path, options = {}) {
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
+
+
+export { api };

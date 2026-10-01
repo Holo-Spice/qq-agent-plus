@@ -4,6 +4,9 @@
 // experiment page. This file deliberately hooks existing render boundaries
 // instead of watching every DOM mutation: message/status refreshes must not
 // repeatedly delete and recreate controls.
+
+import { QARegistry } from './core/registry.js';
+import { state } from './core/state.js';
 (function installStableFeatureUi() {
   const promotedExperimentControls = [
     '#cfg-identity-pilot-enabled',

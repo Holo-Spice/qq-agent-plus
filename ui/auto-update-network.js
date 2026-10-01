@@ -1,3 +1,6 @@
+
+import { api } from './core/api.js';
+import { esc } from './core/dom.js';
 (() => {
   'use strict';
 

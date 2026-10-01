@@ -9,3 +9,6 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
+
+
+export { $, $$, esc };

@@ -3,6 +3,25 @@
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（test/ui-modules.test.mjs 的守恒断言盯住）。
 'use strict';
 
+
+import {
+  loadFriendFeaturePage, loadIdentityFeaturePage, loadIncidentFeaturePage, refreshStatus, renderBanner,
+  renderControlHub, switchTab
+} from '../app.js';
+import { api } from '../core/api.js';
+import { THREAD_STATE_LABEL } from '../core/constants.js';
+import { askForConfirmation, setStatusLabel, updateOnebotStatusLine } from '../core/dom-util.js';
+import { $, esc } from '../core/dom.js';
+import {
+  chatNameOf, fmtRemainingMs, fmtTime, fmtTok, fmtTokens, fmtYuan, formatChatTitle, mulOf, onebotIssueText
+} from '../core/format.js';
+import {
+  lifecycleRemainingText, lifecycleRunsFor, lifecycleStateOf, triggerKindLabel
+} from '../core/lifecycle-labels.js';
+import { state } from '../core/state.js';
+import { loadChats } from './chat.js';
+import { loadExperimentalFeatureStatuses } from './features.js';
+import { loadDailyMomentsStatus, loadQzoneInteractionStatus } from './moments.js';
 function lifecycleAggregate(s) {
   const groupedRuns = lifecycleRunsFor(s);
   const runs = groupedRuns.length ? groupedRuns : [s];
@@ -298,3 +317,10 @@ async function loadTimeControlStatus() {
     if ($('#tc-live-state')) $('#tc-live-state').textContent = error.message;
   }
 }
+
+
+export {
+  ignoreUpdateVersion, lifecycleAggregate, loadTimeControlStatus, pauseAutoUpdate, refreshAutoUpdateStatus,
+  refreshStatusImpl, renderLifecycleOverviewImpl, renderUpdateCheckNote, resumePause, runManualUpdate,
+  runUpdateFromNotice, timeControlTargetOptions, updateTimeControlLiveState
+};

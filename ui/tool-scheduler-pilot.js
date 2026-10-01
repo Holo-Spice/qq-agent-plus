@@ -2,6 +2,8 @@
 
 // 工具调度器仍处于实验阶段，不占用独立产品页；只在“设置 → 实验功能”里挂一个开关。
 // 关闭时后端直接走 tools-core.js，前端也不触碰正常会话逻辑。
+
+import { api } from './core/api.js';
 (function toolSchedulerPilotSettings() {
   let rendering = false;
   let timer = null;

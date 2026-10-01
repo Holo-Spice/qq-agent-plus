@@ -6,6 +6,10 @@
 // ── 工具函数 ──
 // 控制台标识头：证明请求来自本控制台页面，而非外部网页冒用浏览器。
 // 带自定义头的请求必须过 CORS 预检，天然挡住跨站脚本/表单的静默读取。
+
+import { ASR_SERVICES, MODEL_SERVICES_UI, STICKER_MAX_CHOICES } from './constants.js';
+import { esc } from './dom.js';
+import { state } from './state.js';
 /** 数字加千分位（token 计数用）。 */
 const fmtTok = (n) => (Number(n) || 0).toLocaleString('zh-CN');
 
@@ -585,3 +589,14 @@ function sliderDesc(pos) {
 function parseList(s) {
   return String(s || '').split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean);
 }
+
+
+export {
+  asrHostOf, asrServiceOf, asrServiceOptions, chatNameOf, clampInt, effectivePriceFor, fmtClock, fmtRate,
+  fmtRemainingMs, fmtTime, fmtTok, fmtTokens, fmtWaitRemain, fmtYuan, formatChatTitle, formatElapsed,
+  formatReleaseNotes, formatRevision, groupSliderPosForUi, hasOwnPrice, hostOfUrl, initialServiceNote,
+  legacyServiceDeployed, matchPriceTable, memThreshold, mulOf, normalizeAsrMax, normalizeStickerMax,
+  onebotIssueText, onebotStatusLineHtml, paramActiveForProbability, parseList, priceTxt, segOfProbability,
+  serviceTileState, serviceUrl, sliderDesc, sliderToTierUI, sliderToTierUI_tierToSlider,
+  stickerMaxSelectOptions, uiServiceOfUrl
+};

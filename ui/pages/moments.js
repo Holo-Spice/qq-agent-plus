@@ -3,6 +3,18 @@
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（test/ui-modules.test.mjs 的守恒断言盯住）。
 'use strict';
 
+
+import { refreshStatus, renderSettings } from '../app.js';
+import { api } from '../core/api.js';
+import { MOMENT_STATUS_LABELS, QZONE_ACTION_LABELS, QZONE_RUN_LABELS } from '../core/constants.js';
+import {
+  askForConfirmation, experimentalFeatureLaunchPatch, requestExperimentOwnerUin,
+  syncGraduatedFeatureNavigation
+} from '../core/dom-util.js';
+import { $, $$, esc } from '../core/dom.js';
+import { chatNameOf, fmtTime, formatChatTitle } from '../core/format.js';
+import { state } from '../core/state.js';
+import { saveConfig } from './settings-save.js';
 function renderExperimentalSettingsSectionImpl(c) {
   const enabled = c.identityPilot?.enabled === true;
   const slang = c.slangPilot || {};
@@ -703,3 +715,11 @@ async function loadQzoneInteractionStatus() {
     box.innerHTML = `<span class="muted">状态读取失败：${esc(error.message)}</span>`;
   }
 }
+
+
+export {
+  launchExperimentalFeature, loadDailyMomentsStatus, loadGroupGameView, loadQzoneInteractionStatus,
+  loadRemindersView, momentStatusLabel, renderDailyMomentsSection, renderExperimentalSettingsSectionImpl,
+  renderGroupChecklist, renderGroupGameSection, renderMomentWindowRow, renderQzoneInteractionSection,
+  renderRemindersSection
+};

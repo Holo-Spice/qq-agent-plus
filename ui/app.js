@@ -8,6 +8,41 @@
 // （页面看着正常，只是那段改造不再生效）。改为显式注册：由这里分发，顺序错了当场可见。
 // 名字仍留在全局（classic script 的跨文件作用域不变），只是不再被谁改写。
 // 底座一律带 `Impl` 后缀，插件可用 QARegistry.base(name) 取回原实现（避免自递归）。
+
+import { api } from './core/api.js';
+import {
+  CORE_SERVICE_LINKS, SESSION_KEEP, THEME_ICON, THEME_LABEL, THEME_VALUES, UPDATE_ACTIVE_STATUSES,
+  UPDATE_PHASE_LABELS, UPDATE_STATUS_LABELS
+} from './core/constants.js';
+import {
+  afterRender, askForConfirmation, hideLoading, initSessionScrollLoader, pollUntilReady,
+  revealLoadingIfSlow, scheduleChatsRefresh, scheduleSessionRender, setBoxError, setLoadingStatus,
+  syncGraduatedFeatureNavigation
+} from './core/dom-util.js';
+import { $, $$, esc } from './core/dom.js';
+import {
+  clampInt, fmtTime, formatElapsed, formatReleaseNotes, formatRevision, hostOfUrl, legacyServiceDeployed,
+  onebotIssueText, serviceTileState, serviceUrl, uiServiceOfUrl
+} from './core/format.js';
+import { QARegistry } from './core/registry.js';
+import { pendingSessionDetail, startUpdateProgressTicker, state } from './core/state.js';
+import { loadChats } from './pages/chat.js';
+import {
+  loadAssetObservatory, loadExperimentalFeatureStatuses, loadFriendOpportunities, loadFriendProposals,
+  loadIncomingFriendRequests, loadSlangFeaturePage, renderFriendFeaturePageImpl,
+  renderIdentityFeaturePageImpl, renderIncidentFeaturePageImpl
+} from './pages/features.js';
+import { loadMemoryView, renderMemoryList } from './pages/memory.js';
+import { renderExperimentalSettingsSectionImpl } from './pages/moments.js';
+import { loadSessionDetail, loadSessions } from './pages/sessions.js';
+import {
+  renderSettingsImpl, resolveTheme, startListPoller, syncPriceDialogBilling
+} from './pages/settings.js';
+import {
+  ignoreUpdateVersion, pauseAutoUpdate, refreshStatusImpl, renderLifecycleOverviewImpl,
+  renderUpdateCheckNote, resumePause, runManualUpdate, runUpdateFromNotice
+} from './pages/status.js';
+import { deletePriceDialog, loadUsageView, savePriceDialog } from './pages/usage.js';
 QARegistry.register('renderExperimentalSettingsSection', renderExperimentalSettingsSectionImpl);
 QARegistry.register('renderSettings', renderSettingsImpl);
 QARegistry.register('renderIdentityFeaturePage', renderIdentityFeaturePageImpl);
@@ -18,7 +53,7 @@ QARegistry.register('renderLifecycleOverview', renderLifecycleOverviewImpl);
 QARegistry.register('loadFriendFeaturePage', loadFriendFeaturePageImpl);
 
 // html 变换：原实现先算完，返回值再过钩子链（对应原 wrapHtmlRenderer）
-// eslint-disable-next-line no-unused-vars -- 对外入口：由 ui/pages/settings.js 与 stable-features.js 经全局调用，单文件视角看不见调用点
+ 
 function renderExperimentalSettingsSection(c) {
   return QARegistry.transform('renderExperimentalSettingsSection', renderExperimentalSettingsSectionImpl(c), [c]);
 }
@@ -30,7 +65,7 @@ function renderIncidentFeaturePage(...args) { return afterRender('renderIncident
 
 // 整体接管：插件 override 后由这里分发（原实现是底座）
 function refreshStatus(...args) { return QARegistry.dispatch('refreshStatus', ...args); }
-// eslint-disable-next-line no-unused-vars -- 对外入口：由 status-refresh.js 等 files 经 QARegistry 消费，单文件视角看不见调用点
+ 
 function renderLifecycleOverview(...args) { return QARegistry.dispatch('renderLifecycleOverview', ...args); }
 function loadFriendFeaturePage(...args) { return QARegistry.dispatch('loadFriendFeaturePage', ...args); }
 
@@ -78,7 +113,7 @@ async function bootLoop() {
 }
 
 // ── 就绪度体检（傻瓜式引导的核心） ──
-// eslint-disable-next-line no-unused-vars -- 对外入口：ui/pages/* 与 status-refresh.js 经全局调用，单文件视角看不见调用点
+ 
 function renderBanner() {
   const banner = $('#banner');
   const s = state.status;
@@ -572,9 +607,9 @@ $('#runtime-mode')?.addEventListener('change', async (event) => {
 });
 
 function scheduleStatusRefresh() {
-  if (statusRefreshTimer) return;
-  statusRefreshTimer = setTimeout(() => {
-    statusRefreshTimer = null;
+  if (state.statusRefreshTimer) return;
+  state.statusRefreshTimer = setTimeout(() => {
+    state.statusRefreshTimer = null;
     refreshStatus();
   }, 1500);
 }
@@ -744,7 +779,12 @@ function connectSSE() {
   es.onerror = () => { /* EventSource 自动重连 */ };
 }
 
-startListPoller();
+// 早起的轮询：配置还没读到，先用兜底间隔跑起来（配置就绪后 init() 里会再校准一次）。
+// 2026-10-01 ESM 化：这一行原先是模块顶层的裸调用 —— 模块求值期就执行，而 app.js 会被
+// core/state.js 的依赖链先求值（core/state.js ↔ app.js ↔ pages/* 是同一个 import 环），
+// 那会儿 `state` 还在 TDZ 里 → Cannot access 'state' before initialization → 白屏。
+// 顶层语句只留"注册/绑定 DOM"这类不读 state 的动作，真要开跑的挪进 init()。
+// 真模块语义下加载整棵 ui/ 的用例（test/ui-real-modules.test.mjs）盯这件事。
 
                                  // 用于切回用量页时先立即画出旧内容，避免"黑一下"
 
@@ -845,7 +885,7 @@ async function loadIncidentFeaturePage() {
 
 /** 「跟随服务商默认」= 配置里没有具体的思考要求（'on'/true/未设置）。 */
 /** 当前地址对应的设置原值：优先"该供应商自己的条"，没有退回全局（与服务端 effectiveThinkingRaw 同口径）。 */
-// eslint-disable-next-line no-unused-vars -- 对外入口：ui/core/dom-util.js 经全局调用，单文件视角看不见调用点
+ 
 function currentThinkingRaw(c) {
   const host = hostOfUrl(c.api?.baseUrl);
   const map = c.api?.thinkingByService;
@@ -856,7 +896,7 @@ function currentThinkingRaw(c) {
  *  只列当前渠道可用的档位；「跟随服务商默认」不是强度轴上的一个点，单独用勾选框表达；
  *  渠道没有可调档位时（未实测 / 官方不支持）不出控件，如实说明。 */
 /** 当前渠道可用的档位（内置=预设清单；自定义/表外=映射里的键）。 */
-// eslint-disable-next-line no-unused-vars -- 对外入口：ui/core/dom-util.js 经全局调用，单文件视角看不见调用点
+ 
 function thinkingStops(c) {
   const service = uiServiceOfUrl(c.api?.baseUrl);
   const params = c.api?.thinkingParams && typeof c.api.thinkingParams === 'object' && !Array.isArray(c.api.thinkingParams)
@@ -867,7 +907,7 @@ function thinkingStops(c) {
   return levels.filter((l) => ['off', 'low', 'medium', 'high', 'max'].includes(l));
 }
 /** 渲染一条档位分段。withOn=true 时最左多一格「默认」（"聊天单独设档"的两条用它表达各行的默认）。 */
-// eslint-disable-next-line no-unused-vars -- 对外入口：ui/core/dom-util.js 经全局调用，单文件视角看不见调用点
+ 
 function renderThinkingSeg(id, stops, cur, service, withOn) {
   const offApprox = Boolean(service && service.canDisable === false);
   const label = (v2) => (v2 === 'on' ? '默认'
@@ -897,7 +937,7 @@ function closeModelModal(overlay) {
  *    两个 flex 项把宽度吃光，.ma-body（flex:1, basis 0）被挤成 0 宽，
  *    整个内容区隐形（2026-09-05 批量价格弹窗"空白"事故）。
  */
-// eslint-disable-next-line no-unused-vars -- 对外入口：ui/pages/features.js、memory.js、persona.js 经全局调用，单文件视角看不见调用点
+ 
 function modelModalShell({ head, body, foot = '', danger = false }) {
   const overlay = document.createElement('div');
   overlay.className = 'model-modal-overlay';
@@ -930,7 +970,10 @@ $$('.tab').forEach((tab) => {
 });
 
 // ── 启动 ──
-(async function init() {
+async function init() {
+  // 先在配置就绪之前把轮询跑起来（兜底间隔，见下面 startListPoller 的注释）——
+  // 放到这里而不是模块顶层，是因为模块求值期读 state 会踩 TDZ。
+  startListPoller();
   // 主题：先按本地偏好应用（index.html 的内联脚本已做过一次，这里同步按钮图标），
   // 再用后端配置覆盖（若用户换了设备，以后端为准）。
   applyTheme(getThemePref());
@@ -1016,4 +1059,24 @@ $$('.tab').forEach((tab) => {
   loadSessions();
   loadMemoryView();
   initSessionScrollLoader();
-})();
+}
+
+// 启动：**必须等模块图全部求值完**再跑 init。
+// 2026-10-01 ESM 化：init 一上来就读 state（core/state.js ↔ app.js ↔ pages/* 是同一个
+// import 环），模块求值期读它会踩 TDZ → "Cannot access 'state' before initialization" → 白屏。
+//
+// 判据是"还没 complete"，不是"还在 loading" —— **浏览器里 module 脚本执行期 readyState 已经是
+// 'interactive'**（HTML 规范：解析结束后先置 interactive，再跑 defer/module 脚本，最后才发
+// DOMContentLoaded 并把状态置成 complete）。第一版写成 `=== 'loading'`，本地剥壳沙箱与
+// 强制 readyState 的用例都测不出来，真浏览器一打开就白屏（服务器烟测抓到，见 ADR 0005）。
+// 只有脚本晚于 DOMContentLoaded 才走直接跑那一支（动态加载/极端缓存情形）。
+if (document.readyState === 'complete') init();
+else document.addEventListener('DOMContentLoaded', init, { once: true });
+
+
+export {
+  applyTheme, closeModelModal, currentThinkingRaw, getThemePref, loadFriendFeaturePage,
+  loadIdentityFeaturePage, loadIncidentFeaturePage, loadSettings, modelModalShell, refreshStatus,
+  renderBanner, renderControlHub, renderExperimentalSettingsSection, renderLifecycleOverview,
+  renderSettings, renderThinkingSeg, switchTab, thinkingStops, updateProgressElapsed
+};

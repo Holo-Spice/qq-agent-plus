@@ -1,16 +1,20 @@
 # 控制台手工烟测清单（UI-SMOKE）
 
 自动化只覆盖到「渲染函数不抛异常 + 真实 DOM 能加载 + 钩子接上了」这三层
-（`test/render-test.mjs` 178 条、`test/scroll-test.mjs` 19 条、`test/ui-smoke.test.mjs` 4 条、
-`test/ui-contract.test.mjs` 4 条、`test/ui-modules.test.mjs` 2 条、`test/static-cache.test.mjs` 5 条）。
+（`test/render-test.mjs` 178 条、`test/scroll-test.mjs` 19 条、`test/usage-e2e.mjs` 31 条、
+`test/ui-smoke.test.mjs` 4 条、`test/ui-module-graph.test.mjs` 6 条、
+`test/ui-real-modules.test.mjs` 1 条、`test/ui-modules.test.mjs` 4 条、
+`test/ui-registry.test.mjs` 9 条、`test/static-cache.test.mjs` 6 条）。
 **布局、事件、真实数据下的
 观感只有人看得见**，所以每次动到 `ui/` 就照下面走一遍。
 
-> **`ui-modules` 与 `ui-smoke` 不是可选用例。** 30 个 classic script 共享同一个全局词法环境，
-> 加载顺序错了或漏加载一个文件，浏览器里往往**不报错** —— 只是某个页面空白、或某个外挂改造
-> 悄悄失效（`status-refresh.js` 掉了就是"状态不再自动刷新"，页面上看不出异常）。
-> 能当场抓住这类静默失效的只有 `ui-modules`（清单一一对应 + 加载顺序）与 `ui-smoke`
-> （真实 DOM 按 index.html 顺序加载全部脚本）。
+> **`ui-modules` / `ui-module-graph` / `ui-real-modules` / `ui-smoke` 不是可选用例。**
+> ui/ 是 30 个 ES module（2026-10-01 起）：文件漏加载、漏写一个 import、模块求值期踩 TDZ，
+> 浏览器里可能是**白屏**、也可能只是某个页面空白或某个外挂改造悄悄失效
+> （`status-refresh.js` 掉了就是"状态不再自动刷新"，页面上看不出异常）。
+> 注意分工：vm 沙箱（render / scroll / usage / ui-smoke）是"剥掉 import/export 按 classic 跑"，
+> 对真模块语义**是瞎的**；管模块图与求值期行为的是 `ui-module-graph`（静态）与
+> `ui-real-modules`（用真 ESM 加载器加载整棵树）。
 
 打开方式见 [`../AGENTS.md`](../AGENTS.md)（`console-tunnel.bat` 或
 `SSHHOST=user@host node src/ops.js console --open`）。
@@ -23,6 +27,11 @@
 - [ ] 在控制台里执行 `QARegistry.snapshot()`：`bases` 应有 8 个入口、`overrides` 应有 3 个
       （`refreshStatus` / `renderLifecycleOverview` / `loadFriendFeaturePage`）、
       `transforms` 应有 `renderExperimentalSettingsSection`、`afters` 应有 4 个渲染页
+      （`QARegistry` 是 ui/ 里**有意留在 window 上**的两个东西之一，另一个是 `QAText`；
+      其余函数不再是全局 —— 想从控制台驱动界面，点 DOM 而不是敲 `switchTab('usage')`）
+- [ ] 页面能点：点一个页签有反应。**module 是 defer 语义**，启动挂在 `DOMContentLoaded` 上；
+      若整页点不动、连报错都没有，先看 Network 里 30 个 js 是不是 200/304 都拿到了
+      （js 现在不带 `?v=` 令牌、走回源校验，这是 2026-10-01 有意改的）
 
 ## 1. 顶栏与总览
 
@@ -64,11 +73,17 @@
 - [ ] `npm run lint`（0 error / 0 warning；`max-lines` 对**整个 ui/** 生效，阈值 1800）
 - [ ] `node test/render-test.mjs` → ALL PASSED 178
 - [ ] `node test/scroll-test.mjs` → ALL PASSED 19
-- [ ] `node --test test/ui-smoke.test.mjs test/ui-contract.test.mjs test/ui-registry.test.mjs test/ui-modules.test.mjs`
-      （ui-contract 4 条 / ui-modules 2 条 / ui-registry 9 条 / ui-smoke 4 条）
+- [ ] `node test/usage-e2e.mjs` → ALL PASSED 31
+- [ ] `node --test test/ui-smoke.test.mjs test/ui-module-graph.test.mjs test/ui-real-modules.test.mjs test/ui-registry.test.mjs test/ui-modules.test.mjs`
+      （ui-smoke 4 条 / ui-module-graph 6 条 / ui-real-modules 1 条 / ui-registry 9 条 / ui-modules 4 条）
+      注：**缺 devDeps 时这几条会整体跳过**（`ui-smoke` / `ui-real-modules` 要 happy-dom，
+      `ui-module-graph` 要 espree / eslint-scope）—— 生产与更新器环境按 D6 约定就是
+      `npm ci --omit=dev`，跳过是约定不是漏测；它们由 CI 与本地开发环境覆盖。
 - [ ] `node --test test/static-cache.test.mjs`（动了 `src/console/app.js` 的静态服务才需要：
-      它盯 HTML 里的内容哈希令牌、immutable 头与真 304）
-- [ ] 新增/移动跨文件全局时，**同时**改 `eslint.config.mjs` 的 `uiSharedGlobals` ——
-      不改会被 `test/ui-contract.test.mjs` 当场判红（这是有意的）；搬走定义后成为"文件私有"的
-      名字也要从清单里删掉（同一条用例的防冗余断言会揪出来）
+      它盯 HTML 里的内容哈希令牌、js 不带令牌、immutable 头与真 304）
+- [ ] 跨文件引用一律 `import`，**别再加共享全局**：`test/ui-module-graph.test.mjs` 会判红
+      （未解析引用只剩浏览器内建才放行；另外它还管"不许导出 let/var、不许写 import 绑定、
+      求值期不踩 TDZ、除 `QARegistry`·`QAText` 外不许挂 window"）
+- [ ] 新增/删除 `ui/**/*.js` 时，**同时**改 `ui/index.html` 的 script 清单 ——
+      `test/ui-modules.test.mjs` 双向核对，且每个 `<script src>` 都得是 `type="module"`
 

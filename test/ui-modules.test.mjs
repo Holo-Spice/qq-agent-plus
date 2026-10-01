@@ -17,7 +17,7 @@ function listJs(dir) {
 }
 
 test('index.html 的 script 清单与 ui/ 实际 .js 文件一一对应（双向）', () => {
-  const srcs = [...html.matchAll(/<script\s+src="([^"]+)"/g)].map((m) => m[1].replace(/^\//, ''));
+  const srcs = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map((m) => m[1].replace(/^\//, ''));
   const files = listJs(uiDir).sort();
   const missing = files.filter((f) => !srcs.includes(f));
   const dangling = srcs.filter((s) => !files.includes(s));
@@ -25,24 +25,38 @@ test('index.html 的 script 清单与 ui/ 实际 .js 文件一一对应（双向
   assert.deepEqual(dangling, [], `index.html 引用了不存在的文件：${dangling.join(', ')}`);
 });
 
-// 2026-10-01 拆模块后的加载分层（classic script 的全局依赖顺序）：
-//   /i18n/** → /core/** → /pages/** → /app.js → 8 个外挂插件
-// app.js 在**加载时**就执行 QARegistry.register('renderSettings', renderSettingsImpl) 之类的
-// 注册（把底座实现登记进注册表），所以 core/pages 必须已经先声明过那些名字；反过来，
-// 外挂插件在加载时读 app.js 暴露的全局、并往同一个注册表上挂 transform，必须在 app.js 之后。
-test('业务脚本加载顺序：i18n/core/pages 先于 app.js，外挂插件在其后', () => {
-  const srcs = [...html.matchAll(/<script\s+src="([^"]+)"/g)].map((m) => m[1]);
+test('每个 <script src> 都被标成 type="module"（2026-10-01 ESM 化）', () => {
+  const tags = [...html.matchAll(/<script\b[^>]*\bsrc="[^"]+"[^>]*>/g)].map((m) => m[0]);
+  assert.ok(tags.length >= 30, `script 标签数应等于 ui/ 文件数，实际 ${tags.length}`);
+  const offenders = tags.filter((t) => !/type="module"/.test(t));
+  assert.deepEqual(offenders, [], `这些标签没标 type="module"（浏览器会按 classic script 跑，撞上 import 直接 SyntaxError）：\n${offenders.join('\n')}`);
+});
+
+test('index.html 里内联的两段脚本必须**保持 classic**', () => {
+  // 首屏防闪的"主题预置"与"启动提示兜底"必须在外链脚本之前、且在首帧之前执行；
+  // ES module 是 defer 语义（解析完才跑），一旦被改成 module 就会先白/黑屏一下再上色。
+  const inline = [...html.matchAll(/<script(?![^>]*\bsrc=)([^>]*)>/g)].map((m) => m[1]);
+  assert.equal(inline.length, 2, `内联脚本应恰好两段（boot 兜底 + 主题预置），实际 ${inline.length}`);
+  const offenders = inline.filter((attrs) => /type="module"/.test(attrs));
+  assert.deepEqual(offenders, [], '内联脚本不能改成 module（defer 语义会让首屏先闪一下）');
+});
+
+// 清单顺序：/i18n/** → /core/** → /pages/** → /app.js → 8 个外挂插件
+//
+// **顺序不再影响正确性**（2026-10-01 ESM 化之后）：跨文件依赖由 import 图决定，谁先求值
+// 由模块图算出来，不再靠"标签先后"。这条用例守的是**可读性分层** —— 清单本身就是这份
+// 代码的目录，把"内核 → 页面 → 骨架 → 外挂"的层次钉在文档里，免得以后有人以为
+// 顺序是必需的、或者随手把外挂挪到中间让结构看起来是平的。
+test('清单顺序仍是分层顺序（可读性约定，不再是正确性要求）', () => {
+  const srcs = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map((m) => m[1]);
   const appIdx = srcs.indexOf('/app.js');
   assert.ok(appIdx !== -1, 'index.html 必须加载 /app.js');
   const offenders = [];
   for (const [idx, s] of srcs.entries()) {
     if (s === '/app.js') continue;
     const first = s.startsWith('/i18n/') || s.startsWith('/core/') || s.startsWith('/pages/');
-    if (first) {
-      if (idx > appIdx) offenders.push(`${s} 必须排在 app.js 之前（app.js 加载时的 QARegistry.register 要用到它）`);
-    } else if (idx < appIdx) {
-      offenders.push(`${s} 必须排在 app.js 之后（外挂插件依赖 app.js 已声明的全局与注册表）`);
-    }
+    if (first && idx > appIdx) offenders.push(`${s} 应该排在 app.js 之前（内核/页面 → 骨架的分层）`);
+    if (!first && idx < appIdx) offenders.push(`${s} 应该排在 app.js 之后（外挂插件在最外层）`);
   }
   assert.deepEqual(offenders, [], offenders.join('; '));
 });

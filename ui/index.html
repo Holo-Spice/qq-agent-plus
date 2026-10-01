@@ -266,39 +266,39 @@
       </div>
     </div>
   </dialog>
-  <script src="/i18n/zh-CN.js"></script>
-  <script src="/core/registry.js"></script>
-  <script src="/core/dom.js"></script>
-  <script src="/core/api.js"></script>
+  <script type="module" src="/i18n/zh-CN.js"></script>
+  <script type="module" src="/core/registry.js"></script>
+  <script type="module" src="/core/dom.js"></script>
+  <script type="module" src="/core/api.js"></script>
   <!-- 共享内核（由 app.js 机械拆出；顶层声明仍在全局词法环境，classic script 的顺序即依赖顺序） -->
-  <script src="/core/constants.js"></script>
-  <script src="/core/state.js"></script>
-  <script src="/core/format.js"></script>
-  <script src="/core/dom-util.js"></script>
-  <script src="/core/lifecycle-labels.js"></script>
+  <script type="module" src="/core/constants.js"></script>
+  <script type="module" src="/core/state.js"></script>
+  <script type="module" src="/core/format.js"></script>
+  <script type="module" src="/core/dom-util.js"></script>
+  <script type="module" src="/core/lifecycle-labels.js"></script>
   <!-- 页面域（app.js 在**加载期**就 QARegistry.register 引用这些渲染入口，故必须排在 app.js 之前） -->
-  <script src="/pages/status.js"></script>
-  <script src="/pages/usage.js"></script>
-  <script src="/pages/sessions.js"></script>
-  <script src="/pages/chat.js"></script>
-  <script src="/pages/memory.js"></script>
-  <script src="/pages/persona.js"></script>
-  <script src="/pages/moments.js"></script>
-  <script src="/pages/features.js"></script>
+  <script type="module" src="/pages/status.js"></script>
+  <script type="module" src="/pages/usage.js"></script>
+  <script type="module" src="/pages/sessions.js"></script>
+  <script type="module" src="/pages/chat.js"></script>
+  <script type="module" src="/pages/memory.js"></script>
+  <script type="module" src="/pages/persona.js"></script>
+  <script type="module" src="/pages/moments.js"></script>
+  <script type="module" src="/pages/features.js"></script>
   <!-- 设置域（第二轮拆出；app.js 的 loadSettings/bindSettingsEvents/saveConfig 链全靠它们） -->
-  <script src="/pages/settings.js"></script>
-  <script src="/pages/settings-voice.js"></script>
-  <script src="/pages/settings-bind.js"></script>
-  <script src="/pages/settings-save.js"></script>
+  <script type="module" src="/pages/settings.js"></script>
+  <script type="module" src="/pages/settings-voice.js"></script>
+  <script type="module" src="/pages/settings-bind.js"></script>
+  <script type="module" src="/pages/settings-save.js"></script>
   <!-- 骨架：启动、路由分发与就绪度体检仍在这里 -->
-  <script src="/app.js"></script>
-  <script src="/stable-features.js"></script>
-  <script src="/status-refresh.js"></script>
-  <script src="/session-memory-view.js"></script>
-  <script src="/global-memory.js"></script>
-  <script src="/tool-scheduler-pilot.js"></script>
-  <script src="/multimodal-context-pilot.js"></script>
-  <script src="/relationship-pilot.js"></script>
-  <script src="/auto-update-network.js"></script>
+  <script type="module" src="/app.js"></script>
+  <script type="module" src="/stable-features.js"></script>
+  <script type="module" src="/status-refresh.js"></script>
+  <script type="module" src="/session-memory-view.js"></script>
+  <script type="module" src="/global-memory.js"></script>
+  <script type="module" src="/tool-scheduler-pilot.js"></script>
+  <script type="module" src="/multimodal-context-pilot.js"></script>
+  <script type="module" src="/relationship-pilot.js"></script>
+  <script type="module" src="/auto-update-network.js"></script>
 </body>
 </html>

@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { test } from 'node:test';
+import { toClassicScript } from './helpers/ui-module-source.mjs';
 
 let WindowClass = null;
 try {
@@ -17,7 +18,7 @@ const SKIP = WindowClass ? false : 'happy-dom 未安装（devDependencies；--om
 
 const UI = path.resolve('ui');
 const RAW_HTML = fs.readFileSync(path.join(UI, 'index.html'), 'utf8');
-const SCRIPT_FILES = [...RAW_HTML.matchAll(/<script\s+src="([^"]+)"/g)].map((m) => m[1].replace(/^\//, ''));
+const SCRIPT_FILES = [...RAW_HTML.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map((m) => m[1].replace(/^\//, ''));
 const TABS = [...new Set([...RAW_HTML.matchAll(/data-tab="([a-z-]+)"/g)].map((m) => m[1]))];
 
 function settle(ms = 250) {
@@ -53,8 +54,8 @@ function loadPage() {
   window.addEventListener('error', (event) => errors.push(String(event?.error ?? event?.message ?? event)));
   const ctx = vm.createContext(window);
   for (const file of SCRIPT_FILES) {
-    const code = fs.readFileSync(path.join(UI, file), 'utf8');
-    new vm.Script(code, { filename: `ui/${file}` }).runInContext(ctx);
+    const raw = fs.readFileSync(path.join(UI, file), 'utf8');
+    new vm.Script(toClassicScript(raw, file), { filename: `ui/${file}` }).runInContext(ctx);
   }
   return { window, fetchLog, errors };
 }
