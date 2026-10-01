@@ -226,6 +226,8 @@ export const DEFAULT_CONFIG = {
     enabled: false,
     baseUrl: '',              // 留空表示"跟聊天模型同域"（很多网关同域就带 images 端点）
     apiKey: '',               // 单独填的 Key；留空只在"与模型同域"时复用模型 Key，否则拒绝（见 resolveImageGenAuth）
+    apiKeyHost: '',           // 上面这把 Key 是给哪家的**地址**存的（主机名）：换预设/换地址后不再拿它发请求
+
     model: '',                // 如 gpt-image-1 / seedream-3.0 / cogview-3
     size: '',                 // 如 1024x1024；留空由服务商默认
     responseFormat: '',       // 留空最兼容（新版 OpenAI 会因未知参数 400）；可填 b64_json / url
@@ -693,8 +695,12 @@ export const ASR_DERIVED_KEYS = [
  * `available`（能不能真的画）每次 GET 都重算，前端展开回传后会被写进 config.json，
  * 之后升级改了判定口径、旧结论还留在文件里冒充当前状态（2026-09-30 审查，真实往返复现）。
  * hasApiKey 由 secret-keys 的 walk 自动生成，一并按 /^has[A-Z]/ 剔掉。
+ *
+ * `keyHost` 是 GET 时的**视图别名**：真身是 apiKeyHost，因为它名字里含 apikey 会被
+ * secret-keys 抹掉，所以下发时换个名。前端把整份视图展开成 patch 回传 —— 不在这里剔掉，
+ * 保存一次 config.json 里就多出一份陈旧副本（真身改了它不跟着动，读盘的人看到两个说法）。
  */
-export const IMAGEGEN_DERIVED_KEYS = ['available'];
+export const IMAGEGEN_DERIVED_KEYS = ['available', 'keyStale', 'keyHost'];
 
 /**
  * 这个凭据能不能用于"当前配的这家"：凭据记着存它时的供应商（OpenAI 兼容的还记地址主机）。
@@ -822,6 +828,12 @@ function migrateConfig(parsed) {
     for (const key of Object.keys(out.imageGen)) {
       if (/^has[A-Z]/.test(key) || IMAGEGEN_DERIVED_KEYS.includes(key)) delete out.imageGen[key];
     }
+    // 有 Key 却没记归属的老配置：按当前地址补记（与 asr 的 pin 同款）。
+    // 不补的话升级后"换个预设"就会拿旧 Key 去撞新地址 —— 而那在升级前一直是好用的，
+    // 不补等于给升级中的实例制造"突然把 A 家 Key 发给 B 家"或"突然不生效"。
+    if (String(out.imageGen.apiKey || '').trim() && !String(out.imageGen.apiKeyHost || '').trim()) {
+      pinImageGenKeyHost(out.imageGen, out.api?.baseUrl);
+    }
   }
   return out;
 }
@@ -902,6 +914,19 @@ export function pinStoredAsrCredentials(asr, providerValue) {
   pin('apiKey', 'apiKeyProvider', 'apiKeyHost');
   pin('secretId', 'secretIdProvider');
   pin('secretKey', 'secretKeyProvider');
+}
+
+/**
+ * 记下"这把图片生成的 Key 是给哪家的地址存的"，供后续判断"换了地址还能不能拿它发请求"。
+ * 与 asr 的 apiKeyProvider/apiKeyHost 是同一条道理：把 A 家的 Key 发给 B 家是**静默事故**
+ * （不会报错，只会在别家后台留下一条 401 或一条意外计费）。只在真的提交了新 Key 时调用。
+ * 地址留空＝跟聊天模型同一家，按模型地址记；地址解析不出主机就记空串（= 未绑定）。
+ */
+export function pinImageGenKeyHost(imageGen, apiBaseUrl) {
+  if (!isPlainObject(imageGen)) return '';
+  const base = String(imageGen.baseUrl || '').trim() || String(apiBaseUrl || '').trim();
+  imageGen.apiKeyHost = asrEndpointHost(base);
+  return imageGen.apiKeyHost;
 }
 
 /** 真对象判定（排除 null / 数组 / 标量）——人设段这类"必须是对象"的字段用它兜底。 */

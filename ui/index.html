@@ -47,7 +47,7 @@
         <img class="brand-mark" src="/mark.svg" alt="" data-page-node-id="brandMark01">
         <div class="side-title">
           <strong>QQ Agent</strong>
-          <span class="brand-sub" data-page-node-id="VbspRAGex84VDC4rlmYz0x"></span>
+          <span class="brand-sub" id="app-version" data-page-node-id="VbspRAGex84VDC4rlmYz0x"></span>
         </div>
       </div>
 
@@ -217,7 +217,10 @@
            控制台登录本来就是单令牌，放个隐藏占位即可。 -->
       <input id="console-account" type="text" name="username" value="console" autocomplete="username" hidden aria-hidden="true" tabindex="-1" />
       <label for="console-token">控制台 Token</label>
-      <input id="console-token" type="password" autocomplete="current-password" required />
+      <div class="pw-row">
+        <input id="console-token" type="password" autocomplete="current-password" required />
+        <button class="btn btn-small" id="console-token-peek" type="button" title="显示 / 隐藏刚输入的 Token">显示</button>
+      </div>
       <p id="console-login-error" role="alert"></p>
       <button class="btn" type="submit">登录</button>
     </form>
@@ -288,6 +291,7 @@
   <!-- 设置域（第二轮拆出；app.js 的 loadSettings/bindSettingsEvents/saveConfig 链全靠它们） -->
   <script type="module" src="/pages/settings.js"></script>
   <script type="module" src="/pages/settings-voice.js"></script>
+  <script type="module" src="/pages/key-toggles.js"></script>
   <script type="module" src="/pages/settings-bind.js"></script>
   <script type="module" src="/pages/settings-save.js"></script>
   <!-- 骨架：启动、路由分发与就绪度体检仍在这里 -->

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { DATA_DIR, getConfig } from '../core/config.js';
+import { imageType } from '../core/image-type.js';
 import { cappedByTokenSaver, tokenSaverCapsOf } from '../core/token-saver.js';
 import {
   addUsage,
@@ -175,13 +176,9 @@ function redactPublicContent(value, snapshot) {
 }
 
 function imageMime(buffer, contentType = '') {
-  if (buffer?.[0] === 0x89 && buffer?.[1] === 0x50 && buffer?.[2] === 0x4e) return 'image/png';
-  if (buffer?.[0] === 0xff && buffer?.[1] === 0xd8 && buffer?.[2] === 0xff) return 'image/jpeg';
-  if (buffer?.toString('ascii', 0, 6) === 'GIF87a'
-      || buffer?.toString('ascii', 0, 6) === 'GIF89a') return 'image/gif';
-  if (buffer?.toString('ascii', 0, 4) === 'RIFF'
-      && buffer?.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
-  return String(contentType || 'image/jpeg').split(';')[0];
+  // 魔数优先（服务端给的 Content-Type 常是 application/octet-stream）；
+  // 认不出才回退到它，最后兜一个 jpeg —— 视觉接口只认这几家的 MIME。
+  return imageType(buffer) || String(contentType || 'image/jpeg').split(';')[0];
 }
 
 function openAiTools(defs) {

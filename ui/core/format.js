@@ -48,6 +48,17 @@ function formatRevision(value) {
   return raw.slice(0, 12);
 }
 
+/**
+ * 版本徽标：`v0.7.5 · 76b2a6ca2ebb`（没有版本号时退化成只有提交号）。
+ * 控制页「当前版本」原来只给提交号，用户看不出"这是哪个版本" —— 版本号在 package.json 里，
+ * 由 /api/status 下发（见 ui/status-refresh.js）。
+ */
+function versionWithRevision(version, value) {
+  const rev = formatRevision(value);
+  const v = String(version ?? '').trim();
+  return v ? `v${v} · ${rev}` : rev;
+}
+
 function fmtClock(ts) {
   const d = new Date(ts);
   const p = (n) => String(n).padStart(2, '0');
@@ -598,5 +609,5 @@ export {
   legacyServiceDeployed, matchPriceTable, memThreshold, mulOf, normalizeAsrMax, normalizeStickerMax,
   onebotIssueText, onebotStatusLineHtml, paramActiveForProbability, parseList, priceTxt, segOfProbability,
   serviceTileState, serviceUrl, sliderDesc, sliderToTierUI, sliderToTierUI_tierToSlider,
-  stickerMaxSelectOptions, uiServiceOfUrl
+  stickerMaxSelectOptions, uiServiceOfUrl, versionWithRevision
 };

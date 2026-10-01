@@ -31,7 +31,7 @@
 ## api.thinking：思考档位（v0.7.4 起可按渠道/按供应商/按任务分设）
 
 语义值：`on`（跟随服务商默认，也是默认值）/ `off` / `low` / `medium` / `high` / `max`。
-程序按你填的 Base URL 识别渠道（内置 9 家预设），把档位翻译成该家真实参数；
+程序按你填的 Base URL 识别渠道（内置常见服务商预设），把档位翻译成该家真实参数；
 预设没有的档位不会出现在控制台档位条上（例如 Command Code 没有"关"）。
 
 ```json
@@ -118,7 +118,7 @@
   `checkIntervalMaxMs` 5400000（90 分钟）、`idleThresholdMs` 1800000（30 分钟）、`probability` 0.25；
   照抄示例会改变行为。
 
-## webSearch：联网搜索（9 家 provider + 聚合）
+## webSearch：联网搜索（多家 provider + 聚合）
 
 
 ```json
@@ -138,10 +138,10 @@
 
 - `provider` 可选：`bing`（默认，抓 `cn.bing.com` 页面，不需要 Key）、`deepseek`、`zhipu`、`bocha`、
   `baidu`、`metaso`、`doubao`、`tavily`、`aggregate`（控制台「设置 → 搜索」里选）。
-- 每家一套 `{ apiKey, baseUrl, count, timeoutMs }`（`deepseek` 另有 `model`、`zhipu` 另有 `engine`）；
-  `apiKey` 留空时回退各自的环境变量：`DEEPSEEK_API_KEY` / `ZHIPU_API_KEY` / `BOCHA_API_KEY` /
+- 每家一套 `{ apiKey, baseUrl, count, timeoutMs }`（`deepseek` 用 `model` 代替 `count`；
+  `zhipu` 另有 `engine`、`tavily` 另有 `searchDepth`）；`apiKey` 留空时回退各自的环境变量：`DEEPSEEK_API_KEY` / `ZHIPU_API_KEY` / `BOCHA_API_KEY` /
   `BAIDU_SEARCH_API_KEY` / `METASO_API_KEY` / `DOUBAO_SEARCH_API_KEY` / `TAVILY_API_KEY`。
-- `tavily`：tavily.com 的搜索 API（免费档 1000 次/月，专为 LLM 设计），另有 `searchDepth`（默认 `basic`）。
+- `tavily`：tavily.com 的搜索 API（2026-09 时点的公开口径：免费档 1000 次/月，专为 LLM 设计），另有 `searchDepth`（默认 `basic`）。
 - `aggregate`（聚合搜索）：并发跑 `sources` 里的多个源，URL 去重、每条结果带 `source` 标注；
   `sources` 顺序就是结果优先级，单个源失败不影响整体，全部失败才报错。
 - 还能在控制台「搜索提供方」里自己加提供商（`type: 'openai'` 走 POST JSON 搜索接口、`type: 'bing'` 抓页面解析），
@@ -370,8 +370,10 @@
     "enabled": true,
     "baseUrl": "",
     "apiKey": "",
+    "apiKeyHost": "",
     "model": "gpt-image-1",
     "size": "1024x1024",
+    "responseFormat": "",
     "maxPerHour": 6
   }
 }
@@ -380,14 +382,33 @@
 - 作用：群友说「画一张」时模型调 `generate_image`（OpenAI 兼容的 `POST {baseUrl}/images/generations`），
   生成的图**直接存进表情库**、再用现成的 `send_sticker` 发出去。控制台在「设置 → 语音转文字」页下方的
   「图片生成」区块（与语音回复同页），有「试画一张」当场验证配置。
+- **服务预设**：控制台下拉里预置了「去哪儿拿免费的图模型」，选中会自动填好地址与默认模型（表在
+  `src/llm/image-gen-presets.js`）：
+
+  | 预设 | 地址 | 要不要 Key | 说明 |
+  | --- | --- | --- | --- |
+  | Pollinations | `https://image.pollinations.ai` | **不用** | 免注册免 Key，零成本开箱可用；第三方公共服务，**按 IP 限流**（官方口径匿名档 15 秒 1 次，2026-10-01 查阅）、**图片带它的水印**、提示词会经过它。额度用完返回空的 402 —— 当"试玩"，长期用换有免费额度的图模型 |
+  | 智谱 CogView-3-Flash | `https://open.bigmodel.cn/api/paas/v4` | 要（免费档） | 2026-10-01 真机实测：8~9 秒出一张 1024×1024（约 100 KB）；是否仍免费以智谱定价页为准。出图**右下角带「AI 生成」水印** —— 国内厂商按《人工智能生成合成内容标识办法》都要打，介意水印只能换海外服务商 |
+  | 硅基流动 | `https://api.siliconflow.cn/v1` | 要 | 到「模型广场」挑标了**免费**的图模型填进「模型」栏 |
+  | 魔搭 ModelScope | `https://api-inference.modelscope.cn/v1` | 要 Token | 按公开口径有每日免费额度（以官网为准） |
+  | 自定义 / 自建 | 自己填 | 要 | 任何 OpenAI 兼容的 `/images/generations` |
+
+- **Pollinations 是唯一"免 Key"的一条，请求形状也跟别家不同**：它是
+  `GET {地址}/prompt/<提示词>?width=&height=&model=&nologo=true`（提示词在路径里，`nologo` 尽最大努力去它自家的水印），适配器按主域名自动切换。
+  ⚠️ 它另有一个长得像 OpenAI 的 `POST /openai/images/generations`，但那个端点**不解析请求体** ——
+  两个完全不同的提示词会返回逐字节相同的图（2026-10-01 实测），所以不要照那个接。
 - **地址留空 = 跟聊天模型同一家**（很多网关同域就带 images 端点，填个模型名就能试）。
 - **Key 归属有守卫**：地址与聊天模型**不同域**时必须单独填 Key —— 不会把模型那把 Key 发给别家。
-  同域（或地址留空）时留空即复用模型 Key。这条是为了防"把 A 家的密钥发给 B 家"的事故。
-- **`maxPerHour` 是唯一的成本闸门**（默认 6，全局共享，按生成张数计）：图片计费不进「用量」面板
-  （那里只统计模型 token），所以这个值得认真填。超限时工具会明确拒绝并说明原因。
-- `model` 必填（如 `gpt-image-1` / `seedream-3.0` / `cogview-3`）；`size` 可选，留空用服务商默认。
-- **不发送 `response_format`**：新版 OpenAI（gpt-image-1）会因未知参数直接 400；`b64_json` 与 `url`
-  两种响应形态适配器都吃（`url` 会走内置的 SSRF 防护下载后再落盘，不存会过期的临时链接）。
+  同域（或地址留空）时留空即复用模型 Key。这条是为了防"把 A 家的密钥发给 B 家"的事故；
+  预设里声明"不需要 Key"的那家（Pollinations）是唯一的例外，它连 `Authorization` 头都不发。
+- **换地址后旧 Key 不跟过去**：单独填过的 Key 会记下"当时是给哪家的"（`apiKeyHost`，保存时自动写入，
+  不用手填）。之后在控制台把预设/地址换成别家，那把旧 Key **不会**被发到新地址 —— 控制台会提示"当前地址要
+  重新填一次 Key"，重填后自动改记到新地址。这与 `asr` 的 Key 绑定同一套逻辑（见上文 `asr` 一节）。
+- `model` 必填（如 `gpt-image-1` / `seedream-3.0` / `cogview-3` / `flux`）；`size` 可选，留空用服务商默认
+  （Pollinations 那条会把 `1024x1024` 这类值转成它的 `width`/`height` 参数）。
+- **默认不发送 `response_format`**（配置 `imageGen.responseFormat` 可填 `b64_json` / `url` 强制）：新版 OpenAI（gpt-image-1）会因未知参数直接 400；两种响应形态适配器都吃（`url` 会走内置的 SSRF 防护下载后再落盘，不存会过期的临时链接）。
+- **返回的图片格式不一定是 PNG**：智谱 CogView 回的就是 JPEG（2026-10-01 实测）。落库与「试画一张」
+  的预览都按**字节魔数**判断格式（`src/core/image-type.js`），不看扩展名也不看 Content-Type。
 - 提示词上限 800 字；生成的图落盘上限 8 MiB、只收 PNG/JPEG/GIF/WebP（与表情库同一道校验）。
 - 关闭时 `generate_image` 不进模型工具表、提示词也不提画图 —— 模型不会去调一个必然失败的工具。
 
@@ -527,8 +548,8 @@
 ### 安全规则在哪里改（常被问）
 
 系统提示里的**【安全规则（最高优先级，不可违反）】**是**写死在源码里的**：
-`src/llm/prompt.js` 的 `securityRules()`（约 29-40 行），由 `buildSystemPrompt` 注入，
-优先级声明在同文件约 308 行 —— **安全规则 ＞ 管理员附加规则 ＞ 角色卡正文 ＞ 平台默认风格**。
+`src/llm/prompt.js` 里那个 `securityRules()` 函数，由同文件的 `buildSystemPrompt` 注入 ——
+**安全规则 ＞ 管理员附加规则 ＞ 角色卡正文 ＞ 平台默认风格**（行的先后顺序就是优先级）。
 控制台**没有**、也不打算开一个改安全规则的口子：那是"群友忽悠模型放开限制"的第一道防线。
 
 要给这台机器人加自己的规矩，走**管理员附加规则**：控制台 `设置 -> 人设` 里的那个文本框

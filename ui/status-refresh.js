@@ -26,6 +26,12 @@ QARegistry.override('refreshStatus', async function refreshStatus() {
   try {
     state.status = await api('/api/status');
     const s = state.status;
+    // 版本号（package.json 的 version）：侧栏一直显示，控制页的版本徽标也用它。
+    // 之前只显示部署提交号（sha），用户看不出"这是哪个版本"。
+    if (s.version) {
+      state.appVersion = String(s.version);
+      setStatusLabel('#app-version', `v${state.appVersion}`);
+    }
     // 前端构建戳变了 → 服务端已更新，提示刷新。
     // 控制台是单页应用：部署只换服务器上的文件，已打开的页面还在跑旧 JS/CSS，
     // 此前只能靠人记得按 F5（2026-09-26 用户反馈"服务器上的没变"就是这么来的）。

@@ -8,7 +8,8 @@
 import { applyTheme, currentThinkingRaw, loadSettings, refreshStatus, renderSettings } from '../app.js';
 import { api } from '../core/api.js';
 import { ASR_SERVICES, MODEL_SERVICES_UI, QZONE_RUN_LABELS } from '../core/constants.js';
-import { askForConfirmation, requestExperimentOwnerUin, syncClampedInputs } from '../core/dom-util.js';
+import { askForConfirmation, bindPeekToggle, requestExperimentOwnerUin, syncClampedInputs } from '../core/dom-util.js';
+import { bindKeyToggles, fetchRealKey } from './key-toggles.js';
 import { $, $$, esc } from '../core/dom.js';
 import {
   asrHostOf, hostOfUrl, mulOf, paramActiveForProbability, segOfProbability, sliderDesc
@@ -25,7 +26,7 @@ import {
   personaBaseCardId, personaSectionBody, syncPersonaButtons
 } from './persona.js';
 import { saveConfig } from './settings-save.js';
-import { bindTtsControls } from './settings-voice.js';
+import { bindImageGenPreset, bindTtsControls } from './settings-voice.js';
 import {
   openBlocklistModal, openModelAddModal, openModelDeleteModal, openModelPicker, openPriceDialog,
   openWhitelistPicker, renderTimeRuleEditor, startListPoller, syncThinkingUi
@@ -478,6 +479,7 @@ function bindSettingsSaveAndSections() {
     syncAsrFields();
 
     bindTtsControls();
+    bindImageGenPreset();
 
     // 语音回复试听：合成一条样例在浏览器里播（不占群聊）
     const ttsTestBtn = $('#tts-test-btn');
@@ -504,7 +506,11 @@ function bindSettingsSaveAndSections() {
         const bHost = host(state.config?.api?.baseUrl);
         const sameHost = Boolean(aHost && bHost && aHost === bHost);
         const hasOwnKey = Boolean(g.hasApiKey);
-        keyHint.textContent = hasOwnKey
+        // 存过的 Key 记着"是给哪家的地址存的"（imageGen.apiKeyHost）：换地址后它不再被使用，
+        // 这里如实说明"要重填"，别让用户以为留空就还是它在生效（2026-10-01 审查 P1）。
+        keyHint.textContent = g.keyStale === true
+          ? `存过的 Key 是给 ${g.keyHost || '另一个地址'} 的，当前地址要重新填一次才生效（不会把旧 Key 发给新地址）。`
+          : hasOwnKey
           ? '已存过 Key（留空 = 保持不变）。'
           : (sameHost
             ? '地址与聊天模型同域：留空就会复用模型那把 Key。想用别的账号或别的网关就单独填一把。'
@@ -525,26 +531,8 @@ function bindSettingsSaveAndSections() {
         } catch (e) { if (out) out.textContent = `失败：${e.message}`; }
         finally { imgTestBtn.disabled = false; }
       });
-      // 「显示」按钮：原来只有按钮没有绑定（点了没反应）—— 2026-09-30 审查补上，
-      // 走与 TTS 同款的 keyEndpoint 守卫路由。
-      const imgRevealBtn = $('#cfg-img-reveal-key-btn');
-      if (imgRevealBtn) imgRevealBtn.addEventListener('click', async () => {
-        const node = $('#cfg-img-key');
-        if (!node) return;
-        try {
-          const r = await api('/api/imagegen/key');
-          if (r.ok && r.apiKey) {
-            node.value = r.apiKey;
-            node.type = 'text';
-            imgRevealBtn.textContent = '已显示';
-            if (keyHint) keyHint.textContent = r.reused ? '当前用的是聊天模型那把 Key（地址同域复用）。' : '已显示已保存的 Key。';
-          } else if (r.ok) {
-            if (keyHint) keyHint.textContent = '还没有单独存过 Key（同域时可能仍在复用模型 Key）。';
-          } else if (keyHint) {
-            keyHint.textContent = r.error || '读取失败';
-          }
-        } catch (e) { if (keyHint) keyHint.textContent = `读取失败：${e.message}`; }
-      });
+      // 「显示」按钮已并入统一的 keyToggles 表（下面），这里不再单独绑定 ——
+      // 两处都监听同一个按钮会点一次触发两次，且只有那张表能正确处理「隐藏」。
     }
     // 拉模型列表：从服务商官网的 /models 拉（预设里的模型名会过时，官网不会）
     const fetchModelsBtn = $('#asr-fetch-models-btn');
@@ -743,6 +731,11 @@ function bindSettingsListsAndGroups(c) {
     }
   });
 
+  // 控制台 Token 这三格是"正在输入"的（没有已保存的明文可回读）→ 只做本地明文开关
+  for (const field of ['current', 'new', 'confirm']) {
+    bindPeekToggle(`cfg-console-token-${field}-peek`, `cfg-console-token-${field}`);
+  }
+
   // 搜索提供方切换
   const searchProviderSel = $('#cfg-searchprovider');
   if (searchProviderSel) searchProviderSel.addEventListener('change', () => {
@@ -768,6 +761,9 @@ function bindSettingsListsAndGroups(c) {
   });
 
   // ── 自定义搜索服务：添加 / 测试 / 删除 ──
+  // 新增时填的 Key 也是"正在输入"的（还没保存、没有回读端点）→ 本地明文开关，
+  // 免得自己粘贴的那串 Key 看不出来对不对。
+  bindPeekToggle('new-sp-apikey-peek', 'new-sp-apikey');
   $('#add-search-provider-btn')?.addEventListener('click', async () => {
     const hint = $('#add-search-provider-hint');
     const baseUrl = ($('#new-sp-baseurl')?.value || '').trim();
@@ -1138,89 +1134,9 @@ function bindSettingsModelsAndKeys(c) {
   if (memModelPick) memModelPick.addEventListener('click', () => openMemoryModelPicker());
 
   // ── 模型 API 区块事件 ──
-  // 密码框显示/隐藏切换（点击按钮切换对应输入框的 type）
-  // 已保存 Key 的输入框初始值统一为掩码 "******"；
-  // 点「显示」→ 替换成真实 Key 明文；点「隐藏」→ 重新变回掩码 "******"。
-  const pwdToggles = [
-    ['cfg-apikey-toggle', 'cfg-apikey'],
-    ['cfg-ds-searchkey-toggle', 'cfg-ds-searchkey'],
-    ['cfg-zhipu-key-toggle', 'cfg-zhipu-key'],
-    ['cfg-bocha-key-toggle', 'cfg-bocha-key'],
-    ['cfg-baidu-key-toggle', 'cfg-baidu-key'],
-    ['cfg-metaso-key-toggle', 'cfg-metaso-key'],
-    ['cfg-doubao-key-toggle', 'cfg-doubao-key'],
-    ['cfg-tavily-key-toggle', 'cfg-tavily-key'],
-    ['cfg-asr-key-toggle', 'cfg-asr-key'],
-    ['cfg-asr-secretid-toggle', 'cfg-asr-secretid'],
-    ['cfg-asr-secretkey-toggle', 'cfg-asr-secretkey']
-  ];
-  for (const [btnId, inputId] of pwdToggles) {
-    const btn = $(`#${btnId}`);
-    const input = $(`#${inputId}`);
-    if (btn && input) {
-      btn.addEventListener('click', async () => {
-        const show = input.type === 'password';
-        // 所有 Key 统一走 fetchRealKey：/api/config 里的密钥都是脱敏的，
-        // 明文只能向后端专用端点取（服务端会校验请求来源）。
-        const real = await fetchRealKey(inputId);
-        if (show) {
-          // 切到明文：显示真实 Key（若之前是掩码/空占位）
-          input.type = 'text';
-          input.value = real;
-          btn.textContent = '隐藏';
-        } else {
-          // 切回密码态：如果框里是真实 Key（用户没改过），用掩码盖住；用户改了的新 Key 也盖住
-          const current = input.value || '';
-          input.type = 'password';
-          if (real && (current === real || current === '' || current === '******')) {
-            input.value = '******';
-          } else if (!real && current === '') {
-            input.value = '';
-          } else if (current) {
-            // 用户输入了新 Key：保持新值（密码态下浏览器会显示圆点）
-          }
-          btn.textContent = '显示';
-        }
-      });
-    }
-  }
-
-  // 输入框 id -> 搜索服务字段名（/api/config 里的搜索 Key 是脱敏的，
-  // 所以“显示”必须向后端专用端点要明文，不能直接读 state.config）
-  const SEARCH_KEY_FIELDS = {
-    'cfg-ds-searchkey': 'deepseek',
-    'cfg-zhipu-key': 'zhipu',
-    'cfg-bocha-key': 'bocha',
-    'cfg-baidu-key': 'baidu',
-    'cfg-metaso-key': 'metaso',
-    'cfg-doubao-key': 'doubao',
-    'cfg-tavily-key': 'tavily'
-  };
-
-  // 前端点“显示”时向后端要真实 Key。
-  // 说明：三个端点都只放行本机控制台请求（服务端校验来源），本地单机使用不受影响。
-  async function fetchRealKey(inputId) {
-    if (inputId === 'cfg-apikey') {
-      const pid = state.config?.api?.provider;
-      if (pid) {
-        const r = await api(`/api/providers/key?providerId=${encodeURIComponent(pid)}`);
-        return String(r.apiKey || '');
-      }
-      const r = await api('/api/api-key');
-      return String(r.apiKey || '');
-    }
-    if (inputId === 'cfg-asr-key' || inputId === 'cfg-asr-secretid' || inputId === 'cfg-asr-secretkey') {
-      const field = { 'cfg-asr-key': 'apiKey', 'cfg-asr-secretid': 'secretId', 'cfg-asr-secretkey': 'secretKey' }[inputId];
-      const r = await api(`/api/asr-key?field=${encodeURIComponent(field)}`);
-      return String(r.apiKey || '');
-    }
-    const field = SEARCH_KEY_FIELDS[inputId];
-    if (field) {
-      const r = await api(`/api/search-key?field=${encodeURIComponent(field)}`);
-      return String(r.apiKey || '');
-    }
-    return '';
-  }
+  // 密钥输入框的「显示 / 隐藏」已抽到 ui/pages/key-toggles.js（该文件顶到 max-lines 上限）：
+  // 表在那边，新增一处密钥只要往 KEY_TOGGLES 里加一行 + 接一条受守卫的回读端点。
+  bindKeyToggles();
   // 点击文本框弹出选择模态框（无“选择”按钮）
   const modelPickInput = $('#cfg-model-pick');
   if (modelPickInput) modelPickInput.addEventListener('click', () => openModelPicker());

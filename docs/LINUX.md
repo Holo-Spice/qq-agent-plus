@@ -292,6 +292,19 @@ the HttpOnly cookie and `data/console-access.txt` atomically from the user's
 perspective; the old Token and other browser sessions stop authenticating
 immediately. The general “Save Settings” action cannot change the Token.
 
+API keys are never included in `GET /api/config`: any config field whose name matches the
+secret pattern (`apikey`, `api_key`, `accesstoken`, `access_token`, `secret`, `password`,
+`privatekey`, `authorization`, or the exact names `token` / `auth` / `cookie` / `bearer`) is
+deleted before the response and replaced with `hasX` flags, so the settings page can show
+"configured" without the value. Plaintext keys are echoed **only on demand** by the dedicated
+key endpoints (`/api/api-key`, `/api/search-key`, `/api/onebot-key`, `/api/providers/key`,
+`/api/asr-key`, `/api/tts/key`, `/api/imagegen/key`), each gated by `keyEndpointAllowed()`: the
+request must either carry the console token, or come from a loopback `Host` whose `Origin` /
+`Referer` matches this service when one is present — a loopback request with neither is also
+allowed, as it is indistinguishable from an address-bar visit. No route returns a key to
+an untrusted origin, and no count of endpoints is kept here — a new key field must be added to
+that guard.
+
 Run these from the installation directory: `manage.sh` resolves
 `.deployment.json` and `.deployment-node` relative to itself, so running it from
 the source checkout reports the deployed Node.js runtime as unavailable.

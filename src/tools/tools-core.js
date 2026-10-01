@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { getConfig, imageGenAvailable, imageGenMaxPerHour } from '../core/config.js';
+import { imageType } from '../core/image-type.js';
 import { nextAtFromHHMM } from '../core/reminders.js';
 import { synthesizeSpeech, ttsConfigured } from '../llm/tts.js';
 import { generateImage, MAX_PROMPT_CHARS } from '../llm/image-gen.js';
@@ -152,12 +153,7 @@ export async function downloadVideoAsFrameStrip(url, signal) {
 }
 
 function detectMime(buf) {
-  if (!buf || buf.length < 12) return null;
-  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
-  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
-  if (buf.toString('ascii', 0, 6) === 'GIF87a' || buf.toString('ascii', 0, 6) === 'GIF89a') return 'image/gif';
-  if (buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
-  return null;
+  return imageType(buf) || null;
 }
 
 function ok(payload) {

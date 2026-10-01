@@ -1182,6 +1182,92 @@ try {
       + (revealOk ? '' : ` -> handlers=${handlers.length} fetched=${fetched} value=${keyNode?.value} type=${keyNode?.type}`));
   }
 
+  // OneBot 令牌与「正在输入」的密码框（2026-10-01 用户要求"把填了密钥的地方都加上控制"）：
+  //  · 令牌这种**已保存**的密钥：显示要取回明文，隐藏要回到**空串**（不是 ****** ——
+  //    服务端不认这个哨兵，真提交会把令牌改成字面量，见 ui/pages/settings-save.js）；
+  //  · 控制台 Token 那三格是"正在输入"的：只做本地明文开关（点一下 type 变 text）。
+  {
+    ctx.bindSettingsEvents(cfg);
+    const toggleBtn = document.querySelector('#cfg-obtoken-toggle');
+    const handlers = toggleBtn?._listeners?.click || [];
+    const input = document.querySelector('#cfg-obtoken');
+    const before = sandbox.fetch;
+    let fetched = null;
+    sandbox.fetch = async (url) => {
+      fetched = String(url);
+      return { ok: true, status: 200, json: async () => ({ ok: true, token: 'ws-token-secret' }), text: async () => '' };
+    };
+    try { for (const h of handlers) await h({ currentTarget: toggleBtn }); } catch { /* 看结果 */ }
+    const shown = input.value === 'ws-token-secret' && input.type === 'text' && /field=ws/.test(String(fetched));
+    try { for (const h of handlers) await h({ currentTarget: toggleBtn }); } catch { /* 看结果 */ }
+    sandbox.fetch = before;
+    const hiddenToEmpty = input.value === '' && input.type === 'password';
+    const onebotOk = handlers.length > 0 && shown && hiddenToEmpty;
+    onebotOk ? pass++ : fail++;
+    console.log('  ' + (onebotOk ? 'OK   ' : 'FAIL ') + '设置页：OneBot 令牌的「显示/隐藏」取明文、隐藏回到空串'
+      + (onebotOk ? '' : ` -> handlers=${handlers.length} fetched=${fetched} value=${JSON.stringify(input.value)} type=${input.type}`));
+
+    const peekBtn = document.querySelector('#cfg-console-token-new-peek');
+    const peekHandlers = peekBtn?._listeners?.click || [];
+    for (const h of peekHandlers) h({ currentTarget: peekBtn });
+    const peekInput = document.querySelector('#cfg-console-token-new');
+    const afterFirst = { type: peekInput.type, label: peekBtn.textContent };
+    const peekOk = peekHandlers.length > 0 && peekInput.type === 'text' && peekBtn.textContent === '隐藏';
+    for (const h of peekHandlers) h({ currentTarget: peekBtn });
+    const peekBack = peekInput.type === 'password' && peekBtn.textContent === '显示';
+    (peekOk && peekBack) ? pass++ : fail++;
+    console.log('  ' + ((peekOk && peekBack) ? 'OK   ' : 'FAIL ') + '设置页：控制台 Token 输入框的「显示/隐藏」只切明文（本地开关）'
+      + ((peekOk && peekBack) ? '' : ` -> handlers=${peekHandlers.length} afterFirst=${JSON.stringify(afterFirst)} type=${peekInput.type} label=${peekBtn.textContent}`));
+  }
+
+  // 语音合成 Key：并入统一开关后的三件事（2026-10-01 审查的两条 low）
+  //  · 「显示」向 /api/tts/key 要明文时要带上当前选中的那家（它按服务分家存 Key）；
+  //  · 用户手输了一半就点「显示」：**不许**用回读值盖掉他没保存的输入，也不该白发请求；
+  //  · 「隐藏」不许把用户刚输入（或刚粘上）的新 Key 盖成 ****** —— 服务端把 ****** 当
+  //    "保持不变"，盖下去等于静默丢弃（旧的双按钮实现就是这么干的）。
+  {
+    ctx.bindSettingsEvents(cfg);
+    const ttsBtn = document.querySelector('#tts-reveal-key-btn');
+    const ttsHandlers = ttsBtn?._listeners?.click || [];
+    const ttsInput = document.querySelector('#cfg-tts-key');
+    const svcStub = document.querySelector('#cfg-tts-service');
+    if (svcStub) svcStub.value = 'volc';
+    const before = sandbox.fetch;
+    let fetched = null;
+    sandbox.fetch = async (url) => {
+      fetched = String(url);
+      return { ok: true, status: 200, json: async () => ({ ok: true, apiKey: 'tts-secret' }), text: async () => '' };
+    };
+    // ① 显示 → 明文 + 带 service
+    ttsInput.value = '';
+    try { for (const h of ttsHandlers) await h({ currentTarget: ttsBtn }); } catch { /* 看结果 */ }
+    const shown = ttsInput.value === 'tts-secret' && ttsInput.type === 'text' && /\/api\/tts\/key\?service=volc/.test(String(fetched));
+    const labelShown = ttsBtn.textContent === '隐藏';
+    // ② 隐藏（没改过）→ 回到掩码
+    try { for (const h of ttsHandlers) await h({ currentTarget: ttsBtn }); } catch { /* 看结果 */ }
+    const masked = ttsInput.value === '******' && ttsInput.type === 'password';
+    // ③ 用户手输未保存 → 先显示：保留他输的、且不发请求
+    fetched = null;
+    ttsInput.value = 'typed-new-key';
+    try { for (const h of ttsHandlers) await h({ currentTarget: ttsBtn }); } catch { /* 看结果 */ }
+    const keptOnShow = ttsInput.value === 'typed-new-key' && fetched === null;
+    // ④ 再隐藏：新 Key 仍在（不许盖成 ******）
+    try { for (const h of ttsHandlers) await h({ currentTarget: ttsBtn }); } catch { /* 看结果 */ }
+    const keptOnHide = ttsInput.value === 'typed-new-key' && ttsInput.type === 'password';
+    // ⑤ 先显示（这时框里是服务端回读的明文），用户就地改成新 Key，再隐藏：仍要保住新值
+    ttsInput.value = '';
+    try { for (const h of ttsHandlers) await h({ currentTarget: ttsBtn }); } catch { /* 看结果 */ }
+    const revealedAgain = ttsInput.value === 'tts-secret';
+    ttsInput.value = 'edited-while-shown';
+    try { for (const h of ttsHandlers) await h({ currentTarget: ttsBtn }); } catch { /* 看结果 */ }
+    sandbox.fetch = before;
+    const keptEdit = ttsInput.value === 'edited-while-shown';
+    const ttsOk = ttsHandlers.length > 0 && shown && labelShown && masked && keptOnShow && keptOnHide && revealedAgain && keptEdit;
+    ttsOk ? pass++ : fail++;
+    console.log('  ' + (ttsOk ? 'OK   ' : 'FAIL ') + '设置页：语音合成 Key 走统一开关（带 service 取明文、手输的新值不被覆盖/不被掩码吞掉）'
+      + (ttsOk ? '' : ` -> handlers=${ttsHandlers.length} shown=${shown} label=${labelShown} masked=${masked} keptOnShow=${keptOnShow} keptOnHide=${keptOnHide} revealedAgain=${revealedAgain} keptEdit=${keptEdit} fetched=${fetched} value=${JSON.stringify(ttsInput.value)}`));
+  }
+
   // 分段守卫：bindSettingsEvents 现在由四段拼成（保存与分区 / 列表与分组 / 模型与密钥 / 人设与视觉）。
   // 调度器少调一段，只会让"那一段的控件变成死控件"，页面照样能打开 —— 所以逐段点名一个**无条件绑定**
   // 的代表控件，断言它确实被绑上了。这条用例是分段重构的守卫（2026-10-01 变异验证时发现：

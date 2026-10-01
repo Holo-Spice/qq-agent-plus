@@ -71,7 +71,7 @@ for c in rsync curl tar xz sha256sum; do
 done
 ```
 
-`deploy.sh:92-94` 在执行部署前即要求 `systemctl`、`systemctl --user` 与 `rsync` 三者可用，
+`deploy.sh` 在执行部署前即要求 `systemctl`、`systemctl --user` 与 `rsync` 三者可用，
 缺少任何一项都会打印具体原因后退出；**本脚本不会安装系统包**。全栈安装额外需要 `realpath`
 与 `ss`（iproute2）。
 
@@ -96,7 +96,7 @@ loginctl enable-linger qqagent
 linger 是服务在开机后无需用户登录即可持续运行的前提。预先开启 linger 可避免使用 `sudo`：
 `deploy.sh` 仅在 linger 未开启时才尝试执行 `sudo loginctl enable-linger`（安装收尾处）。
 
-若服务 unit 配置了 `NoNewPrivileges=true`（本指南第 273 行附近的加固建议），服务重启后由 systemd 拉起的进程无法执行 `sudo`——`deploy.sh` 对此做了预检：此时会跳过 `sudo` 并提示手动执行一次 `loginctl enable-linger`，linger 未开只影响下次开机自启，不会让本次部署或手动更新回滚（Issue #15）。
+若服务 unit 配置了 `NoNewPrivileges=true`（本指南第九节「以 root 用户部署」中的 `NoNewPrivileges` 说明），服务重启后由 systemd 拉起的进程无法执行 `sudo`——`deploy.sh` 对此做了预检：此时会跳过 `sudo` 并提示手动执行一次 `loginctl enable-linger`，linger 未开只影响下次开机自启，不会让本次部署或手动更新回滚（Issue #15）。
 
 父目录同样需要在此创建。`deploy.sh` 会自行 `mkdir -p` 安装目录与数据目录，但 `/mnt` 属主为
 root，以 `qqagent` 身份执行时无法创建 `data` 这一级目录。`docs/LINUX.md` 要求「先以合适
@@ -129,7 +129,7 @@ bash deploy.sh \
 
 要点如下：
 
-- **目录**：`/mnt/data/qq-agent` 与 `/data/qq-agent` 是 `console-tunnel.bat:46` 读取令牌的
+- **目录**：`/mnt/data/qq-agent` 与 `/data/qq-agent` 是 `console-tunnel.bat` 读取令牌的
   两个路径，应优先选择；机器上这两个挂载点均不存在时，改用其它绝对路径（如 `/opt/qq-agent`）。
   路径不得包含空格、`%` 或引号；SQLite 必须位于本机磁盘，不能使用 NFS/SMB。不得放入
   `/www/wwwroot`，该目录为宝塔站点目录，会被网站备份与防篡改逻辑一并扫描。
@@ -159,7 +159,7 @@ bash deploy.sh \
 
   随后访问 `http://127.0.0.1:3210`。扫码登录 QQ 使用 `6081`，**不得**将 noVNC 暴露到公网。
 
-**目录变更的影响**：`console-tunnel.bat:46` 仅在
+**目录变更的影响**：`console-tunnel.bat` 仅在
 `/mnt/data/qq-agent/data/console-access.txt` 与 `/data/qq-agent/data/console-access.txt`
 两处查找令牌。安装到其它路径时隧道仍可使用，但不支持免登录，需手动获取令牌：
 
@@ -246,9 +246,9 @@ bash manage.sh backup /path/to/backup-dir
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | `Failed to connect to bus` / 提到 `XDG_RUNTIME_DIR` | 在非登录会话（宝塔网页终端）中调用 `systemctl --user` | 改用 SSH 登录；或采用文末的 root 方案 |
-| `deploy.sh` 刚开始即退出 | `deploy.sh:92-94` 的 `systemctl` / `systemctl --user` / `rsync` 检查未通过（脚本会打印缺哪一项） | 按提示安装 `rsync`，或改用 SSH 登录会话 |
+| `deploy.sh` 刚开始即退出 | `deploy.sh` 开头的 `systemctl` / `systemctl --user` / `rsync` 检查未通过（脚本会打印缺哪一项） | 按提示安装 `rsync`，或改用 SSH 登录会话 |
 | `Deployed Node.js runtime is unavailable` | 在源码目录而非安装目录执行了 `manage.sh`（该目录下没有 `.deployment-node`） | 切到安装目录执行；**不要**因此重跑 `deploy.sh` |
-| `Run as the service user, not root` | `deploy-all.sh:411` | 执行 `su - qqagent` 后重新运行 |
+| `Run as the service user, not root` | `deploy-all.sh` 的身份预检 | 执行 `su - qqagent` 后重新运行 |
 | 解压 Node 失败、提示 `xz` | 缺少 `xz-utils` | 执行 `apt install -y xz-utils` |
 | 控制台打开正常但数据不刷新 | 反向代理缓冲了 SSE | 在反向代理配置中加入 `proxy_buffering off;` |
 | 机器人不回复 | 仍处于 `observe` 模式，或白名单为空 | 执行 `manage.sh activate --confirm-exclusive`，并在控制台配置白名单 |

@@ -59,6 +59,12 @@ mode and its resolution are recorded in [CHANGES](docs/CHANGES.md).
   ASR keys are configured separately from search;
   an hourly quota gate applies, and muted-group pre-checks report the reason instead of sending
   blindly.
+- **Image generation** — when someone asks for a picture, the model calls `generate_image`; the
+  result lands straight in the sticker library and is sent as a sticker (off by default, see the
+  config examples). The console has an Image generation block with a test-draw button under the
+  voice page, and one preset (Pollinations) needs no key at all for a zero-setup try. Billed per
+  image, gated by an hourly cap. A stored key never follows you to a different host (same
+  credential-binding guard as ASR).
 
 Configuration examples are in [docs/CONFIG-EXAMPLES.md](docs/CONFIG-EXAMPLES.md). Operations
 commands are collected in [src/ops.js](src/ops.js) and documented in [docs/OPS.md](docs/OPS.md).
@@ -75,7 +81,7 @@ $ node src/ops.js audit
   [正常] qq-agent-linux.service  active
   [正常] qq-agent-linux-update.timer  enabled
 ===== 3. 源码语法（全部 js） =====
-  [正常] 所有 js 文件语法通过（132 个）
+  [正常] 所有 js 文件语法通过
 ===== 4. 未定义调用扫描 =====
   [正常] 可疑未定义调用点: 0
 ===== 8. 运行态 =====
@@ -448,8 +454,8 @@ effective value for every item.
 | Global impressions injected (chars) | ≤3000 | ≤1500 |
 | Sticker list in the prompt | ≤5 | ≤3 |
 
-Context: the **fixed floor** of every model call (system prompt + 26-29 tool schemas depending on toggles) is about
-12k-15k tokens and cannot be changed by settings. Measured over 7 days on a live instance
+Context: the **fixed floor** of every model call (system prompt + twenty-odd tool schemas depending on toggles) is about
+12k-15k tokens and cannot be changed by settings. One 7-day measurement snapshot on a live instance
 (867 calls / 18.4M tokens): input is 98.8% of all tokens, and the **uncached** part of the input
 accounts for 76% of the cost — so saving tokens means reading less history, running fewer rounds
 and making fewer calls, not trimming output. To save more, also lower the response probability,

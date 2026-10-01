@@ -97,3 +97,109 @@ test('提示词与工具注入同一道门：勾了开关但没填模型 → 既
   const prompt2 = buildSystemPrompt({ persona: '测试人设' });
   assert.match(prompt2, /generate_image/, '配齐后提示词应引导使用');
 });
+
+test('GET /api/imagegen/presets 给出服务预设表（控制台下拉靠它渲染；无令牌跨源照旧 401）', async (t) => {
+  const port = await freePort();
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.server = { ...cfg.server, host: '127.0.0.1', port, token: '' };
+  cfg.runtime.mode = 'active';
+  cfg.onebot.wsUrl = 'ws://127.0.0.1:1';
+  cfg.onebot.httpUrl = 'ws://127.0.0.1:1';
+  cfg.api = { ...cfg.api, baseUrl: 'https://example.com/v1', apiKey: 'k', model: 'm' };
+  updateConfig(cfg);
+  const app = createApp({ log: () => {} });
+  t.after(async () => {
+    await app.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  await app.start();
+
+  const get = async (path, headers = {}) => new Promise((resolve) => {
+    const req = http.request({ host: '127.0.0.1', port, path, method: 'GET', headers }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { text += c; });
+      res.on('end', () => {
+        let body = null;
+        try { body = JSON.parse(text); } catch { /* 非 JSON */ }
+        resolve({ status: res.statusCode, text, body });
+      });
+    });
+    req.on('error', (e) => resolve({ status: 0, text: String(e.message), body: null }));
+    req.end();
+  });
+
+  const res = await get('/api/imagegen/presets', { host: `127.0.0.1:${port}` });
+  assert.equal(res.status, 200, res.text);
+  assert.ok(Array.isArray(res.body?.services) && res.body.services.length >= 3, '预设表不能是空的');
+  const poll = res.body.services.find((s) => s.id === 'pollinations');
+  assert.ok(poll, '免 Key 的那家必须在表里（"没有图模型"的用户只有它能开箱用）');
+  assert.equal(poll.shape, 'pollinations');
+  assert.deepEqual(poll.creds, []);
+  assert.ok(res.body.services.every((s) => s.label && s.shape), '每条都要有 label 与 shape（前端直接渲染）');
+
+  // 非本机来源 + 未配令牌 → 401（这条路由没有 auth:false，走默认鉴权）
+  const denied = await get('/api/imagegen/presets', { host: `evil.example.com:${port}` });
+  assert.equal(denied.status, 401);
+});
+
+// 2026-10-01：智谱 CogView 真机回的是 JPEG，而「试画一张」的预览 data URL 前缀写死成
+// data:image/png。浏览器靠内容嗅探照样能显示，但右键「图片另存为」会存成"扩展名 .png
+// 的 JPEG"。这条用例锁住"按实际字节写 MIME"。
+test('POST /api/imagegen/test 的预览 data URL 用实际字节的 MIME（JPEG 不能写成 png）', async (t) => {
+  const port = await freePort();
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.server = { ...cfg.server, host: '127.0.0.1', port, token: '' };
+  cfg.runtime.mode = 'active';
+  cfg.onebot.wsUrl = 'ws://127.0.0.1:1';
+  cfg.onebot.httpUrl = 'http://127.0.0.1:1';
+  cfg.imageGen = {
+    ...cfg.imageGen,
+    enabled: true,
+    baseUrl: 'https://img.example.com/v1',
+    model: 'cogview-3-flash',
+    apiKey: 'sk-img-secret-12345678'
+  };
+  updateConfig(cfg);
+
+  // 假图片服务：回 b64_json，字节是 JPEG 魔数（生成器走的是全局 fetch）
+  const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(24, 7)]);
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), method: init?.method });
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      text: async () => JSON.stringify({ data: [{ b64_json: jpeg.toString('base64') }] })
+    };
+  };
+
+  const app = createApp({ log: () => {} });
+  t.after(async () => {
+    globalThis.fetch = realFetch;
+    await app.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  await app.start();
+
+  const res = await new Promise((resolve) => {
+    const req = http.request(
+      { host: '127.0.0.1', port, path: '/api/imagegen/test', method: 'POST', headers: { 'content-type': 'application/json' } },
+      (r) => {
+        let text = '';
+        r.setEncoding('utf8');
+        r.on('data', (c) => { text += c; });
+        r.on('end', () => resolve({ status: r.statusCode, body: JSON.parse(text) }));
+      }
+    );
+    req.on('error', (e) => resolve({ status: 0, body: { error: String(e.message) } }));
+    req.end(JSON.stringify({ prompt: '一只橘猫' }));
+  });
+
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.mime, 'image/jpeg', 'MIME 必须按字节嗅探，不能写死');
+  assert.match(res.body.image, /^data:image\/jpeg;base64,/, '预览 data URL 的前缀要与实际字节一致');
+  assert.equal(calls[0]?.method, 'POST', 'OpenAI 形状是 POST {base}/images/generations');
+});

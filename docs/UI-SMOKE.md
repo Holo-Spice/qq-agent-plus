@@ -1,15 +1,15 @@
 # 控制台手工烟测清单（UI-SMOKE）
 
 自动化只覆盖到「渲染函数不抛异常 + 真实 DOM 能加载 + 钩子接上了」这三层
-（`test/render-test.mjs` 178 条、`test/scroll-test.mjs` 19 条、`test/usage-e2e.mjs` 31 条、
-`test/ui-smoke.test.mjs` 4 条、`test/ui-module-graph.test.mjs` 6 条、
-`test/ui-real-modules.test.mjs` 1 条、`test/ui-modules.test.mjs` 4 条、
-`test/ui-registry.test.mjs` 9 条、`test/static-cache.test.mjs` 6 条）。
+（`test/render-test.mjs`、`test/scroll-test.mjs`、`test/usage-e2e.mjs`、
+`test/ui-smoke.test.mjs`、`test/ui-module-graph.test.mjs`、`test/ui-real-modules.test.mjs`、
+`test/ui-modules.test.mjs`、`test/ui-registry.test.mjs`、`test/static-cache.test.mjs`）。
+各文件的条数随用例增减，这里不再抄 —— 判据是全部通过，不是某个数字。
 **布局、事件、真实数据下的
 观感只有人看得见**，所以每次动到 `ui/` 就照下面走一遍。
 
 > **`ui-modules` / `ui-module-graph` / `ui-real-modules` / `ui-smoke` 不是可选用例。**
-> ui/ 是 30 个 ES module（2026-10-01 起）：文件漏加载、漏写一个 import、模块求值期踩 TDZ，
+> ui/ 已拆成一堆 ES module（2026-10-01 起）：文件漏加载、漏写一个 import、模块求值期踩 TDZ，
 > 浏览器里可能是**白屏**、也可能只是某个页面空白或某个外挂改造悄悄失效
 > （`status-refresh.js` 掉了就是"状态不再自动刷新"，页面上看不出异常）。
 > 注意分工：vm 沙箱（render / scroll / usage / ui-smoke）是"剥掉 import/export 按 classic 跑"，
@@ -30,7 +30,7 @@
       （`QARegistry` 是 ui/ 里**有意留在 window 上**的两个东西之一，另一个是 `QAText`；
       其余函数不再是全局 —— 想从控制台驱动界面，点 DOM 而不是敲 `switchTab('usage')`）
 - [ ] 页面能点：点一个页签有反应。**module 是 defer 语义**，启动挂在 `DOMContentLoaded` 上；
-      若整页点不动、连报错都没有，先看 Network 里 30 个 js 是不是 200/304 都拿到了
+      若整页点不动、连报错都没有，先看 Network 里那批 js 是不是 200/304 都拿到了
       （js 现在不带 `?v=` 令牌、走回源校验，这是 2026-10-01 有意改的）
 
 ## 1. 顶栏与总览
@@ -66,16 +66,16 @@
 
 - [ ] 会话列表按 key 增量更新：连点刷新，行的 DOM 不整块重建（不闪）
 - [ ] 存档页滚到底能继续加载更早的消息；切群时旧请求晚回来不会覆盖新群
-- [ ] 未提交树部署时「当前版本」显示「未提交版本 · 时间」，不是被截断的串
+- [ ] 「当前版本」显示成 `v<版本号> · <提交号>`（如 `v0.7.5 · ec02a8b…`）；未提交树部署时退化成
+      `v<版本号> · 未提交版本 · 时间`，不是被截断的裸串
 
 ## 5. 改完 UI 之后
 
 - [ ] `npm run lint`（0 error；含 `ui/` 的体积闸门 `max-lines` 1800）
-- [ ] `node test/render-test.mjs` → ALL PASSED 178
-- [ ] `node test/scroll-test.mjs` → ALL PASSED 19
-- [ ] `node test/usage-e2e.mjs` → ALL PASSED 31
+- [ ] `node test/render-test.mjs` → ALL PASSED
+- [ ] `node test/scroll-test.mjs` → ALL PASSED
+- [ ] `node test/usage-e2e.mjs` → ALL PASSED
 - [ ] `node --test test/ui-smoke.test.mjs test/ui-module-graph.test.mjs test/ui-real-modules.test.mjs test/ui-registry.test.mjs test/ui-modules.test.mjs`
-      （ui-smoke 4 条 / ui-module-graph 6 条 / ui-real-modules 1 条 / ui-registry 9 条 / ui-modules 4 条）
       注：**缺 devDeps 时这几条会整体跳过**（`ui-smoke` / `ui-real-modules` 要 happy-dom，
       `ui-module-graph` 要 espree / eslint-scope）—— 生产与更新器环境按 D6 约定就是
       `npm ci --omit=dev`，跳过是约定不是漏测；它们由 CI 与本地开发环境覆盖。

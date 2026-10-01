@@ -439,7 +439,10 @@ function renderSearchSection(c) {
       <input type="text" id="new-sp-baseurl" placeholder="JSON 类型：https://your-search.example.com/search；网页类型：https://your-searx.example.com/search" style="width:100%" /></div>
     <div class="field-row">
       <div class="field"><label>API Key（可选）</label>
-        <input type="password" id="new-sp-apikey" placeholder="多数自建服务留空即可" autocomplete="new-password" style="width:100%" /></div>
+        <div style="display:flex;gap:8px">
+          <input type="password" id="new-sp-apikey" placeholder="多数自建服务留空即可" autocomplete="new-password" style="flex:1" />
+          <button class="btn btn-small" id="new-sp-apikey-peek" type="button">显示</button>
+        </div></div>
       <div class="field"><label>模型名（可选）</label>
         <input type="text" id="new-sp-model" placeholder="Responses API 风格才需要" /></div>
     </div>
@@ -737,14 +740,23 @@ function renderDesktopSection(c) {
     <h3>控制台安全</h3>
     <div class="field-row">
       <div class="field"><label>当前 Token</label>
-        <input type="password" id="cfg-console-token-current" autocomplete="current-password"
-          placeholder="${c.server?.hasToken ? '输入当前 Token' : '当前未设置 Token'}" /></div>
+        <div style="display:flex;gap:8px">
+          <input type="password" id="cfg-console-token-current" autocomplete="current-password" style="flex:1"
+            placeholder="${c.server?.hasToken ? '输入当前 Token' : '当前未设置 Token'}" />
+          <button class="btn btn-small" id="cfg-console-token-current-peek" type="button">显示</button>
+        </div></div>
       <div class="field"><label>新 Token</label>
-        <input type="password" id="cfg-console-token-new" autocomplete="new-password"
-          placeholder="16-128 位字母、数字或 . _ ~ -" /></div>
+        <div style="display:flex;gap:8px">
+          <input type="password" id="cfg-console-token-new" autocomplete="new-password" style="flex:1"
+            placeholder="16-128 位字母、数字或 . _ ~ -" />
+          <button class="btn btn-small" id="cfg-console-token-new-peek" type="button">显示</button>
+        </div></div>
       <div class="field"><label>确认新 Token</label>
-        <input type="password" id="cfg-console-token-confirm" autocomplete="new-password"
-          placeholder="再次输入新 Token" /></div>
+        <div style="display:flex;gap:8px">
+          <input type="password" id="cfg-console-token-confirm" autocomplete="new-password" style="flex:1"
+            placeholder="再次输入新 Token" />
+          <button class="btn btn-small" id="cfg-console-token-confirm-peek" type="button">显示</button>
+        </div></div>
     </div>
     <div style="display:flex;gap:10px;align-items:center;margin-bottom:18px">
       <button type="button" class="btn btn-small" id="change-console-token-btn">更新控制台 Token</button>
@@ -772,10 +784,19 @@ function renderOnebotSection(c) {
     <div class="field-row">
       <div class="field"><label>WebSocket 地址（收消息）</label><input type="text" id="cfg-wsurl" value="${esc(c.onebot.wsUrl)}" /></div>
       <div class="field"><label>HTTP 地址（发消息）</label><input type="text" id="cfg-httpurl" value="${esc(c.onebot.httpUrl)}" /></div>
-      <div class="field"><label>WebSocket 令牌</label><input type="password" id="cfg-obtoken"
-        placeholder="${c.onebot.hasAccessToken ? '已保存；留空保持不变' : '未设置'}" /></div>
-      <div class="field"><label>HTTP 令牌（与 WS 不同时填）</label><input type="password" id="cfg-obhttptoken"
-        placeholder="${c.onebot.hasHttpAccessToken ? '已保存；留空保持不变' : '未设置'}" /></div>
+      <div class="field"><label>WebSocket 令牌</label>
+        <div style="display:flex;gap:8px">
+          <input type="password" id="cfg-obtoken" placeholder="${c.onebot.hasAccessToken ? '已保存；留空保持不变' : '未设置'}"
+            autocomplete="new-password" style="flex:1" />
+          <button class="btn btn-small" id="cfg-obtoken-toggle" type="button">显示</button>
+        </div>
+        <div class="hint">「显示」取回已保存的令牌明文；再点「隐藏」输入框回到空 —— 这个字段的「保持不变」就是留空。</div></div>
+      <div class="field"><label>HTTP 令牌（与 WS 不同时填）</label>
+        <div style="display:flex;gap:8px">
+          <input type="password" id="cfg-obhttptoken" placeholder="${c.onebot.hasHttpAccessToken ? '已保存；留空保持不变' : '未设置'}"
+            autocomplete="new-password" style="flex:1" />
+          <button class="btn btn-small" id="cfg-obhttptoken-toggle" type="button">显示</button>
+        </div></div>
     </div>
     <div id="onebot-status-line">${onebotStatusLineHtml()}</div>
     <div class="hint">改完 OneBot 地址或令牌后，执行 <code>manage.sh restart</code> 生效（连接只在启动时建立一次，改完不重启还是旧地址）。</div>`;

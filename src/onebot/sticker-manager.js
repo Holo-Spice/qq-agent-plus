@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { extractMediaFromSegments } from './onebot.js';
 import { DATA_DIR, getConfig } from '../core/config.js';
+import { IMAGE_EXTENSIONS, imageType } from '../core/image-type.js';
 import { resolveSelfName } from '../core/util.js';
 import {
   loadStickerStore, saveStickerStore, mergeStickerLibrary,
@@ -14,34 +15,6 @@ import {
 
 const STICKER_ASSET_DIR = path.join(DATA_DIR, 'sticker-assets');
 const MAX_STICKER_BYTES = 8 * 1024 * 1024;
-const IMAGE_EXTENSIONS = Object.freeze({
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/gif': 'gif',
-  'image/webp': 'webp'
-});
-
-function imageType(buffer) {
-  if (
-    buffer.length >= 8
-    && buffer.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))
-  ) return 'image/png';
-  if (
-    buffer.length >= 3
-    && buffer[0] === 0xFF
-    && buffer[1] === 0xD8
-    && buffer[2] === 0xFF
-  ) return 'image/jpeg';
-  if (buffer.length >= 6 && /^GIF8[79]a$/.test(buffer.subarray(0, 6).toString('ascii'))) {
-    return 'image/gif';
-  }
-  if (
-    buffer.length >= 12
-    && buffer.subarray(0, 4).toString('ascii') === 'RIFF'
-    && buffer.subarray(8, 12).toString('ascii') === 'WEBP'
-  ) return 'image/webp';
-  return '';
-}
 
 function cleanMetadata(value, max) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);

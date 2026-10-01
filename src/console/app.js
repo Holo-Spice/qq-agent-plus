@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRouter } from './router.js';
 
-import { asrApiKey, asrAvailable, asrConfigured, asrKeyHost, asrKeySource, asrLocalBin, asrLocalModel, asrSecretId, asrSecretKey, conversationConfigForChat, findWhisperBinSync, getConfig, identityPilotEnabled, imageGenAvailable, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, DATA_DIR, ROOT } from '../core/config.js';
+import { asrApiKey, asrAvailable, asrConfigured, asrKeyHost, asrKeySource, asrLocalBin, asrLocalModel, asrSecretId, asrSecretKey, conversationConfigForChat, findWhisperBinSync, getConfig, identityPilotEnabled, imageGenAvailable, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, pinImageGenKeyHost, DATA_DIR, ROOT } from '../core/config.js';
 import { tokenSaverEffective } from '../core/token-saver.js';
 import { budgetStatus } from '../core/budget.js';
 import { sanitizeConfigSecrets } from '../core/secret-keys.js';
@@ -29,7 +29,9 @@ import { GroupGameManager } from '../features/group-game.js';
 import { ReminderStore } from '../core/reminders.js';
 import { listModels, chatCompletion, resolveApiKey, cachedTokensOfUsage } from '../llm/llm.js';
 import { synthesizeSpeech } from '../llm/tts.js';
-import { generateImage, resolveImageGenAuth } from '../llm/image-gen.js';
+import { generateImage, imageGenKeyStale, resolveImageGenAuth } from '../llm/image-gen.js';
+import { imageType } from '../core/image-type.js';
+import { IMAGEGEN_SERVICES } from '../llm/image-gen-presets.js';
 import { TTS_SERVICES, ttsServiceById, ttsServiceOfBaseUrl, ttsKeyServices, ttsServiceOf, ttsKeyFor } from '../llm/tts-presets.js';
 import { resolveOfficialPrice, listOfficialPrices, listModelAliases, isPeakHour, priceAt, resolveModelPrice, costModeOf, modelLabel, splitModelLabel, vendorOfConfig, UNKNOWN_VENDOR } from '../pricing/model-prices.js';
 import { initPriceFeed, refreshPriceFeed, priceFeedStatus } from '../pricing/price-feed.js';
@@ -1355,7 +1357,14 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     };
     // imageGen 的 Key 同样被 sanitize 删掉了：给界面一个"存过没有"的派生标志
     // （hasApiKey 由 walk 自动生成，这里的 available 是"能不能真的画"）
-    safe.imageGen = { ...(safe.imageGen || {}), available: imageGenAvailable(cfgNow) };
+    // keyHost/keyStale 必须显式补：字段名含 apikey，会被 secret-keys 的模式当密钥删掉，
+    // 而界面要靠它说明"存过的 Key 不是给这个地址的，换个地址要重填"。
+    safe.imageGen = {
+      ...(safe.imageGen || {}),
+      available: imageGenAvailable(cfgNow),
+      keyHost: String(cfgNow.imageGen?.apiKeyHost || ''),
+      keyStale: imageGenKeyStale(cfgNow.imageGen, cfgNow.api)
+    };
     return safe;
   }
 
@@ -1550,6 +1559,21 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       return json(res, 400, { error: `未知搜索服务：${field}` });
     }
     return json(res, 200, { apiKey: String(getConfig().webSearch?.[field]?.apiKey || '') });
+  }, { keyEndpoint: true });
+
+  // OneBot 的 WS / HTTP 令牌：与聊天模型 Key 一样属"填过就看不见"的密钥
+  // （/api/config 按字段名 accessToken/httpAccessToken 统一脱敏），
+  // 控制台里因此需要一条回读明文的受守卫端点才能做「显示」。
+  // 注意与别的 Key 的**语义差别**：这两个字段的"保持不变"哨兵是**空串**（不是 ******），
+  // 前端「隐藏」时要把输入框还原成空，保存处也认空串；写成 ****** 会真存进配置。
+  router.add('GET', '/api/onebot-key', async (req, res, params, url) => {
+    const field = String(url.searchParams.get('field') || '');
+    const pick = {
+      ws: () => getConfig().onebot?.accessToken,
+      http: () => getConfig().onebot?.httpAccessToken
+    }[field];
+    if (!pick) return json(res, 400, { error: `未知字段：${field}（可选 ws / http）` });
+    return json(res, 200, { token: String(pick() || '') });
   }, { keyEndpoint: true });
 
   router.add('GET', '/api/events', async (req, res) => {
@@ -2507,6 +2531,8 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
 
   // 显示「图片生成」当前生效的明文 Key（与 TTS/模型 API 同一道守卫：本机控制台或带令牌）。
   // 2026-09-30 审查：界面上有「显示」按钮却没有这条路由，点了没反应、已存的 Key 读不回来。
+  router.add('GET', '/api/imagegen/presets', async (req, res) => json(res, 200, { ok: true, services: IMAGEGEN_SERVICES }));
+
   router.add('GET', '/api/imagegen/key', async (req, res) => {
     if (!keyEndpointAllowed(req)) return json(res, 403, { ok: false, error: '只能在控制台里查看密钥' });
     const cfgNow = getConfig();
@@ -2515,7 +2541,16 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       api: cfgNow.api,
       apiKey: resolveApiKey(cfgNow)
     });
-    return json(res, 200, { ok: true, apiKey: auth.key || '', reused: auth.reused === true, error: auth.error || '' });
+    // 「同域复用」时 auth.key 回的是**聊天模型那把 Key**：不能填进「图片生成」的输入框 ——
+    // 保存只挡 '******'，一旦回显，用户点一次「保存设置」就把模型 Key 固化成 imageGen
+    // 自有的 Key，"只发给同域"这条守卫从此对它失效（2026-10-01 审查 P2）。
+    // 复用本来就是"留空即生效"，不需要明文；真要读模型 Key 去「模型 API」那边读。
+    return json(res, 200, {
+      ok: true,
+      apiKey: auth.reused ? '' : (auth.key || ''),
+      reused: auth.reused === true,
+      error: auth.error || ''
+    });
   });
 
   router.add('POST', '/api/imagegen/test', async (req, res) => {
@@ -2532,10 +2567,14 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         apiKey: resolveApiKey(cfgNow),
         prompt
       });
+      // 按实际字节写 MIME：各家回的不一样（智谱 CogView 回 JPEG），写死 png 的话
+      // 右键「图片另存为」会存成"扩展名 .png 的 JPEG"。
+      const mime = imageType(buffer) || 'image/png';
       return json(res, 200, {
         ok: true,
         bytes: buffer.length,
-        image: `data:image/png;base64,${buffer.toString('base64')}`
+        mime,
+        image: `data:${mime};base64,${buffer.toString('base64')}`
       });
     } catch (error) {
       return json(res, 400, { ok: false, error: String(error?.message ?? error) });
@@ -2885,6 +2924,9 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       webSearchCount: usage.webSearchCount || 0,
       // 前端构建戳：轮询时发现它变了 → 前端提示"控制台已更新，点击刷新"
       uiBuild: UI_BUILD,
+      // 当前版本号（package.json 的 version）：控制台侧栏与控制页的版本徽标用它。
+      // 之前控制页只显示部署提交号（sha），用户看不出"这是哪个版本"。
+      version: PKG.version,
       // 省 Token 模式：模式 + 每项的"用户值 / 生效值"（设置页渲染用）
       tokenSaver,
       ...(cfgNow.timeControl?.enabled ? {
@@ -2968,7 +3010,14 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     //   也顺带兜住读盘 —— 与 asr 同款，见 IMAGEGEN_DERIVED_KEYS 的说明）
     if (patch?.imageGen && typeof patch.imageGen === 'object') {
       const submitted = String(patch.imageGen.apiKey ?? '').trim();
-      if (!submitted || submitted === '******') delete patch.imageGen.apiKey;
+      if (!submitted || submitted === '******') {
+        delete patch.imageGen.apiKey;
+      } else {
+        // 提交了新 Key：记下"它是给哪家的地址存的"（换预设/换地址后不再拿它发请求，
+        // 与 asr 的 apiKeyProvider/apiKeyHost 同款 —— 见 pinImageGenKeyHost）。
+        pinImageGenKeyHost(patch.imageGen, cfgNow.api?.baseUrl);
+      }
+      delete patch.imageGen.keyStale;   // 派生结论，不落盘（migrateConfig 也兜了一层）
     }
     // 人设真的改了就打一个时间戳：提示词据此在接下来 24 小时里提醒模型
     // "历史里的旧口癖/自称不作数"（换卡后它会被自己的旧发言锚住，实测能锚一天以上）

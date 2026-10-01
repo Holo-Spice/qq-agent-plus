@@ -229,7 +229,6 @@ function renderAsrSection(c) {
       <div style="display:flex;gap:8px">
         <input type="password" id="cfg-tts-key" value="" placeholder="输入新 Key 可替换" autocomplete="new-password" style="flex:1" />
         <button class="btn btn-small" id="tts-reveal-key-btn" type="button">显示</button>
-        <button class="btn btn-small" id="tts-hide-key-btn" type="button">隐藏</button>
       </div>
       <div class="hint" id="tts-key-hint"></div></div>
     <div class="field-row">
@@ -244,8 +243,11 @@ function renderAsrSection(c) {
     <h3 id="settings-imagegen">图片生成（按张计费）</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-img-enabled" ${c.imageGen?.enabled === true ? 'checked' : ''} />
       <label for="cfg-img-enabled">允许它画图（generate_image 工具；默认关）</label></div>
-    <div class="hint">开启后群友说「画一张」时它会调服务商的 <code>/images/generations</code> 生成图片、存进表情库再发出来。
+    <div class="hint">开启后群友说「画一张」时它会调服务商的生图接口生成图片、存进表情库再发出来。
       这是**按张计费**的：每小时上限是唯一的闸门，模型也不会主动画（只在你让它画时）。</div>
+    <div class="field"><label for="cfg-img-service">服务预设</label>
+      <select id="cfg-img-service"><option value="">（加载中…）</option></select>
+      <div class="hint" id="img-preset-hint"></div></div>
     <div class="field"><label for="cfg-img-baseurl">服务地址</label>
       <input type="text" id="cfg-img-baseurl" value="${esc(c.imageGen?.baseUrl || '')}" placeholder="留空 = 与聊天模型同一家（同域时才复用它的 Key）" /></div>
     <div class="field-row">
@@ -268,6 +270,63 @@ function renderAsrSection(c) {
     <div class="hint">改完先「保存设置」再试画一张：
       <button class="btn btn-small" id="img-test-btn" type="button" style="margin-left:8px">试画一张</button>
       <span id="img-test-result" class="muted"></span></div>`;
+}
+
+// ── 图片生成：服务预设 ──
+// 预设表在后端 src/llm/image-gen-presets.js（前端的模型/ASR 预设表在 core/constants.js，
+// TTS 与生图这两套因为后端也要用同一份判断——Key 归属、请求形状——所以放后端）。
+// 免 Key 的那家（pollinations）会把 Key 栏置灰并写明不用填。
+async function bindImageGenPreset() {
+  const svc = document.querySelector('#cfg-img-service');
+  if (!svc) return;
+  const q = (sel) => document.querySelector(sel);
+  const baseInput = q('#cfg-img-baseurl');
+  const modelInput = q('#cfg-img-model');
+  const hint = q('#img-preset-hint');
+  const keyInput = q('#cfg-img-key');
+  const keyLabel = q('#cfg-img-key-label');
+  const revealBtn = q('#cfg-img-reveal-key-btn');
+  let services = [];
+  let presetsOk = true;
+  try {
+    const r = await api('/api/imagegen/presets');
+    services = Array.isArray(r?.services) ? r.services : [];
+  } catch { presetsOk = false; }
+  if (!services.length) presetsOk = false;
+  const hostOf = (u) => { try { return new URL(String(u || '').trim()).host.toLowerCase(); } catch { return ''; } };
+  const match = (url) => {
+    const h = hostOf(url);
+    return h ? (services.find((s) => (s.hosts || []).includes(h)) || null) : null;
+  };
+  const apply = (s, { resetModel = false } = {}) => {
+    if (!s) return;
+    // 自定义那家没有预设地址：别把上一家的地址留在框里（否则会一直解析回上一家）
+    if (s.baseUrl) { if (baseInput) baseInput.value = s.baseUrl; }
+    else if (baseInput && match(baseInput.value)) baseInput.value = '';
+    const defModel = s.models?.[0]?.id || '';
+    if (modelInput && defModel && (resetModel || !String(modelInput.value || '').trim())) modelInput.value = defModel;
+    if (hint) hint.textContent = s.note || '';
+    const needsKey = Array.isArray(s.creds) && s.creds.length > 0;
+    if (keyInput) {
+      keyInput.disabled = !needsKey;
+      keyInput.placeholder = needsKey ? '留空 = 与模型同域时复用模型 Key' : '这家不需要 Key';
+    }
+    if (keyLabel) keyLabel.textContent = needsKey ? 'API Key（留空/掩码 = 保持不变）' : 'API Key（这家不需要）';
+    if (revealBtn) revealBtn.disabled = !needsKey;
+  };
+  if (!presetsOk) {
+    // 拉不到预设表时**什么都不动**。以前这里退化成"只有 pollinations 一家"，
+    // 于是 match() 认不出用户已存的地址 → current 落到 services[0] → apply() 把已存的
+    // 地址静默改成 pollinations（保存后就真改了配置）。2026-10-01 审查。
+    svc.innerHTML = '<option value="">（预设表拉取失败）</option>';
+    if (hint) hint.textContent = '没能从服务端取到服务预设表：已保存的地址、模型与 Key 都不受影响，刷新页面重试即可。';
+    return;
+  }
+  svc.innerHTML = services.map((x) => `<option value="${esc(x.id)}">${esc(x.label)}</option>`).join('');
+  const current = match(baseInput?.value) || services.find((s) => s.id === 'custom') || services[0];
+  if (current) svc.value = current.id;
+  apply(current, { resetModel: !String(modelInput?.value || '').trim() });
+  svc.addEventListener('change', () => apply(services.find((x) => x.id === svc.value), { resetModel: true }));
 }
 
 // ── 语音回复（TTS）：服务预设与模型/音色候选 ──
@@ -514,24 +573,10 @@ async function bindTtsControls() {
     if (modelsHint) { modelsHint.style.display = ''; modelsHint.textContent = `已选择：${modelPick.value}`; }
   });
   const voicePickBtn = q('#tts-voice-pick-btn');
-  const revealBtn = q('#tts-reveal-key-btn');
-  if (revealBtn) revealBtn.addEventListener('click', async () => {
-    const node = q('#cfg-tts-key');
-    if (!node) return;
-    try {
-      const service = currentService();
-      const r = await api(`/api/tts/key?service=${encodeURIComponent(service?.id || '')}`);
-      if (r.ok && r.apiKey) { node.value = r.apiKey; node.type = 'text'; revealBtn.textContent = '已显示'; }
-      else if (r.ok) { if (presetHint) presetHint.textContent = '这一家还没有保存过 Key'; }
-      else if (presetHint) presetHint.textContent = r.error || '读取失败';
-    } catch (e) { if (presetHint) presetHint.textContent = `读取失败：${e.message}`; }
-  });
-  const hideKeyBtn = q('#tts-hide-key-btn');
-  if (hideKeyBtn) hideKeyBtn.addEventListener('click', () => {
-    const node = q('#cfg-tts-key');
-    if (node) { node.type = 'password'; node.value = '******'; }
-    if (revealBtn) revealBtn.textContent = '显示';
-  });
+  // 语音合成 Key 的「显示 / 隐藏」不在这里：与设置页其它密钥同走 ui/pages/key-toggles.js
+  // 的统一实现。这里的旧实现有两个坑（2026-10-01 审查）：①「显示」会用回读值盖掉用户刚
+  // 输了一半的新 Key；②「隐藏」无条件写 ****** —— 而 ****** 在服务端是"保持不变"，
+  // 等于把刚粘进去的新 Key 静默丢弃。
   if (voicePickBtn) voicePickBtn.addEventListener('click', () => {
     if (!voicePick) return;
     const service = currentService();
@@ -582,4 +627,4 @@ async function bindTtsControls() {
 }
 
 
-export { bindTtsControls, renderAsrSection };
+export { bindImageGenPreset, bindTtsControls, renderAsrSection };

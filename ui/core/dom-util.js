@@ -545,8 +545,34 @@ function syncClampedInputs() {
 }
 
 
+/**
+ * 「显示 / 隐藏」一个**正在输入**的密码框（登录令牌、控制台改密、SnowLuma 改密、
+ * 新增搜索服务的 Key）—— 只切 type 与按钮文案，不向后端取任何值。
+ *
+ * 与已保存密钥那套（ui/pages/settings-bind.js 的 keyToggles）分开：那几个能从服务端
+ * 回读明文，这几个还没有"已保存的值"可读，回读端点也没有意义。40 位的控制台令牌
+ * 最容易输错一个字符却看不出来，所以这几处也值得有个明文看一眼的开关。
+ */
+function bindPeekToggle(buttonId, inputId) {
+  const btn = typeof buttonId === 'string' ? document.getElementById(buttonId) : buttonId;
+  const input = typeof inputId === 'string' ? document.getElementById(inputId) : inputId;
+  if (!btn || !input) return;
+  // 幂等：同一个按钮只接一次（渲染测试会在同一份假 DOM 上反复调 bindSettingsEvents，
+  // 真实控制台每次重渲染给的是新元素 —— 两种情况都不会重复接）。
+  if (btn.dataset.peekBound === '1') return;
+  btn.dataset.peekBound = '1';
+  btn.addEventListener('click', () => {
+    // 状态记在按钮上，不读 input.type：渲染测试的假 DOM 不把 type="password" 映射成
+    // .type（读它永远是 undefined，会"第一次点就走进隐藏分支"）。
+    const show = btn.dataset.peeked !== '1';
+    input.type = show ? 'text' : 'password';
+    btn.dataset.peeked = show ? '1' : '0';
+    btn.textContent = show ? '隐藏' : '显示';
+  });
+}
+
 export {
-  afterRender, askForConfirmation, experimentalFeatureLaunchPatch, extraBodyText, hideLoading,
+  afterRender, askForConfirmation, bindPeekToggle, experimentalFeatureLaunchPatch, extraBodyText, hideLoading,
   identityPilotSettingsPatch, impressionMetaLabel, initChatScrollLoader, initSessionScrollLoader,
   patchKeyedList, pollUntilReady, readAssetImage, requestExperimentOwnerUin, revealLoadingIfSlow,
   scheduleChatsRefresh, scheduleSessionRender, setBoxError, setHtmlIfChanged, setLoadingStatus,

@@ -11,6 +11,7 @@
 // 下载器（url 形态）直接 import safeFetchBinary 而不是当参数传：函数当参数会被 ops scan
 // 当成"未定义调用点"误报（与 tts-http.js 里记的同一类）。
 import { watchTimeWindow } from '../core/time-gate.js';
+import { imageGenServiceOfBaseUrl, imageGenServiceNeedsKey } from './image-gen-presets.js';
 import { safeFetchBinary } from './safe-fetch.js';
 
 export const MAX_PROMPT_CHARS = 800;
@@ -36,22 +37,58 @@ export function imageGenBaseUrl(imageGen, api) {
 }
 
 /**
+ * 存过的 Key 能不能用于**当前这个地址**：凭据记着存它时的主机名（apiKeyHost）。
+ * 没记归属的老配置（migrateConfig 会按当时的地址补记）按"能用"算 —— 不给升级中的实例
+ * 制造"突然不生效"。与 asr 的 asrCredentialApplies 同一条道理（2026-10-01 审查补）：
+ * 之前这里只看"填没填 Key"，于是**换了预设/换了地址，旧 Key 照样以 Bearer 发到新主机**
+ * —— 而"一键切换服务预设"正是这个功能的日常用法，等于把老 Key 送出去。
+ */
+export function imageGenKeyApplies(imageGen, host) {
+  const stored = String(imageGen?.apiKeyHost || '').trim().toLowerCase();
+  if (!stored) return true;
+  return stored === String(host || '').trim().toLowerCase();
+}
+
+/** 存过 Key、但它不是给当前地址存的 → 界面要提示"换个地址要重填"。 */
+export function imageGenKeyStale(imageGen, api) {
+  const own = String(imageGen?.apiKey || '').trim();
+  if (!own || own === '******') return false;
+  return !imageGenKeyApplies(imageGen, hostOf(imageGenBaseUrl(imageGen, api)));
+}
+
+/**
  * 决定用哪把 Key、以及能不能复用聊天模型那把。
- * 规则（2026-09-30 定的守卫）：
- *   1. imageGen 自己填了 Key → 用它；
- *   2. 没填，但实际地址与聊天模型 api.baseUrl **同域**（含"没填地址=跟模型同一家"）→ 复用；
- *   3. 没填且不同域 → 拒绝，返回明确错误（要求显式填 Key），绝不把模型 Key 发给外部地址。
+ * 规则：
+ *   0. 服务地址命中的预设**声明不需要 Key**（如免 Key 的 pollinations）→ 直接放行，空 Key；
+ *   1. imageGen 自己填了 Key、**且它是给当前这个地址存的** → 用它；
+ *   2. 没填（或存的那把不属于当前地址），但实际地址与聊天模型 api.baseUrl **同域**
+ *      （含"没填地址=跟模型同一家"）→ 复用模型 Key；
+ *   3. 都不成立 → 拒绝，返回明确错误，绝不把别家的 Key 发给这个地址。
  * 返回值：{ ok, key, reused, error }
  */
 export function resolveImageGenAuth({ imageGen, api, apiKey } = {}) {
+  const effective = imageGenBaseUrl(imageGen, api);
+  const preset = imageGenServiceOfBaseUrl(effective);
+  if (preset && !imageGenServiceNeedsKey(preset)) return { ok: true, key: '', reused: false, error: '' };
+  const gHost = hostOf(effective);
   const own = String(imageGen?.apiKey || '').trim();
-  if (own && own !== '******') return { ok: true, key: own, reused: false, error: '' };
-  const gHost = hostOf(imageGenBaseUrl(imageGen, api));
+  if (own && own !== '******' && imageGenKeyApplies(imageGen, gHost)) {
+    return { ok: true, key: own, reused: false, error: '' };
+  }
   const aHost = hostOf(api?.baseUrl);
   if (gHost && aHost && gHost === aHost) {
     const modelKey = String(apiKey || '').trim();
     if (modelKey && modelKey !== '******') return { ok: true, key: modelKey, reused: true, error: '' };
     return { ok: true, key: '', reused: false, error: '' };   // 同域但模型也没 Key：让请求自己去撞 401
+  }
+  if (own && own !== '******') {
+    return {
+      ok: false,
+      key: '',
+      reused: false,
+      error: `图片生成存的 Key 是给 ${imageGen?.apiKeyHost || '另一个地址'} 的，当前地址是`
+        + ` ${gHost || '未填'}：换地址后要重新填一次 Key（不会把旧 Key 发给新地址）。`
+    };
   }
   return {
     ok: false,
@@ -105,7 +142,13 @@ export async function generateImage({
     else signal.addEventListener('abort', onAbort, { once: true });
   }
   const releaseTimeGuard = watchTimeWindow((error) => controller.abort(error));
+  const preset = imageGenServiceOfBaseUrl(base);
   try {
+    // 免 Key 的 pollinations 形状单独走一条：提示词在 URL 路径里、GET 取图字节
+    // （它那个长得像 OpenAI 的 POST /openai/images/generations **不看 body**，别用）
+    if (preset?.shape === 'pollinations') {
+      return await pollinationsImage({ base, body, model, size, controller, fetchFn });
+    }
     const res = await fetchFn(`${base}/images/generations`, {
       method: 'POST',
       headers: {
@@ -152,4 +195,38 @@ export async function generateImage({
     releaseTimeGuard();
     if (signal) signal.removeEventListener('abort', onAbort);
   }
+}
+
+/**
+ * pollinations 形状：GET {base}/prompt/<提示词>?width=&height=&model=&nologo=true，直接拿图片字节。
+ * 返回与 OpenAI 形状同一个 `{ buffer, revisedPrompt }`，调用方不需要知道是哪一家。
+ * 尺寸从「尺寸」栏的 `1024x1024` 解析（它只认 width/height 两个查询参数）。
+ */
+async function pollinationsImage({ base, body, model, size, controller, fetchFn }) {
+  const url = new URL(`${base}/prompt/${encodeURIComponent(body)}`);
+  const m = /^(\d{2,4})\s*[x×]\s*(\d{2,4})$/.exec(String(size || '').trim());
+  if (m) {
+    url.searchParams.set('width', m[1]);
+    url.searchParams.set('height', m[2]);
+  }
+  if (model) url.searchParams.set('model', model);
+  url.searchParams.set('nologo', 'true');
+  const res = await fetchFn(url.toString(), { method: 'GET', signal: controller.signal });
+  const type = String(res.headers?.get?.('content-type') || '');
+  if (!res.ok || !type.startsWith('image/')) {
+    const detail = String((await res.text?.()) || '').slice(0, 300);
+    // 402 / 429 是这条免 Key 路线的常态而不是异常：官方文档写明匿名档是「15 秒 1 次」按 IP 限流，
+    // 额度用完之后直接回一个**空的** 402（响应体就俩字节 {}），不解释的话用户完全看不懂。
+    // 2026-10-01 实测：同一时刻本机出口 200、云服务器出口 402 —— 是按 IP 算的。
+    if (res.status === 402 || res.status === 429) {
+      throw new Error(`图片生成被限流（HTTP ${res.status}）：这条免 Key 路线是匿名档，按 IP 限制`
+        + '（官方文档口径 1 次/15 秒），额度用完就会这样。稍后再试，或换一家有免费额度的图模型'
+        + '（控制台「图片生成 → 服务预设」里可选）。');
+    }
+    throw new Error(`图片生成失败 HTTP ${res.status}${detail ? `：${detail}` : ''}`);
+  }
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (!buffer.length) throw new Error('图片生成返回了空数据');
+  if (buffer.length > MAX_IMAGE_BYTES) throw new Error('生成的图片过大（>8 MiB）');
+  return { buffer, revisedPrompt: '' };
 }

@@ -15,14 +15,14 @@ import {
   UPDATE_PHASE_LABELS, UPDATE_STATUS_LABELS
 } from './core/constants.js';
 import {
-  afterRender, askForConfirmation, hideLoading, initSessionScrollLoader, pollUntilReady,
+  afterRender, askForConfirmation, bindPeekToggle, hideLoading, initSessionScrollLoader, pollUntilReady,
   revealLoadingIfSlow, scheduleChatsRefresh, scheduleSessionRender, setBoxError, setLoadingStatus,
   syncGraduatedFeatureNavigation
 } from './core/dom-util.js';
 import { $, $$, esc } from './core/dom.js';
 import {
   clampInt, fmtTime, formatElapsed, formatReleaseNotes, formatRevision, hostOfUrl, legacyServiceDeployed,
-  onebotIssueText, serviceTileState, serviceUrl, uiServiceOfUrl
+  onebotIssueText, serviceTileState, serviceUrl, uiServiceOfUrl, versionWithRevision
 } from './core/format.js';
 import { QARegistry } from './core/registry.js';
 import { pendingSessionDetail, refreshIntervalMs, startUpdateProgressTicker, state } from './core/state.js';
@@ -239,7 +239,7 @@ function renderControlHub(data = {}) {
         <span class="control-service-state ${update.status === 'failed' ? 'offline' : update.enabled ? 'online' : ''}" data-hub-deploy-state>${esc(updateState)}</span>
       </div>
       <div class="update-deploy-summary">
-        <div><span>当前版本</span><strong data-hub-deploy="current">${esc(revision(update.currentRevision))}</strong></div>
+        <div><span>当前版本</span><strong data-hub-deploy="current">${esc(versionWithRevision(state.appVersion, update.currentRevision))}</strong></div>
         <div><span>目标版本</span><strong data-hub-deploy="target">${esc(revision(update.targetRevision))}${update.targetVersion ? ` · ${esc(update.targetVersion)}` : ''}</strong></div>
         <div><span>上次检查</span><strong data-hub-deploy="lastCheck">${update.lastCheckAt ? esc(fmtTime(update.lastCheckAt)) : '-'}</strong></div>
         <div><span>下次检查</span><strong data-hub-deploy="nextCheck">${update.nextCheckAt ? esc(fmtTime(update.nextCheckAt)) : '-'}</strong></div>
@@ -275,6 +275,17 @@ function renderControlHub(data = {}) {
         <button type="button" class="control-key-row" data-open-settings="onebot">
           <span><strong>OneBot HTTP / WS Token</strong><small>OneBot</small></span><b>管理</b>
         </button>
+        <!-- 「语音转文字」这一页里住着三块各自独立的密钥（语音合成 / 语音识别 / 图片生成），
+             都是"填过就看不见"的，所以各给一行入口（三行都跳到同一个设置分区）。 -->
+        <button type="button" class="control-key-row" data-open-settings="asr">
+          <span><strong>语音回复 Key</strong><small>设置 → 语音转文字 · 语音合成</small></span><b>管理</b>
+        </button>
+        <button type="button" class="control-key-row" data-open-settings="asr">
+          <span><strong>语音转文字 Key</strong><small>设置 → 语音转文字 · 语音识别</small></span><b>管理</b>
+        </button>
+        <button type="button" class="control-key-row" data-open-settings="asr">
+          <span><strong>图片生成 Key</strong><small>设置 → 语音转文字 · 图片生成</small></span><b>管理</b>
+        </button>
         <button type="button" class="control-key-row" data-open-settings="desktop">
           <span><strong>QQ Agent 控制台 Token</strong><small>系统</small></span><b>管理</b>
         </button>
@@ -292,9 +303,21 @@ function renderControlHub(data = {}) {
         <!-- 浏览器要求密码表单带用户名框（可隐藏），否则 F12 里会有一条 DOM 提示。
              这里是给 SnowLuma 改密钥、不是登录，放个隐藏占位即可。 -->
         <input type="text" id="snowluma-account" name="username" value="snowluma" autocomplete="username" hidden aria-hidden="true" tabindex="-1" />
-        <label><span>当前密钥</span><input type="password" id="snowluma-current-password" autocomplete="current-password" required /></label>
-        <label><span>新密钥</span><input type="password" id="snowluma-new-password" autocomplete="new-password" placeholder="至少 10 位，含大小写与符号" required /></label>
-        <label><span>确认新密钥</span><input type="password" id="snowluma-confirm-password" autocomplete="new-password" required /></label>
+        <label><span>当前密钥</span>
+          <div class="pw-row">
+            <input type="password" id="snowluma-current-password" autocomplete="current-password" required />
+            <button type="button" class="btn btn-small" id="snowluma-current-peek">显示</button>
+          </div></label>
+        <label><span>新密钥</span>
+          <div class="pw-row">
+            <input type="password" id="snowluma-new-password" autocomplete="new-password" placeholder="至少 10 位，含大小写与符号" required />
+            <button type="button" class="btn btn-small" id="snowluma-new-peek">显示</button>
+          </div></label>
+        <label><span>确认新密钥</span>
+          <div class="pw-row">
+            <input type="password" id="snowluma-confirm-password" autocomplete="new-password" required />
+            <button type="button" class="btn btn-small" id="snowluma-confirm-peek">显示</button>
+          </div></label>
         <button type="submit" class="btn btn-primary" id="snowluma-password-submit">更新密钥</button>
       </form>
       <div id="snowluma-password-result" class="control-result muted" role="status" aria-live="polite"></div>
@@ -326,6 +349,10 @@ function bindControlHubHandlers() {
       switchTab('settings');
     });
   });
+  // SnowLuma 改密钥的三格也是"正在输入"的 → 本地明文开关
+  for (const field of ['current', 'new', 'confirm']) {
+    bindPeekToggle(`snowluma-${field}-peek`, `snowluma-${field}-password`);
+  }
   $('#snowluma-password-form')?.addEventListener('submit', changeSnowLumaPassword);
 }
 
@@ -367,7 +394,7 @@ function updateControlHubFields(box, statuses, update) {
 
   // 版本与检查时间
   const summary = {
-    current: revision(update.currentRevision),
+    current: versionWithRevision(state.appVersion, update.currentRevision),
     target: revision(update.targetRevision),
     lastCheck: update.lastCheckAt ? fmtTime(update.lastCheckAt) : '-',
     nextCheck: update.nextCheckAt ? fmtTime(update.nextCheckAt) : '-'
@@ -577,6 +604,10 @@ $('#pause-btn').addEventListener('click', async () => {
     refreshStatus();
   }
 });
+
+// 登录框的 Token 是"正在输入"的（没有已保存的明文可回读）→ 本地明文开关，
+// 免得粘贴/手打的 40 位令牌看不出对不对。
+bindPeekToggle('console-token-peek', 'console-token');
 
 $('#console-login-form')?.addEventListener('submit', async (event) => {
   event.preventDefault();

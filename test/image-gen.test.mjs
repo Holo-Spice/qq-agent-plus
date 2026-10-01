@@ -191,6 +191,77 @@ test('适配器：错误路径都要带出服务商原文与可读原因', async
   );
 });
 
+test('pollinations 形状：GET、提示词进路径、尺寸转 width/height，直接拿图片字节', async () => {
+  const calls = [];
+  const out = await generateImage({
+    cfg: { imageGen: { enabled: true, baseUrl: 'https://image.pollinations.ai', model: 'flux', size: '512x512' } },
+    apiCfg: { baseUrl: 'https://gateway.example.com/v1' },
+    prompt: '一只橘猫 戴草帽',
+    fetchFn: async (url, req) => {
+      calls.push({ url: String(url), method: req.method, headers: req.headers });
+      return { ok: true, status: 200, headers: { get: () => 'image/jpeg' }, arrayBuffer: async () => PNG };
+    }
+  });
+  const u = new URL(calls[0].url);
+  assert.equal(`${u.origin}${u.pathname}`, `https://image.pollinations.ai/prompt/${encodeURIComponent('一只橘猫 戴草帽')}`);
+  assert.equal(u.searchParams.get('width'), '512');
+  assert.equal(u.searchParams.get('height'), '512');
+  assert.equal(u.searchParams.get('model'), 'flux');
+  assert.equal(calls[0].method, 'GET');
+  // 免 Key 的第三方服务：连 headers 都不带（绝不能把模型那把 Key 发过去）
+  assert.equal(calls[0].headers, undefined);
+  assert.equal(out.buffer.toString('hex'), PNG.toString('hex'));
+});
+
+test('pollinations 形状：非图片响应（限流/报错）带出原文，别把错误页当图片收下', async () => {
+  await assert.rejects(() => generateImage({
+    cfg: { imageGen: { enabled: true, baseUrl: 'https://image.pollinations.ai', model: 'flux' } },
+    apiCfg: { baseUrl: 'https://gateway.example.com/v1' },
+    prompt: 'x',
+    fetchFn: async () => ({ ok: false, status: 503, headers: { get: () => 'application/json' }, text: async () => '{"error":"busy"}' })
+  }), /HTTP 503.*busy/);
+});
+
+test('pollinations 形状：402/429 限流要给可操作的提示（原始响应是空的 {}，甩给用户看不懂）', async () => {
+  for (const status of [402, 429]) {
+    await assert.rejects(() => generateImage({
+      cfg: { imageGen: { enabled: true, baseUrl: 'https://image.pollinations.ai', model: 'flux' } },
+      apiCfg: { baseUrl: 'https://gateway.example.com/v1' },
+      prompt: 'x',
+      fetchFn: async () => ({ ok: false, status, headers: { get: () => 'application/json; charset=utf-8' }, text: async () => '{}' })
+    }), (err) => {
+      assert.match(err.message, new RegExp(`限流.*${status}`), '要说明是限流并带上状态码');
+      assert.match(err.message, /稍后再试|换一家/, '要给出下一步怎么办');
+      return true;
+    });
+  }
+});
+
+test('服务预设表：id 唯一、形状合法；免 Key 的那家不放行就等于白给', async () => {
+  const { IMAGEGEN_SERVICES, imageGenServiceOfBaseUrl, imageGenServiceNeedsKey } = await import('../src/llm/image-gen-presets.js');
+  const ids = IMAGEGEN_SERVICES.map((s) => s.id);
+  assert.equal(new Set(ids).size, ids.length, '预设 id 不能重复');
+  for (const s of IMAGEGEN_SERVICES) {
+    assert.ok(s.label && ['openai', 'pollinations'].includes(s.shape), `${s.id} 的 label/shape 不合法`);
+    assert.match(String(s.baseUrl ?? ''), /^$|^https:\/\//, `${s.id} 的 baseUrl 必须是 https 或空（自定义那家）`);
+  }
+  // 地址认家（控制台靠它回填下拉）
+  assert.equal(imageGenServiceOfBaseUrl('https://image.pollinations.ai/prompt/x')?.id, 'pollinations');
+  assert.equal(imageGenServiceOfBaseUrl('https://open.bigmodel.cn/api/paas/v4')?.id, 'zhipu');
+  assert.equal(imageGenServiceOfBaseUrl('https://unknown.example.com'), null);
+  // 免 Key 判定
+  assert.equal(imageGenServiceNeedsKey(imageGenServiceOfBaseUrl('https://image.pollinations.ai')), false);
+  assert.equal(imageGenServiceNeedsKey(IMAGEGEN_SERVICES.find((s) => s.id === 'zhipu')), true);
+  // 鉴权守卫：免 Key 的预设留空也放行（否则"没有图模型"的用户永远用不上），且不回退模型 Key
+  const api = { baseUrl: 'https://gateway.example.com/v1' };
+  assert.deepEqual(
+    resolveImageGenAuth({ imageGen: { baseUrl: 'https://image.pollinations.ai' }, api, apiKey: 'model-key' }),
+    { ok: true, key: '', reused: false, error: '' }
+  );
+  // 但守卫本身没放松：别的跨域地址照旧拒绝
+  assert.equal(resolveImageGenAuth({ imageGen: { baseUrl: 'https://random-other.example.com' }, api, apiKey: 'model-key' }).ok, false);
+});
+
 test('配置访问器：imageGenAvailable 的三态与闸门默认值', async () => {
   const { updateConfig } = await import('../src/core/config.js');
   // 默认关
@@ -226,4 +297,54 @@ test('工具：generate_image 未启用时不注入模型工具表', async () =>
   const def = buildToolDefs().find((d) => d.name === 'generate_image');
   assert.deepEqual(def.parameters.required, ['prompt']);
   assert.ok(def.description.includes('按张计费'));
+});
+
+// 2026-10-01 审查 P1：存过的 Key 要绑定"存它时的地址"，否则"一键切换服务预设"会把
+// A 家的 Key 以 Bearer 发给 B 家（静默事故）。对照 asr 的 apiKeyProvider/apiKeyHost。
+test('resolveImageGenAuth：存过的 Key 只在"它自己的地址"上生效（换地址要求重填）', async () => {
+  const { resolveImageGenAuth, imageGenKeyApplies, imageGenKeyStale } = await import('../src/llm/image-gen.js');
+  const api = { baseUrl: 'https://gateway.example.com/v1' };
+
+  // 记了归属：地址一致才用
+  const bound = { baseUrl: 'https://open.bigmodel.cn/api/paas/v4', apiKey: 'zhipu-key', apiKeyHost: 'open.bigmodel.cn' };
+  assert.equal(imageGenKeyApplies(bound, 'open.bigmodel.cn'), true);
+  assert.equal(imageGenKeyApplies(bound, 'api.siliconflow.cn'), false);
+  assert.deepEqual(resolveImageGenAuth({ imageGen: bound, api }), { ok: true, key: 'zhipu-key', reused: false, error: '' });
+  assert.equal(imageGenKeyStale(bound, api), false);
+
+  // 换到别家（预设一键切换后的状态）：**不再拿旧 Key 发请求**，并给出可读原因
+  const switched = { ...bound, baseUrl: 'https://api.siliconflow.cn/v1' };
+  const r = resolveImageGenAuth({ imageGen: switched, api });
+  assert.equal(r.ok, false, '换地址后不能继续用旧 Key');
+  assert.equal(r.key, '');
+  assert.match(r.error, /open\.bigmodel\.cn/);
+  assert.match(r.error, /重新填/);
+  assert.equal(imageGenKeyStale(switched, api), true);
+
+  // 换到"与聊天模型同域"的地址 → 走复用那条，仍然不发旧 Key
+  const sameHost = { ...bound, baseUrl: 'https://gateway.example.com/v1' };
+  assert.deepEqual(
+    resolveImageGenAuth({ imageGen: sameHost, api, apiKey: 'model-key' }),
+    { ok: true, key: 'model-key', reused: true, error: '' }
+  );
+  // 换成免 Key 的那家 → 不需要 Key，也不算 stale 报错
+  const keyless = { ...bound, baseUrl: 'https://image.pollinations.ai' };
+  assert.deepEqual(resolveImageGenAuth({ imageGen: keyless, api }), { ok: true, key: '', reused: false, error: '' });
+
+  // 没记归属的老配置（migrateConfig 会按当时的地址补记）按"能用"算，不给升级中的实例制造突然失效
+  const legacyNoHost = { baseUrl: 'https://open.bigmodel.cn/api/paas/v4', apiKey: 'old-key' };
+  assert.equal(imageGenKeyApplies(legacyNoHost, 'anything.example.com'), true);
+  assert.equal(imageGenKeyStale(legacyNoHost, api), false);
+});
+
+test('服务预设表不变量：openai 形状的预设必须声明要 Key（新加预设别忘了）', async () => {
+  const { IMAGEGEN_SERVICES, imageGenServiceNeedsKey } = await import('../src/llm/image-gen-presets.js');
+  for (const s of IMAGEGEN_SERVICES) {
+    if (s.shape !== 'openai') continue;
+    assert.equal(
+      imageGenServiceNeedsKey(s),
+      true,
+      `${s.id} 是 openai 形状却声明不需要 Key：那样会带着空 Authorization 去打别家端点`
+    );
+  }
 });

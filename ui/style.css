@@ -1291,8 +1291,10 @@ html.boot-show .loading-overlay { opacity: 1; }
 .mm-model .mm-del { margin-left: auto; border: 1px solid rgba(255,107,107,.5); color: var(--red); background: none; border-radius: 6px; padding: 2px 8px; cursor: pointer; font-size: 11px; }
 .mm-model .mm-del:hover { background: rgba(255,107,107,.12); }
 .model-modal-foot { display: flex; gap: 10px; justify-content: flex-end; }
-.field-row { display: flex; gap: 14px; margin-bottom: 10px; flex-wrap: wrap; }
-.field { flex: 1; min-width: 220px; }
+/* 旧的 .field-row 定义（display:flex + gap:14px + margin-bottom:10px）与 `.field { flex:1;
+   min-width:220px }` 都已删除：它们被下面那份网格定义（.field-row 的 grid 版、.field 的
+   min-width:0）整条覆盖，留着只会让人以为 .field-row 还是 flex 容器 —— 2026-10-01 修对齐时
+   顺手清掉，两处都是实测确认无效的死规则。 */
 .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
 .field input[type=text], .field input[type=password], .field input[type=number], .moment-window-row input[type=time], .field select, .field textarea {
   width: 100%;
@@ -2895,7 +2897,10 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
      内容区宽到 860 以后右侧就空出一大片，整行看着"全挤在左边"。 */
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 12px 18px;
-  align-items: end;
+  /* 必须是 start（2026-10-01 修）：原先写 end，同一格里两个字段只要内容高度不同 ——
+     一个带单行提示、一个带两行提示 —— 矮的那格整块被压到底部，标签与输入框就跟隔壁错开
+     十几像素（实测 imageGen 那行差 18px）。表单要的是"标签与控件对齐"，不是底边对齐。 */
+  align-items: start;
   margin-bottom: 14px;
 }
 /* 行里只有一个字段时占满整行，不要缩成半宽挂在左侧 */
@@ -2959,8 +2964,33 @@ input[type=checkbox], input[type=radio] {
   accent-color: var(--accent);
   margin: 0;
 }
-.checkbox-row { align-items: center; gap: 8px; min-height: 32px; font-size: 13px; }
-.checkbox-row label { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+/* 勾选行：内容与"第一行文字"对齐，而不是与整块文字居中。
+   多行说明（如"每日花费上限"那条）写成一行时居中看不出差别，一旦折行，居中的方框会飘到两行
+   中间 —— 2026-10-01 用户报的"勾选框和字体没对齐"就是这个。 */
+.checkbox-row { align-items: flex-start; gap: 8px; padding: 6px 0; font-size: 13px; }
+.checkbox-row > input[type=checkbox], .checkbox-row > input[type=radio] { margin-top: 2px; }
+.checkbox-row label { display: inline-flex; align-items: flex-start; gap: 8px; white-space: nowrap; }
+/* .field label（0,1,1）会把"勾选行"压成字段标题样式（display:block / 12px / 600 / muted）：
+   `<div class="field"><label class="checkbox-row">…` 这种写法下，方框变行内基线对齐、文字变成
+   字段标题的样子 —— 与群多选列表当初踩的是同一个坑，这里用更高特异度拨回来（0,2,1）。 */
+.field label.checkbox-row,
+.field .checkbox-row > label,
+.field label.radio-row,
+.field .radio-row > label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text);
+  letter-spacing: normal;
+  margin-bottom: 0;
+  white-space: normal;
+}
+.field label.checkbox-row > input[type=checkbox],
+.field .checkbox-row > input[type=checkbox],
+.field label.radio-row > input[type=radio],
+.field .radio-row > input[type=radio] { margin-top: 2px; }
 .experimental-settings .checkbox-row { flex-wrap: nowrap; }
 
 /* ── 群多选列表（群游戏「允许开局的群」/ 群日报「发到哪些群」）──
@@ -3054,6 +3084,10 @@ input[type=checkbox], input[type=radio] {
 #console-login-form label { font-size: 12px; font-weight: 600; letter-spacing: .2px; color: var(--muted); }
 #console-login-form input { height: 36px; }
 #console-login-form .btn { height: 36px; justify-content: center; }
+
+/* 密码框 + 「显示 / 隐藏」按钮（登录框、SnowLuma 改密钥那三格；设置页里同款的用内联 flex） */
+.pw-row { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.pw-row > input { flex: 1; min-width: 0; }
 
 /* 其余长文本字段（URL 等）：不再铺满整行，但保留比普通字段更宽的宽度 */
 #cfg-price-remote-url, #new-baseurl, #auto-update-branch-advanced { max-width: 520px; }

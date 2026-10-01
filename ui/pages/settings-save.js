@@ -736,8 +736,15 @@ async function saveConfig({ quiet = false } = {}) {
   }
 
   if (sec === 'onebot') {
-    const wsToken = val('#cfg-obtoken', '').trim();
-    const httpToken = val('#cfg-obhttptoken', '').trim();
+    // 这两个令牌的"保持不变"是**留空**（服务端不认 ****** 这个哨兵，真提交会把令牌
+    // 改成字面量 ******），所以掩码一律当"没改"。控制台的「显示/隐藏」在隐藏时
+    // 已把输入框还原成空，这里再兜一层，防别的路径把掩码留在框里。
+    const tokenOf = (sel) => {
+      const raw = val(sel, '').trim();
+      return raw === '******' ? '' : raw;
+    };
+    const wsToken = tokenOf('#cfg-obtoken');
+    const httpToken = tokenOf('#cfg-obhttptoken');
     patch.onebot = {
       wsUrl: val('#cfg-wsurl', c.onebot?.wsUrl || '').trim(),
       httpUrl: val('#cfg-httpurl', c.onebot?.httpUrl || '').trim(),
