@@ -16,6 +16,7 @@ CREDENTIAL_FILE=""
 NODE_BIN="${NODE_BIN:-}"
 NODE_VERSION="${QQ_AGENT_NODE_VERSION:-22.23.2}"
 BACKUP_ENABLED=true
+ALLOW_PATH_CHANGE=false
 
 usage() {
   cat <<'EOF'
@@ -36,6 +37,9 @@ Options:
   --branch NAME          Expected source branch (compared when provided)
   --credential-file PATH Import DEEPSEEK_API_KEY on first install
   --no-backup            Skip the pre-deployment code snapshot
+  --allow-path-change    Allow the persistent data directory to move (requires
+                         QQ_AGENT_ALLOW_PATH_CHANGE=1 in the environment) —
+                         both conditions are checked before anything changes
   -h, --help             Show this help
 EOF
 }
@@ -57,6 +61,10 @@ while (($#)); do
     --import-bridge) require_value "$@"; IMPORT_BRIDGE="$2"; shift 2 ;;
     --credential-file) require_value "$@"; CREDENTIAL_FILE="$2"; shift 2 ;;
     --no-backup) BACKUP_ENABLED=false; shift ;;
+    # 数据目录迁移的逃生开关：校验器要求「本参数 + 环境变量 QQ_AGENT_ALLOW_PATH_CHANGE=1」双条件。
+    # 此前本脚本没收这个参数，校验器却让用户加它 → 迁移永远做不成、提示还指向不存在的开关
+    # （2026-09-30 审查 P1）。
+    --allow-path-change) ALLOW_PATH_CHANGE=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'Unknown option: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
@@ -155,18 +163,6 @@ NODE_BIN="$("$NODE_BIN" -p 'process.execPath')"
 [[ "$NODE_BIN" != *[[:space:]%\"]* ]] || { printf 'Node path contains unsupported characters\n' >&2; exit 2; }
 export PATH="$(dirname "$NODE_BIN"):$PATH"
 
-# 部署目标与 .deployment.json 记录的一致性强校验（改进方案 C7/#3）：install-dir/data/
-# service/repository/branch 与记录不符时，在部署真正开始前拒绝退出 —— 此处 ERR trap
-# 尚未挂载，拒绝即"部署未开始"：服务未停、未 rsync、.deploy-in-progress 未落，不需要
-# 也不会走回滚。host/port 的真相源是 config.json（下方沿用逻辑保证不覆盖现值），与记录
-# 不一致仅提示漂移不拒绝，否则"控制台改监听地址后自动更新"会被误拒。
-VERIFY_ARGS=(--install-dir "$INSTALL_DIR" --data-dir "$DATA_DIR" --service "$SERVICE")
-[[ -n "$DEPLOY_REPOSITORY" ]] && VERIFY_ARGS+=(--repository "$DEPLOY_REPOSITORY")
-[[ -n "$DEPLOY_BRANCH" ]] && VERIFY_ARGS+=(--branch "$DEPLOY_BRANCH")
-if ! "$NODE_BIN" "$ROOT/scripts/verify-deployment-target.mjs" "${VERIFY_ARGS[@]}"; then
-  exit 2
-fi
-
 # 更新已有安装时，没有显式给出的 --host/--port 沿用 config.json 里的现值：用默认值覆盖会让一次
 # 普通更新把控制台从"所有网卡"或原来的地址悄悄改成只监听本机。
 if [[ "$HOST_SET" != true || "$PORT_SET" != true ]] && [[ -f "$DATA_DIR/config.json" ]]; then
@@ -196,6 +192,22 @@ if [[ "$HOST_SET" != true || "$PORT_SET" != true ]] && [[ -f "$DATA_DIR/config.j
   }
   [[ "$HOST_SET" == true && "$PORT_SET" == true ]] \
     || printf 'Reusing the recorded listen endpoint %s:%s (pass --host/--port to change it)\n' "$HOST" "$PORT"
+fi
+
+# 部署目标与 .deployment.json 记录的一致性强校验（改进方案 C7/#3）：install-dir/data/
+# service/repository/branch 与记录不符时，在部署真正开始前拒绝退出 —— 此处 ERR trap
+# 尚未挂载，拒绝即"部署未开始"：服务未停、未 rsync、.deploy-in-progress 未落，不需要
+# 也不会走回滚。host/port 的真相源是 config.json（上方沿用逻辑保证不覆盖现值），与记录
+# 不一致仅提示漂移不拒绝，否则"控制台改监听地址后自动更新"会被误拒。
+# 调用点放在"沿用端点"之后：这样 --host/--port 传的是本次真正会用的值，漂移提示才有意义
+# （2026-09-30 审查：放在沿用之前会拿默认值误报漂移，或干脆不传导致提示成死分支）。
+VERIFY_ARGS=(--install-dir "$INSTALL_DIR" --data-dir "$DATA_DIR" --service "$SERVICE"
+  --host "$HOST" --port "$PORT" --source-root "$ROOT")
+[[ -n "$DEPLOY_REPOSITORY" ]] && VERIFY_ARGS+=(--repository "$DEPLOY_REPOSITORY")
+[[ -n "$DEPLOY_BRANCH" ]] && VERIFY_ARGS+=(--branch "$DEPLOY_BRANCH")
+[[ "$ALLOW_PATH_CHANGE" == true ]] && VERIFY_ARGS+=(--allow-path-change)
+if ! "$NODE_BIN" "$ROOT/scripts/verify-deployment-target.mjs" "${VERIFY_ARGS[@]}"; then
+  exit 2
 fi
 
 for required in package.json package-lock.json src/server.js src/auto-update.js scripts/auto-update.mjs scripts/configure-linux.mjs scripts/install-service.mjs scripts/manage.mjs manage.sh; do

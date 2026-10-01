@@ -136,21 +136,37 @@ export async function runHealthCheck(opts = {}) {
       const prev = state.streaks[c.name] || { count: 0 };
       if (!c.ok) {
         const count = prev.count + 1;
-        state.streaks[c.name] = { count, lastDetail: c.detail };
-        if (count === NOTIFY_AFTER_STREAK) {
-          try {
-            await notify(`【QQ Agent 健康告警】${c.name} 连续 ${count} 次检查失败：${c.detail || '无详情'}（每 5 分钟巡检一次，恢复后会通知）`);
+        // 保留上一轮的送达痕迹：整体重写会把 lastNotifiedAt/notifyError 抹掉，
+        // 于是"这轮到底发出去没有"再也查不到（2026-09-30 审查 P1）。
+        const next = { count, lastDetail: c.detail };
+        // 用 != null 而不是真值判断：注入的 now 允许为 0（测试造时间），
+        // 真值判断会把已送达的 0 当成"没送过"从而每轮重发（2026-09-30 复审）。
+        if (prev.lastNotifiedAt != null) next.lastNotifiedAt = prev.lastNotifiedAt;
+        if (prev.notifyError) next.notifyError = prev.notifyError;
+        state.streaks[c.name] = next;
+        // 到达阈值后**每轮都重试直到送达成功**：告警通道正是 OneBot HTTP，
+        // 最需要告警的故障场景下最容易发不出去；原来只在 count===3 那一次尝试，
+        // 一次瞬时失败就等于整段故障期静默（2026-09-30 审查 P1）。
+        if (count >= NOTIFY_AFTER_STREAK && next.lastNotifiedAt == null) {
+          const sent = await tryNotify(notify, `【QQ Agent 健康告警】${c.name} 连续 ${count} 次检查失败：${c.detail || '无详情'}（每 5 分钟巡检一次，恢复后会通知）`);
+          if (sent.ok) {
             state.streaks[c.name].lastNotifiedAt = now;
+            delete state.streaks[c.name].notifyError;
             notified.push(`告警:${c.name}`);
-          } catch (error) {
-            state.streaks[c.name].notifyError = error?.message ?? String(error);
+          } else {
+            state.streaks[c.name].notifyError = sent.detail;
           }
         }
       } else if (prev.count >= NOTIFY_AFTER_STREAK) {
-        try {
-          await notify(`【QQ Agent 健康恢复】${c.name} 已恢复正常`);
+        // 恢复通知同样看结果：发失败了照常清零连击（已经恢复是事实），但记下失败痕迹 ——
+        // 成功后要把痕迹清掉，否则留一条"上次恢复没发出去"的陈旧诊断（2026-09-30 复审）。
+        const sent = await tryNotify(notify, `【QQ Agent 健康恢复】${c.name} 已恢复正常`);
+        if (sent.ok) {
           notified.push(`恢复:${c.name}`);
-        } catch { /* 恢复通知失败不影响结果 */ }
+          delete state.recoveryNotifyError;
+        } else {
+          state.recoveryNotifyError = sent.detail;
+        }
         state.streaks[c.name] = { count: 0 };
       } else if (prev.count) {
         state.streaks[c.name] = { count: 0 };
@@ -160,4 +176,22 @@ export async function runHealthCheck(opts = {}) {
   try { saveState(dataDir, state); } catch { /* health.json 写失败不影响巡检结论 */ }
 
   return { healthy, checks, notified, code: healthy ? 0 : 1 };
+}
+
+/**
+ * 调用注入的通知器并归一化结果。
+ * 生产注入的是 notify-owner 的 sendOwnerText：它**失败时返回 { ok:false, detail } 而不抛**，
+ * 所以只 try/catch 会把"没发出去"当成"已送达"。两种失败都要认（2026-09-30 审查 P1）。
+ * 返回 undefined（旧测试里的式样 `async (text) => { notes.push(text) }`）按成功处理。
+ */
+async function tryNotify(notify, text) {
+  try {
+    const r = await notify(text);
+    if (r && typeof r === 'object' && r.ok === false) {
+      return { ok: false, detail: String(r.detail || r.error || '通知发送失败') };
+    }
+    return { ok: true, detail: '' };
+  } catch (error) {
+    return { ok: false, detail: error?.message ?? String(error) };
+  }
 }

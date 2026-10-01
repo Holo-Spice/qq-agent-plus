@@ -13,13 +13,28 @@ import { ttsServiceOfBaseUrl, ttsServiceOf, ttsKeyFor } from './tts-presets.js';
 
 export { ttsConfigured } from './tts-openai.js';
 
+/**
+ * v1 的 cluster 按音色路由（官方 v1 文档：业务集群「标准音色、复刻等均不相同」，
+ * 复刻音色要 volcano_icl；多个公开实现亦如此）。与 v3 的资源 ID 同一类坑：
+ * 复刻音色配默认的 volcano_tts 会报「音色不存在/初始化引擎失败」。
+ * 用户显式填 volcano_icl*（含并发版 volcano_icl_concurr）时尊重。
+ * 注意大小写：官方自营音色 `ICL_uranus_*`（大写）不是复刻音色，别误伤。
+ */
+export function volcClusterForVoice(voice, configured = '') {
+  const want = String(configured || '').trim();
+  if (/^(volcano_icl|seed-icl)/i.test(want)) return want;
+  const v = String(voice || '').trim();
+  if (/^S_/.test(v) || /^icl_/.test(v)) return 'volcano_icl';
+  return want || 'volcano_tts';
+}
+
 /** 火山引擎语音合成（v1 HTTP）。cfg：baseUrl（默认官方）、appId、apiKey（access token）、cluster、voice、speed。 */
 export async function synthesizeVolc({ cfg, text, signal = null, fetchFn = fetch }) {
   const base = String(cfg?.baseUrl || 'https://openspeech.bytedance.com/api/v1/tts').trim().replace(/\/+$/, '');
   const appId = String(cfg?.appId || '').trim();
   const token = String(cfg?.apiKey || '').trim();
-  const cluster = String(cfg?.cluster || 'volcano_tts').trim();
   const voice = String(cfg?.voice || '').trim();
+  const cluster = volcClusterForVoice(voice, cfg?.cluster);
   const body = String(text || '').trim().slice(0, 300);
   if (!appId || !token) throw new Error('火山语音合成需要 AppID 与 Access Token（语音技术控制台里拿）');
   if (!voice) throw new Error('火山语音合成需要音色（voice_type，如 BV001_streaming）');

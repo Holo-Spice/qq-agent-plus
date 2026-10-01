@@ -2,7 +2,11 @@
 // 两个使用点：incident-pilot（异常面板入库前）、orchestrator（工具失败的 journal 行）——
 // 后者会把工具错误原文写进 journald，而 OneBot 的 access_token 是挂在 URL 查询串上的
 // （src/onebot/onebot.js 里拼接为 ?access_token=…），错误串里可能带上它，所以两边必须同一套规则。
-export function redactText(value, max = 1000) {
+//
+// 规则按**值形态**命中（Bearer 头 / 查询串令牌参数 / JSON 键值 / Cookie 头 / 裸密钥前缀），
+// 与"按字段名判定"的 SECRET_KEY_PATTERN（secret-keys.js）互补：前者拦得住字段名正常的密钥，
+// 后者拦得住字段名不含关键词、但值本身就是密钥的场景（审计快照里的 extraBody/headers 等）。
+export function redactSecretValue(value) {
   return String(value ?? '')
     // Bearer/Basic 头：值吃到空白为止（连同结尾引号）。保持既有语义不动。
     .replace(/\b(bearer|basic)\s+\S+/gi, '$1 [redacted]')
@@ -18,7 +22,12 @@ export function redactText(value, max = 1000) {
     // 裸的供应商密钥前缀（sk-/pk-/rk-，OpenAI/Stripe 风格；连字符与下划线两种分隔都认，
     // Stripe 是 sk_live_… 形态）：错误文本与粘贴的配置里常以裸串出现，前面几种形态
     // （查询串 / JSON / 头）都拦不住它。命中面同"宁多脱勿漏"，至少 8 位才算（2026-09-30 #6 补）。
-    .replace(/\b(sk|pk|rk)[-_][A-Za-z0-9_-]{8,}/gi, '$1-[redacted]')
+    .replace(/\b(sk|pk|rk)[-_][A-Za-z0-9_-]{8,}/gi, '$1-[redacted]');
+}
+
+/** 日志行用：值形态脱敏 + 去 NUL + 掐头去尾空白 + 截断。 */
+export function redactText(value, max = 1000) {
+  return redactSecretValue(value)
     .replace(/\0/g, '')
     .trim()
     .slice(0, max);

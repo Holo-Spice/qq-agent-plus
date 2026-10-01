@@ -102,3 +102,42 @@ test('真实 DOM 冒烟：登录表单提交打到 /api/login 且不抛', { skip
     assert.ok(fetchLog.some((u) => u.includes('/api/login')), `提交应请求 /api/login，实际：${fetchLog.slice(0, 6).join(', ')}`);
   } finally { window.happyDOM?.abort?.(); }
 });
+
+// 去插件化（§11 C2）之后的交互层覆盖：render-test 只验"渲染不抛"，这里验"钩子真的改写了输出"。
+// 这条断言的由来：stable-features.js 原先靠 `window[name] = wrapped` 包裹渲染函数，
+// 改成 QARegistry 注册后，"注册了但没人调用"会变成静默失效 —— 页面照常渲染，只是改造没了。
+test('真实 DOM 冒烟：QARegistry 的 transform / after / override 真的接上了渲染入口', { skip: SKIP }, async () => {
+  const { window } = loadPage();
+  await settle();
+  try {
+    const { QARegistry } = window;
+    assert.ok(QARegistry, 'index.html 必须先加载 core/registry.js');
+
+    const cfg = {
+      identityPilot: { enabled: false, graduated: false },
+      slangPilot: {}, incidentPilot: {},
+      api: {}, allow: {}, server: {}, runtime: {}
+    };
+
+    // ① transform：返回值被钩子改写（stable-features 的"摘掉已转正/退役控件"走的就是这条）
+    const before = window.renderExperimentalSettingsSection(cfg);
+    assert.ok(typeof before === 'string' && before.length > 0, '原实现应返回 html');
+    QARegistry.onTransform('renderExperimentalSettingsSection', (html) => `${html}<!--smoke-transform-->`);
+    const after = window.renderExperimentalSettingsSection(cfg);
+    assert.ok(after.includes('<!--smoke-transform-->') && !before.includes('<!--smoke-transform-->'),
+      '注册 transform 后，渲染函数的输出应被改写');
+
+    // ② after：原实现跑完后触发（stable-features 在此挂"全局管理员"面板）
+    // 注意：app.js 的 `const state` 是全局**词法**绑定，不挂 window（只有函数声明会挂），
+    // 所以这里不能写 window.state.xxx —— 渲染函数自己闭包取 state 就行。
+    let afterCalls = 0;
+    QARegistry.onAfter('renderIdentityFeaturePage', () => { afterCalls += 1; });
+    window.renderIdentityFeaturePage({ active: true, people: 0, aliases: 0, sources: 0, legacyMemories: 0, friends: 0 }, [], []);
+    assert.equal(afterCalls, 1, 'after 钩子应在渲染函数返回后触发一次');
+
+    // ③ override：整体接管（status-refresh.js 接管 refreshStatus 走的就是这条）
+    QARegistry.override('refreshStatus', async () => 'smoke-override');
+    assert.equal(await window.refreshStatus(), 'smoke-override', 'override 应接管全局入口');
+    assert.equal(typeof QARegistry.base('refreshStatus'), 'function', 'override 之后仍能取回原实现');
+  } finally { window.happyDOM?.abort?.(); }
+});

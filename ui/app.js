@@ -48,6 +48,44 @@ const state = {
   consolidateResult: {}   // chatKey -> { note, at, failed? }
 };
 
+// ── 渲染钩子接线（改进方案 §11 C2「去插件化」）─────────────────────────────
+// stable-features.js / status-refresh.js 原先直接改写这些全局（`window[name] = wrapped`、
+// 裸赋值 `refreshStatus = ...`）。那只在"脚本顺序刚好、且双方都还是 classic script"时成立：
+// ES module 的绑定只读、模块作用域也不挂 window，任何一步模块化都会让覆盖**静默失效**
+// （页面看着正常，只是那段改造不再生效）。改为显式注册：由这里分发，顺序错了当场可见。
+// 名字仍留在全局（classic script 的跨文件作用域不变），只是不再被谁改写。
+// 底座一律带 `Impl` 后缀，插件可用 QARegistry.base(name) 取回原实现（避免自递归）。
+QARegistry.register('renderExperimentalSettingsSection', renderExperimentalSettingsSectionImpl);
+QARegistry.register('renderSettings', renderSettingsImpl);
+QARegistry.register('renderIdentityFeaturePage', renderIdentityFeaturePageImpl);
+QARegistry.register('renderFriendFeaturePage', renderFriendFeaturePageImpl);
+QARegistry.register('renderIncidentFeaturePage', renderIncidentFeaturePageImpl);
+QARegistry.register('refreshStatus', refreshStatusImpl);
+QARegistry.register('renderLifecycleOverview', renderLifecycleOverviewImpl);
+QARegistry.register('loadFriendFeaturePage', loadFriendFeaturePageImpl);
+
+// html 变换：原实现先算完，返回值再过钩子链（对应原 wrapHtmlRenderer）
+function renderExperimentalSettingsSection(c) {
+  return QARegistry.transform('renderExperimentalSettingsSection', renderExperimentalSettingsSectionImpl(c), [c]);
+}
+
+// after：原实现跑完再触发副作用钩子。包在**外层**而不是插进函数体里 —— 这几个渲染函数都有
+// `if (!box) return;` 之类的提前返回，插进体内会让钩子在那种路径下不触发，而改写全局时是触发的。
+function afterRender(name, impl, args) {
+  const result = impl(...args);
+  QARegistry.after(name, args);
+  return result;
+}
+function renderSettings(...args) { return afterRender('renderSettings', renderSettingsImpl, args); }
+function renderIdentityFeaturePage(...args) { return afterRender('renderIdentityFeaturePage', renderIdentityFeaturePageImpl, args); }
+function renderFriendFeaturePage(...args) { return afterRender('renderFriendFeaturePage', renderFriendFeaturePageImpl, args); }
+function renderIncidentFeaturePage(...args) { return afterRender('renderIncidentFeaturePage', renderIncidentFeaturePageImpl, args); }
+
+// 整体接管：插件 override 后由这里分发（原实现是底座）
+function refreshStatus(...args) { return QARegistry.dispatch('refreshStatus', ...args); }
+function renderLifecycleOverview(...args) { return QARegistry.dispatch('renderLifecycleOverview', ...args); }
+function loadFriendFeaturePage(...args) { return QARegistry.dispatch('loadFriendFeaturePage', ...args); }
+
 function graduatedFeatureState(c = state.config || {}) {
   return {
     identity: c.identityPilot?.graduated === true,
@@ -389,7 +427,7 @@ function renderSessionModeBand(s) {
     </div>`;
 }
 
-function renderLifecycleOverview(s) {
+function renderLifecycleOverviewImpl(s) {
   if (s.conversationMode !== 'lifecycle') return '';
   const aggregate = lifecycleAggregate(s);
   const lifecycle = aggregate.lifecycle || {};
@@ -1346,7 +1384,8 @@ async function changeSnowLumaPassword(event) {
 }
 
 // ── 状态栏 ──
-async function refreshStatus() {
+// 底座：status-refresh.js 用 QARegistry.override 接管，改动点在它那边。
+async function refreshStatusImpl() {
   try {
     state.status = await api('/api/status');
     const s = state.status;
@@ -6255,7 +6294,7 @@ function renderSettingsSidebar() {
   });
 }
 
-function renderSettings() {
+function renderSettingsImpl() {
   const c = state.config;
   const box = $('#settings-form');
   renderSettingsSidebar();
@@ -6779,12 +6818,18 @@ function renderAsrSection(c) {
         <div class="hint" id="tts-appid-warn" style="display:none;color:var(--orange)"></div></div>
       <div class="field" id="tts-cluster-field"><label for="cfg-tts-cluster">Cluster（火山 v1 用）</label>
         <input type="text" id="cfg-tts-cluster" value="${esc(c.tts?.cluster || '')}" placeholder="volcano_tts" />
-        <div class="hint">填 <code>volcano_tts</code>；这里是「资源分组」不是音色 —— 填音色名会报 3001/3005。</div>
+        <div class="hint">填 <code>volcano_tts</code>；这里是「资源分组」不是音色 —— 填音色名会报 3001/3005。复刻音色（S_ 开头）会自动改用 <code>volcano_icl</code>，不用手改。</div>
         <div class="hint" id="tts-cluster-warn" style="display:none;color:var(--orange)"></div></div>
       <div class="field" id="tts-resourceid-field"><label for="cfg-tts-resourceid">资源 ID（豆包 2.0 用）</label>
         <input type="text" id="cfg-tts-resourceid" value="${esc(c.tts?.resourceId || '')}" placeholder="seed-tts-2.0" />
-        <div class="hint">默认 <code>seed-tts-2.0</code>（大模型语音合成 2.0）。1.0 的音色要换成 <code>seed-tts-1.0</code>，要与音色配套。</div>
+        <div class="hint">默认 <code>seed-tts-2.0</code>（大模型语音合成 2.0）。1.0 的音色要换成 <code>seed-tts-1.0</code>，要与音色配套；<b>复刻音色（S_ 开头）会自动改用 <code>seed-icl-2.0</code></b>，不用手改。</div>
         <div class="hint" id="tts-resourceid-warn" style="display:none;color:var(--orange)"></div></div>
+    </div>
+    <div class="hint" id="tts-clone-hint" style="display:none">
+      <b>用复刻音色（<code>S_</code> 开头，如 S_xxxxxxxx）时</b>：资源会自动切换（豆包 2.0 → <code>seed-icl-2.0</code>、火山 v1 → <code>volcano_icl</code>），<b>不用手改</b>；
+      但账号要先去火山控制台「开通管理」开通<b>「声音复刻2.0字符版」</b> —— <b>后付费音色还要单独开通「后付费音色服务」</b>
+      （这是独立的一项），否则首次合成会报 <code>45000030 requested resource not granted</code>，看着就像"没开通"。
+      音色 ID 从控制台音色库复制、填到上面的「音色」栏即可。官方投放音色 <code>ICL_uranus_*</code>（首字母大写）不是复刻音色，不用开这项。
     </div>
     <div class="field" id="tts-minimax-fields" style="display:none"><label for="cfg-tts-groupid">GroupId（MiniMax）</label>
       <input type="text" id="cfg-tts-groupid" value="${esc(c.tts?.groupId || '')}" placeholder="账户信息里的 GroupId" /></div>
@@ -6803,7 +6848,34 @@ function renderAsrSection(c) {
     </div>
     <div class="hint">短句 1~3 句最自然；改完先「保存设置」再试听：
       <button class="btn btn-small" id="tts-test-btn" type="button" style="margin-left:8px">试听</button>
-      <span id="tts-test-result" class="muted"></span></div>`;
+      <span id="tts-test-result" class="muted"></span></div>
+    <h3 id="settings-imagegen">图片生成（按张计费）</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-img-enabled" ${c.imageGen?.enabled === true ? 'checked' : ''} />
+      <label for="cfg-img-enabled">允许它画图（generate_image 工具；默认关）</label></div>
+    <div class="hint">开启后群友说「画一张」时它会调服务商的 <code>/images/generations</code> 生成图片、存进表情库再发出来。
+      这是**按张计费**的：每小时上限是唯一的闸门，模型也不会主动画（只在你让它画时）。</div>
+    <div class="field"><label for="cfg-img-baseurl">服务地址</label>
+      <input type="text" id="cfg-img-baseurl" value="${esc(c.imageGen?.baseUrl || '')}" placeholder="留空 = 与聊天模型同一家（同域时才复用它的 Key）" /></div>
+    <div class="field-row">
+      <div class="field"><label for="cfg-img-model">模型</label>
+        <input type="text" id="cfg-img-model" value="${esc(c.imageGen?.model || '')}" placeholder="如 gpt-image-1 / seedream-3.0 / cogview-3" /></div>
+      <div class="field"><label for="cfg-img-size">尺寸（可选）</label>
+        <input type="text" id="cfg-img-size" value="${esc(c.imageGen?.size || '')}" placeholder="如 1024x1024；留空用服务商默认" /></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label for="cfg-img-max">每小时最多生成（张）</label>
+        <input type="number" id="cfg-img-max" min="1" max="100" value="${esc(c.imageGen?.maxPerHour ?? 6)}" />
+        <div class="hint">按张计费服务的硬闸门（全局共享）。默认 6；不确定就填小一点。</div></div>
+      <div class="field"><label for="cfg-img-key" id="cfg-img-key-label">API Key（留空/掩码 = 保持不变）</label>
+        <div style="display:flex;gap:8px">
+          <input type="password" id="cfg-img-key" value="" placeholder="留空 = 与模型同域时复用模型 Key" autocomplete="new-password" style="flex:1" />
+          <button class="btn btn-small" id="cfg-img-reveal-key-btn" type="button">显示</button>
+        </div>
+        <div class="hint" id="cfg-img-key-hint"></div></div>
+    </div>
+    <div class="hint">改完先「保存设置」再试画一张：
+      <button class="btn btn-small" id="img-test-btn" type="button" style="margin-left:8px">试画一张</button>
+      <span id="img-test-result" class="muted"></span></div>`;
 }
 
 function renderSearchSection(c) {
@@ -6963,7 +7035,7 @@ function renderMemorySettingsSection(c) {
       <label for="cfg-mem-hideprivate">群聊里隐藏「私聊来源」的印象</label></div>`;
 }
 
-function renderExperimentalSettingsSection(c) {
+function renderExperimentalSettingsSectionImpl(c) {
   const enabled = c.identityPilot?.enabled === true;
   const slang = c.slangPilot || {};
   const incident = c.incidentPilot || {};
@@ -7507,7 +7579,7 @@ function bindFeatureAssetActions(rootSelector, kind, entries) {
   });
 }
 
-function renderIdentityFeaturePage(status, identities, memories) {
+function renderIdentityFeaturePageImpl(status, identities, memories) {
   const box = $('#identity-page');
   if (!box) return;
   const query = state.identityFeatureQuery || '';
@@ -7592,7 +7664,7 @@ async function loadIdentityFeaturePage() {
   }
 }
 
-function renderFriendFeaturePage(c, status) {
+function renderFriendFeaturePageImpl(c, status) {
   const friend = c.identityPilot?.friendProposal || {};
   const incoming = c.identityPilot?.incomingFriendRequest || {};
   const box = $('#friend-page');
@@ -7739,7 +7811,7 @@ async function saveFriendFeatureConfig() {
   }
 }
 
-async function loadFriendFeaturePage() {
+async function loadFriendFeaturePageImpl() {
   const box = $('#friend-page');
   if (!box) return;
   if (!box.__renderedHtml) box.innerHTML = '<div class="empty-hint">正在读取好友工作流…</div>';
@@ -7877,7 +7949,7 @@ const INCIDENT_STATE_LABELS = {
   open: '待处理', acknowledged: '已确认', resolved: '已解决'
 };
 
-function renderIncidentFeaturePage(c, status, incidents = []) {
+function renderIncidentFeaturePageImpl(c, status, incidents = []) {
   const box = $('#incident-page');
   if (!box) return;
   const settings = c.incidentPilot || {};
@@ -9280,6 +9352,8 @@ async function bindTtsControls() {
     const isVolcFamily = prov === 'volc' || prov === 'doubao';
     const volcBox = q('#tts-volc-fields');
     if (volcBox) volcBox.style.display = isVolcFamily ? '' : 'none';
+    const cloneHint = q('#tts-clone-hint');
+    if (cloneHint) cloneHint.style.display = isVolcFamily ? '' : 'none';
     const clusterField = q('#tts-cluster-field');
     if (clusterField) clusterField.style.display = prov === 'volc' ? '' : 'none';
     const resField = q('#tts-resourceid-field');
@@ -9340,8 +9414,8 @@ async function bindTtsControls() {
       ? '看起来不是 AppID（应为纯数字）。seed-tts-2.0 这类是「资源 ID」，不属于这里。' : '');
     setWarn('#tts-cluster-warn', cluster && !/^volcano_/i.test(cluster)
       ? `「${cluster}」看着像音色/资源 ID，不是 cluster：这里固定填 volcano_tts（音色请填到「音色」栏）。` : '');
-    setWarn('#tts-resourceid-warn', resId && !/^(seed-tts-|volc\.)/i.test(resId)
-      ? '资源 ID 形如 seed-tts-2.0 / seed-tts-1.0 / volc.service_type.xxxx。' : '');
+    setWarn('#tts-resourceid-warn', resId && !/^(seed-(tts|icl)-|volc\.)/i.test(resId)
+      ? '资源 ID 形如 seed-tts-2.0 / seed-tts-1.0 / seed-icl-2.0（复刻音色）/ volc.service_type.xxxx。' : '');
     // 豆包模式下填了纯数字 AppID 不是错误，但鉴权套件变了，必须说清 Key 栏该填什么
     if (prov === 'doubao' && /^\d{5,15}$/.test(appid)) {
       setWarn('#tts-appid-warn', 'AppID 已填：豆包将改走「AppID + Access Token」鉴权 —— 此时下面的 API Key 栏要填 Access Token，不是控制台密钥；留空 AppID 则走 X-Api-Key（控制台密钥）。');
@@ -9369,9 +9443,9 @@ async function bindTtsControls() {
       if (!cur && values.length) {
         voiceInput.value = values[0];      // 空着就填一个默认，省得用户面对空框
       } else if (cur && values.length && !values.includes(cur)) {
-        // 不在候选里：**任何时候都不擅自改值** —— 克隆音色（ICL_uranus_*）对火山系两家都有效，
-        // 自动替换等于把用户的音色弄丢（2026-09-29 实测踩过）。只提示，由用户自己决定。
-        voiceNote = `当前音色「${cur}」不在这一家的内置候选里 —— 自定义/克隆音色若这一家支持可照用；不确定就点「候选音色」重选，改完记得保存。`;
+        // 不在候选里：**任何时候都不擅自改值** —— 官方投放音色（ICL_uranus_*）与自己复刻的音色（S_ 开头）
+        // 都不在内置表里，自动替换等于把用户的音色弄丢（2026-09-29 实测踩过）。只提示，由用户自己决定。
+        voiceNote = `当前音色「${cur}」不在这一家的内置候选里 —— 官方投放/自定义/复刻音色若这一家支持可照用；不确定就点「候选音色」重选，改完记得保存。`;
       }
     }
     fillVoicePick(service, model);
@@ -10269,6 +10343,59 @@ function bindSettingsEvents(c) {
         } else if (out) out.textContent = r.error || '合成失败';
       } catch (e) { if (out) out.textContent = `失败：${e.message}`; }
     });
+
+    // 图片生成：Key 提示（写清"不同域不复用模型 Key"这条守卫）+「试画一张」
+    {
+      const keyHint = $('#cfg-img-key-hint');
+      if (keyHint) {
+        const g = state.config?.imageGen || {};
+        const host = (u) => { try { return new URL(String(u || '')).host.toLowerCase(); } catch { return ''; } };
+        const aHost = host(g.baseUrl || state.config?.api?.baseUrl);
+        const bHost = host(state.config?.api?.baseUrl);
+        const sameHost = Boolean(aHost && bHost && aHost === bHost);
+        const hasOwnKey = Boolean(g.hasApiKey);
+        keyHint.textContent = hasOwnKey
+          ? '已存过 Key（留空 = 保持不变）。'
+          : (sameHost
+            ? '地址与聊天模型同域：留空就会复用模型那把 Key。想用别的账号或别的网关就单独填一把。'
+            : '地址与聊天模型不同域：必须单独填 Key —— 不会把模型那把 Key 发到这里（防串用）。');
+      }
+      const imgTestBtn = $('#img-test-btn');
+      if (imgTestBtn) imgTestBtn.addEventListener('click', async () => {
+        const out = $('#img-test-result');
+        if (out) out.textContent = '画图要十几秒到一分钟，稍等…';
+        imgTestBtn.disabled = true;
+        try {
+          const r = await api('/api/imagegen/test', { method: 'POST', body: JSON.stringify({}) });
+          if (r.ok && r.image) {
+            if (out) out.innerHTML = `画好了（${Math.round((r.bytes || 0) / 1024)} KB，按张计费）<br><img src="${r.image}" alt="试画结果" style="max-width:260px;margin-top:6px;border-radius:8px" />`;
+          } else if (out) {
+            out.textContent = r.error || '画图失败';
+          }
+        } catch (e) { if (out) out.textContent = `失败：${e.message}`; }
+        finally { imgTestBtn.disabled = false; }
+      });
+      // 「显示」按钮：原来只有按钮没有绑定（点了没反应）—— 2026-09-30 审查补上，
+      // 走与 TTS 同款的 keyEndpoint 守卫路由。
+      const imgRevealBtn = $('#cfg-img-reveal-key-btn');
+      if (imgRevealBtn) imgRevealBtn.addEventListener('click', async () => {
+        const node = $('#cfg-img-key');
+        if (!node) return;
+        try {
+          const r = await api('/api/imagegen/key');
+          if (r.ok && r.apiKey) {
+            node.value = r.apiKey;
+            node.type = 'text';
+            imgRevealBtn.textContent = '已显示';
+            if (keyHint) keyHint.textContent = r.reused ? '当前用的是聊天模型那把 Key（地址同域复用）。' : '已显示已保存的 Key。';
+          } else if (r.ok) {
+            if (keyHint) keyHint.textContent = '还没有单独存过 Key（同域时可能仍在复用模型 Key）。';
+          } else if (keyHint) {
+            keyHint.textContent = r.error || '读取失败';
+          }
+        } catch (e) { if (keyHint) keyHint.textContent = `读取失败：${e.message}`; }
+      });
+    }
     // 拉模型列表：从服务商官网的 /models 拉（预设里的模型名会过时，官网不会）
     const fetchModelsBtn = $('#asr-fetch-models-btn');
     if (fetchModelsBtn) fetchModelsBtn.addEventListener('click', async () => {
@@ -12496,6 +12623,22 @@ async function saveConfig({ quiet = false } = {}) {
           gain: Math.min(10, Math.max(-10, Number(val('#cfg-tts-gain', t.gain ?? 0)) || 0)),
           // 只送"这一家新填的"；掩码/空 = 保持（服务端合并进 keys[这家]）
           apiKeyInput: rawKey === '******' ? '' : rawKey
+        };
+      })();
+      // 图片生成：与 tts 同页（同一个 if 分支内），Key 语义也一样（掩码/空 = 保持原值）
+      patch.imageGen = (() => {
+        const g = c.imageGen || {};
+        const keyNode = document.querySelector('#cfg-img-key');
+        const rawKey = keyNode ? keyNode.value.trim() : '';
+        return {
+          ...g,
+          enabled: chk('#cfg-img-enabled', g.enabled === true),
+          baseUrl: String(val('#cfg-img-baseurl', g.baseUrl || '') || '').trim(),
+          model: String(val('#cfg-img-model', g.model || '') || '').trim(),
+          size: String(val('#cfg-img-size', g.size || '') || '').trim(),
+          maxPerHour: Math.min(100, Math.max(1, Math.round(Number(val('#cfg-img-max', g.maxPerHour ?? 6)) || 6))),
+          // 服务端据此合并：掩码/空 = 保持原 Key；新输入才替换
+          ...(rawKey && rawKey !== '******' ? { apiKey: rawKey } : {})
         };
       })();
   }

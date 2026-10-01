@@ -144,3 +144,70 @@ test('记录损坏（非法 JSON）→ 沿用现状口径放行 + 醒目警告',
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, /无法解析/);
 });
+
+// ── 2026-09-30 审查 P0：deploy.sh 在调用本校验**之前**就 `mkdir -p "$INSTALL_DIR" "$DATA_DIR"`
+//    （默认 --data-dir 就是 INSTALL_DIR/data），无系统 Node 时还会下到 INSTALL_DIR/.runtime。
+//    这些是安装器自己的产物，不能拿它们当"来历不明的代码"把全新安装挡在门外。以下用例锁住修复。
+test('全新安装：目录里只有安装器自建的 data/ → 放行（P0）', () => {
+  const dir = makeTree();
+  fs.mkdirSync(path.join(dir, 'data'), { recursive: true });
+  const r = run(dir, { dataDir: path.join(dir, 'data') });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /全新安装/);
+});
+
+test('全新安装：目录里只有安装器自建的 .runtime/ → 放行（P0）', () => {
+  const dir = makeTree();
+  fs.mkdirSync(path.join(dir, '.runtime', 'node-v22.23.2-linux-x64', 'bin'), { recursive: true });
+  const r = run(dir, { dataDir: undefined });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /全新安装/);
+});
+
+test('data/ 与 .runtime/ 之外还有别的文件 → 仍然拒绝（修复不放宽来历不明的判定）', () => {
+  const dir = makeTree();
+  fs.mkdirSync(path.join(dir, 'data'), { recursive: true });
+  fs.mkdirSync(path.join(dir, '.runtime'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'mystery-notes.txt'), 'x');
+  const r = run(dir, { dataDir: path.join(dir, 'data') });
+  assert.equal(r.code, 2, r.out);
+  assert.match(r.out, /不是本工具管理的安装/);
+});
+
+// 嵌套 --data-dir（如 INSTALL_DIR/var/data）＋安装器下了 .runtime 的组合：
+// 下降判定时必须把 .runtime 先滤掉，否则"var 里只有 data"也会被判成有外来文件。
+// 单层 data/ 走 early-return 不受影响，所以这条组合当初漏测（2026-09-30 复审实测复现）。
+test('全新安装：嵌套 --data-dir 且安装器已下 .runtime → 放行（复审抓出的漏网）', () => {
+  const dir = makeTree();
+  fs.mkdirSync(path.join(dir, 'var', 'data'), { recursive: true });
+  fs.mkdirSync(path.join(dir, '.runtime', 'node-v22.23.2-linux-x64', 'bin'), { recursive: true });
+  const r = run(dir, { dataDir: path.join(dir, 'var', 'data') });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /全新安装/);
+});
+
+test('嵌套 --data-dir 但中间层混了别的东西 → 仍拒绝（沿用严口径）', () => {
+  const dir = makeTree();
+  fs.mkdirSync(path.join(dir, 'var', 'data'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'var', 'logs'), { recursive: true });
+  const r = run(dir, { dataDir: path.join(dir, 'var', 'data') });
+  assert.equal(r.code, 2, r.out);
+  assert.match(r.out, /不是本工具管理的安装/);
+});
+
+test('就地安装（--source-root 与 --install-dir 同一目录）→ 放行（P0）', () => {
+  const dir = makeTree();
+  fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+  fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+  const r = run(dir, { dataDir: path.join(dir, 'data'), sourceRoot: dir });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /就地安装/);
+});
+
+test('非就地且目录里有非安装器产物 → 仍拒绝（source-root 指向别处不影响原判定）', () => {
+  const dir = makeTree();
+  fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+  const r = run(dir, { dataDir: undefined, sourceRoot: path.join(os.tmpdir(), 'some-other-tree') });
+  assert.equal(r.code, 2, r.out);
+  assert.match(r.out, /不是本工具管理的安装/);
+});

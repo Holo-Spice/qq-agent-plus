@@ -257,6 +257,27 @@ export function asrMaxPerHourPerChat(cfg = getConfig()) {
   return Number.isFinite(n) && n > 0 ? Math.min(200, Math.round(n)) : 4;
 }
 
+/**
+ * 图片生成是否可用：自己的开关打开，且地址与模型都填了。
+ * 与聊天模型解耦：地址留空时适配器会按"与模型同域"补全，但这里要求显式有地址或模型同域可推。
+ */
+export function imageGenAvailable(cfg = getConfig()) {
+  const g = cfg?.imageGen || {};
+  if (g.enabled !== true) return false;
+  const model = String(g.model || '').trim();
+  if (!model) return false;
+  const own = String(g.baseUrl || '').trim();
+  if (own) return true;
+  // 地址留空：只有"聊天模型那边有地址可用"才算配置齐（同域复用那套）
+  return String(cfg?.api?.baseUrl || '').trim() !== '';
+}
+
+/** 每小时最多生成几张图（按张计费，唯一成本闸门）。 */
+export function imageGenMaxPerHour(cfg = getConfig()) {
+  const n = Number(cfg?.imageGen?.maxPerHour);
+  return Number.isFinite(n) && n > 0 ? Math.min(100, Math.round(n)) : 6;
+}
+
 export function updateConfig(patch) {
   const current = stabilize(legacy.getConfig());
   const rawPatch = structuredClone(

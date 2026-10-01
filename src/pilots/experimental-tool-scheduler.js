@@ -22,13 +22,17 @@ export const EXPERIMENTAL_READ_ONLY_TOOLS = new Set([
 // - read_forward 会把展开结果写回存档；
 // - list_stickers / get_sticker_image 与后续表情选择通常存在直接依赖。
 // 显式列出来，避免未来误以为“所有读工具都应该并发”。
+// generate_image 也归这一档：不是读，但它**不能并发**（按张计费 + 外部服务），
+// 且结果（条目 id）直接决定下一步（要拿它去 send_sticker）—— 与"同轮 finish"是两个互斥的错，
+// 这一档的语义（串行、等结果、别提前 finish）正好对上。
 export const EXPERIMENTAL_ORDERED_READ_TOOLS = new Set([
   'list_stickers',
   'get_sticker_image',
   'read_forward',
   'get_message_images',
   'get_message_audio',
-  'get_group_member_list'   // 走协议端的读，保持串行
+  'get_group_member_list',   // 走协议端的读，保持串行
+  'generate_image'           // 按张计费的生成：串行 + 结果决定下一步
 ]);
 
 export const EXPERIMENTAL_TERMINAL_TOOL = 'finish';

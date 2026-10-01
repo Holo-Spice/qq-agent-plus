@@ -96,7 +96,7 @@ sandbox.globalThis = sandbox;
 const ctx = vm.createContext(sandbox);
 // core 共享内核先于 app.js 进沙箱（$ / $$ / esc / api 的单一实现在 ui/core/ 下；
 // app.js 已删本地定义，缺失会在运行时 ReferenceError）—— 与 render-test 同款适配
-for (const coreFile of ['ui/core/dom.js', 'ui/core/api.js']) {
+for (const coreFile of ['ui/core/registry.js', 'ui/core/dom.js', 'ui/core/api.js']) {
   const coreCode = fs.readFileSync(path.join(ROOT, coreFile), 'utf8');
   new vm.Script(coreCode, { filename: coreFile }).runInContext(ctx);
 }

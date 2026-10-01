@@ -1998,7 +1998,10 @@ function cmdInstallTimers(args) {
 
 function cmdAuditPrune(args) {
   if (wantsHelp(args)) { say(HELP['audit-prune']); return 0; }
-  const cfg = config({});
+  // --data 必须解析：help 与 docs/OPS.md 都写了 `--data=目录`，同类子命令也都透传
+  // （backup/deploy/install-timers）；漏掉会让 `--data=/other` 静默去删**默认**数据目录的
+  // 审计文件（2026-09-30 审查 P2）。
+  const cfg = config({ data: optValue(args, '--data', null) });
   const keepMonths = Math.max(1, intOpt(args, '--keep-months', 6));
   const dryRun = hasFlag(args, '--dry-run');
   const dir = path.join(cfg.dataDir, 'audit-log');

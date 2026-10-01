@@ -89,3 +89,8 @@ test('IdentityStore person views consume the single global MemoryStore source', 
     .map((item) => item.content);
   assert.deepEqual(new Set(queried), new Set(['喜欢 C++', '正在准备面试']));
 });
+
+// ── 2026-09-30 审查 P1：`person_memory_lookup` 走的 getPerson 之前**没接** memory.visibility ——
+//    该工具自述"只返回当前会话可见的旧印象"，但群聊里仍会把它本不该看到的私聊来源印象注入。
+//    可见性按 chatKey 判，所以 chatKey 必须一路透传到 normalizeMemoryView。
+//    完整用例见 test/memory-visibility-identity.test.mjs（需独立数据目录，避免与本文件既有数据互相干扰）。

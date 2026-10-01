@@ -77,6 +77,65 @@
   现行做法：OpenAI 兼容 / 火山 v1 / 豆包 2.0 / MiniMax 四家适配，控制台按服务商预设填地址、Key、模型与
   音色（豆包内置官方 2.0 音色清单 102 条，按控制台分类分组），支持试听；语音/图片类发送的超时 15s→60s
   （实测一条 7 秒语音协议端要 16.4s，原 15s 会把已发出的语音记成"结果未知"）。
+- **声音复刻音色报「没开通」**（用户反馈，2026-09-30）：`src/llm/tts-doubao.js`、`src/llm/tts.js`、
+  `src/llm/tts-presets.js`、`docs/CONFIG-EXAMPLES.md`、`ui/app.js`。
+  失败模式：用户在自己的火山账号上复刻了声音、也开通了，调用却报没开通。生产账号实测对照（同一把 Key）：
+  复刻音色（`S_` 开头）+ `seed-tts-2.0` → `55000000 resource ID is mismatched with speaker related resource`；
+  换成复刻资源 `seed-icl-2.0` → `45000030 [resource_id=volc.seedicl.default] requested resource not granted`。
+  根因是**资源按音色分家**：官方文档写明音色与资源必须配套（v3 资源 `seed-icl-2.0` = 声音复刻 2.0；
+  v1 集群 `volcano_icl` = 声音复刻，标准音色才是 `volcano_tts`），而适配器只会照配置发默认值；
+  用户看到的"没开通"是第二段的 45000030 —— 账号确实少了「声音复刻2.0字符版」
+  （后付费音色还要单独开通「后付费音色服务」），但第一段的资源错配会先把人引偏。
+  现行做法：新增 `doubaoResourceIdForVoice()`（v3）与 `volcClusterForVoice()`（v1）按音色前缀路由 ——
+  `S_`/`icl_`（复刻）自动切复刻资源，`icl_*` 可走 v1 并发的 `volcano_icl_concurr`；用户显式填复刻资源时尊重
+  （复刻 1.0 老音色）；官方投放音色 `ICL_uranus_*`（大写）不受影响（实测配 `seed-tts-2.0` 正常出音频）；
+  45000030/55000000 的错误文案补上复刻场景的下一步。
+  同时修掉文档里把 `ICL_uranus_*` 说成"自己克隆的音色"的错（那是火山自营音色，全表 201 个）。
+- **画出图来（generate_image）**（Issue #21）：`src/llm/image-gen.js`（新增）、`src/tools/tools-core.js`、
+  `src/core/config-legacy.js`、`src/core/config.js`、`src/core/orchestrator.js`、`src/llm/prompt.js`、
+  `src/console/app.js`、`ui/app.js`、`docs/CONFIG-EXAMPLES.md`。
+  失败模式：原先只会"收图、发图"，不会画 —— 群友让"画一张"时只能拿库里的旧图应付。
+  现行做法：新增 `generate_image` 工具（OpenAI 兼容 `POST {baseUrl}/images/generations`），生成的图
+  经 `addManual` 落进表情库、再用现成的 `send_sticker` 发出（零改动复用托管内联那条路）。
+  配置 `imageGen` 默认关，控制台与语音回复同页、带「试画一张」。
+  **三条评审抓出来的硬约束**：① **Key 归属守卫** —— 地址与聊天模型不同域时拒绝复用模型 Key
+  （`resolveImageGenAuth`，"把 A 家的密钥发给 B 家"是这个项目修过的同类事故），同域或地址留空才复用；
+  ② **唯一成本闸门** `maxPerHour`（默认 6，全局）—— 图片计费不进「用量」面板（那里只统计 token），
+  所以闸门是唯一防线，且先查闸门再发请求（超限不花那笔钱）；③ 不发 `response_format`
+  （新版 OpenAI 因未知参数 400），`b64_json` 与 `url` 两种响应都吃、`url` 走 SSRF 防护下载后落盘。
+  关闭时不注入工具、提示词也不提画图。测试：适配器 6 例 + 端到端 4 例（真落库→真能发）+ 渲染 2 例 +
+  编排器 1 例；4 条变异验证（跨域回退用模型 Key / 去掉体积上限 / 闸门恒放行 / 未开仍注入）——
+  其中"体积上限"与"未开仍注入"头两次是**假绿**（变异后仍全绿），各补了用例才钉住。
+- **全量审查修复（针对改进方案 C0–#13 那 47 个提交）**：`deploy.sh`、`scripts/verify-deployment-target.mjs`、
+  `src/core/health-check.js`、`src/core/secret-keys.js`、`src/core/redact.js`、`src/memory/memory-runtime-integration.js`、
+  `src/ops.js`、`src/console/app.js`、`src/llm/prompt.js`、`ui/app.js`。
+  这批提交本身测试很全，但整体过一遍仍抓出四处真问题（都做了代码实验复现，不是纸面推断）：
+  ① **全新安装会被自己的预检挡住（P0）** —— `deploy.sh` 在调用校验器**之前**就
+  `mkdir -p "$INSTALL_DIR" "$DATA_DIR"`（默认 `--data-dir` 就是 `$INSTALL_DIR/data`），
+  无系统 Node 时还会下到 `$INSTALL_DIR/.runtime`；而校验器把"目录非空且无 `.deployment.json`"一律拒绝，
+  于是按文档走的全新安装拿到一句自我循环的提示（"清空该目录后全新安装"，清空后下次仍被自己的 mkdir 挡住）。
+  修法：校验器忽略**安装器自己创建**的条目（数据目录、`.runtime`；嵌套数据目录要求路径上每一层
+  **在滤掉安装器产物之后**只含下一段，否则不整体忽略 —— 滤这一步是二审才补上的，漏掉它时
+  "嵌套 `--data-dir` + 无系统 Node（下了 `.runtime`）"仍会被误拒），
+  并放行**就地安装**（`--install-dir` 省略、即源码树干装时 rsync 源与目标同目录，不存在覆盖来历不明代码的风险）；
+  同时把校验调用挪到"沿用端点"之后，`--host/--port` 才传得上、漂移提示不再是死分支。
+  ② **数据目录迁移的逃生开关传不进去（P1）** —— 校验器要求 `--allow-path-change` + 环境变量双条件，
+  但 `deploy.sh` 的参数解析**不认这个参数**（报 Unknown option），提示与 `docs/LINUX.md` 却让用户加它 →
+  迁移永远做不成。修法：`deploy.sh` 接收并转发该参数。
+  ③ **健康告警会静默丢失（P1）** —— 注入的通知器（`notify-owner` 的 `sendOwnerText`）**失败时返回
+  `{ok:false}` 而不抛**，而 `health-check` 只 try/catch，于是"没发出去"被记成"已送达"、连击痕迹也被下轮整体重写抹掉；
+  触发条件又是 `count === 3` 的硬相等，一次瞬时失败 = 整段故障期再也不告警（而告警通道正是最可能同因失败的 OneBot HTTP）。
+  修法：`{ok:false}` 也算失败并记 `notifyError`，到达阈值后**每轮重试直到送达**（成功即清痕迹；
+  送达判定用 `!= null` 而非真值，避免注入 `now = 0` 时被当成"没送过"而每轮重发）。
+  ④ **审计日志会明文落盘密钥（P1）** —— 审计把**整份配置**写入 `audit-*.jsonl` 并由 `/api/audit` 读回，
+  而脱敏只按字段名判（`SECRET_KEY_PATTERN` 不含 `authorization`/`x-api-key`/`cookie`/`auth`），
+  按值扫（`redactText` 的 `Bearer …`/`sk-…` 规则）又只作用于 `error`。用户把凭据填进
+  `api.extraBody`/`api.thinkingParams`/自定义 header（文档推荐的高级逃生口）时明文即落盘。
+  修法：模式补上 header 类名字（仍**故意不含**裸 `key`，避免误伤 sortKey 这类业务字段），
+  并把按值脱敏抽成 `redactSecretValue` 接到 `redactSecretFields` 的字符串分支上。
+  另修 P2：`ops audit-prune` 的 help 与 `docs/OPS.md` 写了 `--data=目录` 但代码忽略它（会删**默认**目录的审计文件）。
+  以上每条都补了用例并做变异验证（还原修复必红）；顺带补掉 `generate_image` 的两处接口不一致
+  （提示词与工具注入的门不统一、控制台「显示」按钮没有对应路由点了没反应）。
 - **定时提醒**：`src/features/reminders.js`、`src/console/app.js`、`ui/app.js`。
   失败模式：提醒原来只在内存里、重启就丢；多条同时到点会叠着派发；派发前不预检会把提醒标成已发生却没真提醒。
   现行做法：落盘持久化、同会话多条合并、派发前预检（模型忙/会话在跑就排队），控制台新增"定时提醒"页
@@ -95,6 +154,24 @@
   `recruitSeconds` 显式写 `null`/空串按缺省 45 秒处理、名单报错区分"对不上"与"被人数上限截断"。
   测试侧新增 20 条用例（含数字炸弹边界、回执按夜重置、单一归属、原子写与损坏文件现状等），
   "tick 重入锁"那条原先是假绿、改成"报名溢出 + 慢发送"并做了突变验证；整局驱动从零断言加到 6 条。
+- **控制台前端去插件化（UI 解耦 C2/C3）**：`ui/core/registry.js`（新增）、`ui/app.js`、
+  `ui/stable-features.js`、`ui/status-refresh.js`、`ui/index.html`、`eslint.config.mjs`、
+  `test/ui-registry.test.mjs`（新增）、`test/ui-contract.test.mjs`（新增）、`test/ui-smoke.test.mjs`、
+  `test/{render-test,scroll-test,usage-e2e}.mjs`。
+  失败模式：两个外挂文件原先靠**改写全局**接管渲染入口 —— `stable-features.js` 用
+  `window[name] = wrapped` 包裹 5 个渲染函数、`status-refresh.js` 裸赋值 `refreshStatus = ...`。
+  那只在"脚本顺序刚好、且双方都还是 classic script"时成立：ES module 的绑定只读、模块作用域
+  也不挂 window，任何一步模块化都会让覆盖**静默失效**（页面照常渲染，只是那段改造不再生效，
+  既没有报错也没有测试能发现）。现行做法：新增 `QARegistry`（`register` 底座 / `onTransform`
+  HTML 变换链 / `onAfter` 副作用链 / `override` 整体接管 + `base` 取回原实现 / 钩子抛错只 warn），
+  app.js 在载入时登记 8 个入口的底座并把三个被接管的入口改经 `dispatch` 分发；两个外挂文件改成
+  显式注册。**契约冻死**：`test/ui-contract.test.mjs` 断言外挂文件引用的每个跨文件全局都在
+  `uiSharedGlobals` 清单里、清单里每个名字都还有定义且确实被别的文件用到、且再无 `window[...] =`
+  改写；`test/ui-smoke.test.mjs` 补一条"注册 transform/after/override 后输出真的被改写"（原来只有
+  "渲染不抛"）。顺带清掉清单里只在自家文件使用的 `CONSOLE_MARKER`。
+  同步文档：`docs/UI-SMOKE.md`（新增，UI 手工烟测清单）、`docs/adr/0001~0004`（新增，其中 0004 用
+  实测记下"不抽 `core/lifecycle.js`"的原因：那 18 个符号的传递闭包是 357 个顶层声明里的 327 个）、
+  AGENTS.md 的 UI 约定与定时器条数更正（三个→四个，audit-prune 早就加了）。
 
 ## 1. 思考控制与表情匹配（v0.7.4 起）
 

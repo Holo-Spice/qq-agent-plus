@@ -14,6 +14,8 @@ import { callJson } from './tts-http.js';
 
 const DEFAULT_URL = 'https://openspeech.bytedance.com/api/v3/tts/unidirectional';
 const DEFAULT_RESOURCE = 'seed-tts-2.0';
+/** 声音复刻资源（S_/icl_ 音色必须配它，否则报 55000000 资源不匹配）。 */
+const CLONE_RESOURCE = 'seed-icl-2.0';
 const SUCCESS_CODE = 20000000;
 export const MAX_TTS_CHARS = 300;
 
@@ -25,13 +27,31 @@ export function explainVolcError(code, message = '') {
     3003: 'Access Token 无效',
     3005: '音色不存在或没开通',
     45000010: '鉴权失败：Key 不对。豆包 2.0 填的是控制台密钥（X-Api-Key），不是 AppID/Access Token',
-    45000030: '账号没开通这个资源（resource not granted）：去火山控制台开通对应的语音合成服务',
+    45000030: '账号没开通这个资源（resource not granted）：去火山控制台「开通管理」开通对应服务。'
+      + '用复刻音色时要确认已开通「声音复刻2.0字符版」；后付费音色还要单独开通「后付费音色服务」',
     45000000: '请求里没有带鉴权信息',
-    55000000: '音色与「资源 ID」不匹配：这个音色属于另一套资源（如 1.0 音色要 seed-tts-1.0）'
+    55000000: '音色与「资源 ID」不匹配：这个音色属于另一套资源 —— 1.0 音色要 seed-tts-1.0；'
+      + 'S_ 开头的复刻音色要 seed-icl-2.0（适配器会按音色自动切换，若仍报此错请检查「资源 ID」栏是否被手改过）'
   };
   const hint = byCode[Number(code)];
   if (hint) return `${msg || '火山返回错误'}（${hint}）`;
   return msg || '火山返回了未知错误';
+}
+
+/**
+ * 合成资源 ID 按音色路由（2026-09-30 用户反馈 + 生产账号实测）：
+ * 声音复刻音色（控制台给的 `S_xxx`，或批量查询接口给的 `icl_xxx`）必须配 `seed-icl-2.0` ——
+ * 配默认的 seed-tts-2.0 会报 55000000「resource ID is mismatched with speaker related resource」。
+ * 注意**大小写**：官方音色 `ICL_uranus_*`（大写 ICL_）是火山自营音色、跟普通 2.0 一样走 seed-tts-2.0，
+ * 别误伤（实测该音色配 seed-tts-2.0 正常出音频）。
+ * 用户显式填 `seed-icl-*` 时尊重（复刻 1.0 老音色要 seed-icl-1.0）。
+ */
+export function doubaoResourceIdForVoice(voice, configured = '') {
+  const want = String(configured || '').trim();
+  if (/^seed-icl-/i.test(want)) return want;
+  const v = String(voice || '').trim();
+  if (/^S_/.test(v) || /^icl_/.test(v)) return CLONE_RESOURCE;
+  return want || DEFAULT_RESOURCE;
 }
 
 /** 解析 NDJSON 流式响应：取出所有音频块，并记住最后一处非 0 code（错误或结束码）。 */
@@ -63,14 +83,15 @@ export function parseTtsStream(text) {
 /**
  * 豆包大模型语音合成 2.0。
  * cfg：baseUrl（默认官方）、apiKey（X-Api-Key 密钥）/ appId + apiKey（AppID 模式下 apiKey = Access Token）、
- *      resourceId（默认 seed-tts-2.0）、voice（speaker 音色 ID）、format、speed（倍率）、gain（dB）、timeoutMs。
+ *      resourceId（默认 seed-tts-2.0；克隆音色会自动改走 seed-icl-2.0，见 doubaoResourceIdForVoice）、
+ *      voice（speaker 音色 ID）、format、speed（倍率）、gain（dB）、timeoutMs。
  */
 export async function synthesizeDoubao({ cfg, text, signal = null, fetchFn = fetch }) {
   const base = String(cfg?.baseUrl || DEFAULT_URL).trim().replace(/\/+$/, '');
   const key = String(cfg?.apiKey || '').trim();
   const appId = String(cfg?.appId || '').trim();
-  const resourceId = String(cfg?.resourceId || DEFAULT_RESOURCE).trim() || DEFAULT_RESOURCE;
   const voice = String(cfg?.voice || '').trim();
+  const resourceId = doubaoResourceIdForVoice(voice, cfg?.resourceId);
   const format = String(cfg?.format || 'mp3').trim() || 'mp3';
   const body = String(text || '').trim().slice(0, MAX_TTS_CHARS);
   if (!key) throw new Error('豆包语音合成需要 API Key（控制台里拿的密钥，填「API Key」那一栏）');

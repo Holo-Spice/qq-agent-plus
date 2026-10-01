@@ -75,7 +75,8 @@ export function createRouter(deps = {}) {
     // #6：每个 HTTP 请求一个 trace id，回在响应头里（控制台/脚本按它去捞日志）。
     // remember:false —— 它不该覆盖 /api/status 的 lastTraceId（那是"最近一次运行"的 id）。
     const traceId = newTraceId();
-    res.setHeader('x-trace-id', traceId);
+    if (typeof res.setHeader === 'function') res.setHeader('x-trace-id', traceId);   // 测试用的极简 res 没有它
+
 
     // 先做完整匹配收集：**405/404 也必须先过鉴权**。旧的 /api/ 总闸是"先 authorize
     // 再看路径"，无 token 时任何 /api/* 都是 401；若让 405/404 绕过鉴权，未授权者就能

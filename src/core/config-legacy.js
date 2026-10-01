@@ -220,6 +220,19 @@ export const DEFAULT_CONFIG = {
     gain: 0,                  // 音量增益 dB（-10~10；觉得发闷可以 +2~+4）
     timeoutMs: 30000
   },
+  // 图片生成（与 tts/asr 对称：OpenAI 兼容的 /images/generations）：默认关。
+  // 计费按张，闸门只有 maxPerHour 这一道 —— 默认给得很保守。
+  imageGen: {
+    enabled: false,
+    baseUrl: '',              // 留空表示"跟聊天模型同域"（很多网关同域就带 images 端点）
+    apiKey: '',               // 单独填的 Key；留空只在"与模型同域"时复用模型 Key，否则拒绝（见 resolveImageGenAuth）
+    model: '',                // 如 gpt-image-1 / seedream-3.0 / cogview-3
+    size: '',                 // 如 1024x1024；留空由服务商默认
+    responseFormat: '',       // 留空最兼容（新版 OpenAI 会因未知参数 400）；可填 b64_json / url
+    maxPerHour: 6,            // 全局每小时最多生成几张（按张计费，硬闸门）
+    timeoutMs: 120000,        // 生图比对话慢
+    extraBody: {}             // 额外请求参数（个别网关要 quality/style 之类）
+  },
   // 安全例外（默认全部关闭）
   security: {
     allowPrivateImageHosts: false           // true 时图片下载允许内网地址（仅本地测试/自建图床）

@@ -1,10 +1,18 @@
 // 密钥字段的统一判定与脱敏（改进方案 #5/#6 共同前置）。
 // SECRET_KEY_PATTERN / SECRET_KEY_EXCLUDE / sanitizeConfigSecrets 从 src/console/app.js 逐字迁出，
 // 控制台配置脱敏与审计脱敏从此共用同一份模式表，避免两处口径漂移。
+import { redactSecretValue } from './redact.js';
 //
 // 判定口径：字段名命中 SECRET_KEY_PATTERN 即视为"值本身是密钥"；`*From` 结尾的字段存的是
 // 来源标识（如 manual），`has*` 布尔是派生标记，都不算。
-export const SECRET_KEY_PATTERN = /(^token$|apikey|api_key|accesstoken|access_token|secret|password|privatekey|private_key)/i;
+//
+// 2026-09-30 审查 P1 补了几类在配置里真实会出现的**请求头 / 凭据容器**名：
+//   authorization / auth / x-api-key / x_api_key / cookie / bearer
+// 它们常在 api.extraBody、api.thinkingParams 这类"高级逃生口"里被用户原样填成请求头，
+// 原来不含这些词的模式会漏过、把明文密钥写进审计文件（审计会把整份配置落盘）。
+// 仍**故意不含**裸 `key`：普通业务字段大量叫 xxxKey（sortKey、sortkey、clientKey…），
+// 加了会把无关字段整片抹成 [redacted]（`*From` 的排除也拦不住这些）。
+export const SECRET_KEY_PATTERN = /(^token$|apikey|api_key|accesstoken|access_token|secret|password|privatekey|private_key|authorization|^auth$|x-api-key|x_api_key|^cookie$|^bearer$)/i;
 // 形如 apiKeyFrom 的字段存的是"密钥来源标识"（如 manual），不是密钥本身，不要脱敏
 export const SECRET_KEY_EXCLUDE = /from$/i;
 
@@ -82,11 +90,15 @@ const SECRET_CONTAINER = /^(keys|providerkeys|ttskeys)$/i;
  * 而是留下 '[redacted]' 标记 —— 审计日志要能看出"这里原本有个值"。
  * - `*From`（来源标识）与 `has*` 布尔（派生标记）不脱敏；
  * - 密钥字段名（或 SECRET_CONTAINER）的值是对象/数组时**整包替换**，否则内部键名不含模式会漏网；
+ * - **字符串值再过一遍按值脱敏**（redactSecretValue）：字段名不含关键词、值却是
+ *   `sk-…` / `Bearer …` / `?access_token=…` 的，靠这一步兜住
+ *   （2026-09-30 审查 P1：审计会把整份配置落盘，只按字段名判会漏）；
  * - 循环引用 → '[circular]'，超 12 层 → '[depth-limit]'（审计是旁路，宁缺勿炸）。
  */
 export function redactSecretFields(value) {
   const seen = new WeakSet();
   const walk = (node, depth) => {
+    if (typeof node === 'string') return redactSecretValue(node);
     if (node === null || typeof node !== 'object') return node;
     if (depth > 12) return '[depth-limit]';
     if (seen.has(node)) return '[circular]';

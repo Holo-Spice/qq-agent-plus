@@ -13,8 +13,8 @@ fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({
   api: { baseUrl: 'https://example.com/v1', apiKey: 'k', model: 'm', thinking: 'on' }
 }));
 
-const { synthesizeSpeech, synthesizeVolc, synthesizeMinimax } = await import('../src/llm/tts.js');
-const { synthesizeDoubao, parseTtsStream, explainVolcError } = await import('../src/llm/tts-doubao.js');
+const { synthesizeSpeech, synthesizeVolc, synthesizeMinimax, volcClusterForVoice } = await import('../src/llm/tts.js');
+const { synthesizeDoubao, parseTtsStream, explainVolcError, doubaoResourceIdForVoice } = await import('../src/llm/tts-doubao.js');
 const { TTS_SERVICES, ttsServiceById, ttsVoicesFor, ttsServiceOfBaseUrl, ttsKeyFor } = await import('../src/llm/tts-presets.js');
 
 test('预设表：六家齐全，火山 v1 / 豆包 2.0 / MiniMax 标记了 provider 与凭据需求', () => {
@@ -50,6 +50,38 @@ test('地址认家：火山 v1 与豆包 v3 同域名，按路径区分；Key �
   assert.equal(ttsKeyFor(multi, 'doubao'), 'key-2.0');
   assert.equal(ttsKeyFor(multi, 'siliconflow'), 'sk-sf');
   assert.equal(ttsKeyFor(multi), 'key-2.0');   // 缺省 = 当前这家（v3 地址）
+});
+
+test('豆包资源 ID 路由：复刻音色自动切 seed-icl-2.0，官方音色与显式配置不受影响', () => {
+  // 复刻音色（控制台给的 S_xxx / 批量查询接口给的小写 icl_xxx）→ 必须走复刻资源，
+  // 否则生产实测报 55000000 resource ID is mismatched with speaker related resource
+  assert.equal(doubaoResourceIdForVoice('S_abc123', 'seed-tts-2.0'), 'seed-icl-2.0');
+  assert.equal(doubaoResourceIdForVoice('S_abc123', ''), 'seed-icl-2.0');
+  assert.equal(doubaoResourceIdForVoice('icl_abc123', 'seed-tts-2.0'), 'seed-icl-2.0');
+  // 用户显式填了复刻资源就尊重（复刻 1.0 老音色要 seed-icl-1.0）
+  assert.equal(doubaoResourceIdForVoice('S_abc123', 'seed-icl-1.0'), 'seed-icl-1.0');
+  // 官方音色不受影响 —— 大小写是硬边界：大写 ICL_uranus_* 是火山自营投放音色，
+  // 生产实测在 seed-tts-2.0 下正常出音频（2026-09-30）
+  assert.equal(doubaoResourceIdForVoice('ICL_uranus_zh_female_bingruoshaonv_tob', 'seed-tts-2.0'), 'seed-tts-2.0');
+  assert.equal(doubaoResourceIdForVoice('ICL_uranus_zh_female_bingruoshaonv_tob', ''), 'seed-tts-2.0');
+  assert.equal(doubaoResourceIdForVoice('zh_female_vv_uranus_bigtts', 'seed-tts-2.0'), 'seed-tts-2.0');
+  assert.equal(doubaoResourceIdForVoice('zh_male_yuanboxiaoshu_moon_bigtts', 'seed-tts-1.0'), 'seed-tts-1.0');
+  // 配置为空 + 普通音色 → 默认 2.0
+  assert.equal(doubaoResourceIdForVoice('zh_female_vv_uranus_bigtts', ''), 'seed-tts-2.0');
+  assert.equal(doubaoResourceIdForVoice('', ''), 'seed-tts-2.0');
+  // 请求头真的用了路由结果（不只是纯函数对）
+  const calls = [];
+  const ndjson = JSON.stringify({ code: 0, data: Buffer.from('Z').toString('base64') });
+  return synthesizeDoubao({
+    cfg: { apiKey: 'k', voice: 'S_clonevoice1', resourceId: 'seed-tts-2.0' },
+    text: 'x',
+    fetchFn: async (url, req) => {
+      calls.push(req.headers);
+      return { ok: true, status: 200, text: async () => ndjson };
+    }
+  }).then(() => {
+    assert.equal(calls[0]['X-Api-Resource-Id'], 'seed-icl-2.0');
+  });
 });
 
 test('豆包 2.0 适配器：X-Api-Key / AppID+AccessToken 两套鉴权、NDJSON 音频拼接、参数换算', async () => {
@@ -139,6 +171,36 @@ test('豆包 2.0 报错：HTTP 层的 header.code 与流内 code 都要变成人
   assert.equal(parsed.buffer.toString(), 'X');
   assert.equal(parsed.parsedLines, 1);
   assert.match(explainVolcError(3001, ''), /AppID/);
+  // 复刻场景的两种错要让用户知道下一步：没开通复刻资源 / 资源与音色不匹配
+  assert.match(explainVolcError(45000030, 'requested resource not granted'), /声音复刻2\.0字符版/);
+  assert.match(explainVolcError(45000030, ''), /后付费音色服务/);
+  assert.match(explainVolcError(55000000, 'resource ID is mismatched'), /seed-icl-2\.0/);
+});
+
+test('火山 v1 cluster 路由：复刻音色走 volcano_icl，标准音色与显式配置不受影响', () => {
+  // 官方 v1 文档：业务集群「标准音色、复刻等均不相同」；复刻音色配默认 volcano_tts 会报音色不存在/引擎初始化失败
+  assert.equal(volcClusterForVoice('S_abc123', ''), 'volcano_icl');
+  assert.equal(volcClusterForVoice('S_abc123', 'volcano_tts'), 'volcano_icl');
+  assert.equal(volcClusterForVoice('icl_abc123', ''), 'volcano_icl');
+  // 显式填复刻集群（含并发版）时尊重
+  assert.equal(volcClusterForVoice('S_abc123', 'volcano_icl_concurr'), 'volcano_icl_concurr');
+  assert.equal(volcClusterForVoice('S_abc123', 'seed-icl-2.0'), 'seed-icl-2.0');
+  // 标准音色不受影响；大写 ICL_uranus_* 是官方自营音色，仍是 volcano_tts
+  assert.equal(volcClusterForVoice('BV001_streaming', ''), 'volcano_tts');
+  assert.equal(volcClusterForVoice('ICL_uranus_zh_female_bingruoshaonv_tob', 'volcano_tts'), 'volcano_tts');
+  assert.equal(volcClusterForVoice('', ''), 'volcano_tts');
+  // 请求体真的用了路由结果
+  const calls = [];
+  return synthesizeVolc({
+    cfg: { appId: 'a', apiKey: 't', voice: 'S_clone1' },
+    text: 'x',
+    fetchFn: async (url, req) => {
+      calls.push(JSON.parse(req.body));
+      return { ok: true, status: 200, text: async () => JSON.stringify({ code: 3000, data: Buffer.from('M').toString('base64') }) };
+    }
+  }).then(() => {
+    assert.equal(calls[0].app.cluster, 'volcano_icl');
+  });
 });
 
 test('火山适配器：Bearer;<token> 鉴权、audio/request 结构、base64 解码；错误码要报出来', async () => {

@@ -5,7 +5,9 @@
 // 挪到 trap 之后。
 //
 // 规则（详见仓库改进方案 §3 #3 规则表）：
-//   记录缺失且目录非空   → 拒绝（不是本工具管理的安装，就地更新会把来历不明的代码变成"受管"）
+//   记录缺失且目录非空   → 拒绝（不是本工具管理的安装，就地更新会把来历不明的代码变成"受管"）；
+//                          但安装器自己建的条目（数据目录、.runtime）不算"来历不明"，
+//                          就地安装（INSTALL_DIR == 源码树）也没有覆盖风险 —— 两者都放行（2026-09-30 审查 P0）
 //   data 不一致          → 拒绝；逃生开关需 --allow-path-change 与 QQ_AGENT_ALLOW_PATH_CHANGE=1 双条件
 //   service 不一致       → 拒绝
 //   repository/branch    → 调用方给了期望值才比对；记录缺字段跳过（0.6.x 前老安装）
@@ -17,7 +19,7 @@ import path from 'node:path';
 function parseArgs(argv) {
   const args = {
     installDir: '', dataDir: '', service: '', repository: '', branch: '',
-    host: undefined, port: undefined, allowPathChange: false,
+    host: undefined, port: undefined, allowPathChange: false, sourceRoot: '',
   };
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i];
@@ -30,6 +32,7 @@ function parseArgs(argv) {
       case '--branch': args.branch = take(); break;
       case '--host': args.host = take(); break;
       case '--port': args.port = take(); break;
+      case '--source-root': args.sourceRoot = take(); break;
       case '--allow-path-change': args.allowPathChange = true; break;
       default: throw new Error(`未知参数：${key}`);
     }
@@ -40,8 +43,38 @@ function parseArgs(argv) {
   return args;
 }
 
-function dirHasFiles(p) {
-  try { return fs.readdirSync(p).length > 0; } catch { return false; }
+// deploy.sh 在调用本校验之前会 `mkdir -p "$INSTALL_DIR" "$DATA_DIR"`（默认 --data-dir 就是
+// INSTALL_DIR/data），无系统 Node 时还会把运行时下到 INSTALL_DIR/.runtime。这些是安装器自己的
+// 产物，判定"目录里有没有来历不明的代码"时必须忽略，否则全新安装会被自己的产物挡在门外
+// （2026-09-30 审查 P0：mkdri 在校验之前，且真空目录才是唯一能通过的形态）。
+function installerOwnedEntries(installDir, dataDir) {
+  const owned = new Set(['.runtime']);
+  const absInstall = path.resolve(installDir);
+  const absData = dataDir ? path.resolve(dataDir) : '';
+  if (!absData) return owned;
+  const rel = path.relative(absInstall, absData);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return owned;
+  const segs = rel.split(path.sep).filter(Boolean);
+  // 数据目录是 INSTALL_DIR 的直接子目录（常见：INSTALL_DIR/data）→ 忽略该条目本身。
+  if (segs.length === 1) { owned.add(segs[0]); return owned; }
+  // 嵌套（如 INSTALL_DIR/var/data）：只有当这条路径上的每一层**除了安装器自己的产物之外**
+  // 只有下一个分段时才忽略，否则第一段里可能混着别的东西，不能整体忽略。
+  // ⚠️ 下降时要先滤掉 owned —— `.runtime` 就躺在 INSTALL_DIR 里，不滤会让
+  // "嵌套 --data-dir + 无系统 Node（下了 .runtime）"这种组合误判成"非空且有外来文件"
+  // （2026-09-30 复审实测复现；单层 data/ 走上面那条 early return，所以没暴露）。
+  let cur = absInstall;
+  for (const seg of segs) {
+    let entries;
+    try { entries = fs.readdirSync(cur).filter((e) => !owned.has(e)); } catch { return owned; }
+    if (entries.length !== 1 || entries[0] !== seg) return owned;
+    cur = path.join(cur, seg);
+  }
+  owned.add(segs[0]);
+  return owned;
+}
+
+function dirHasFiles(p, ignore = new Set()) {
+  try { return fs.readdirSync(p).filter((e) => !ignore.has(e)).length > 0; } catch { return false; }
 }
 
 // 记录里的路径可能是 install-dir 的规范形（realpath），传入的可能是带尾斜杠的写法：
@@ -65,12 +98,20 @@ try {
   const reject = (msg) => problems.push(msg);
 
   if (!fs.existsSync(metaPath)) {
-    if (dirHasFiles(args.installDir)) {
+    const owned = installerOwnedEntries(args.installDir, args.dataDir);
+    const foreign = dirHasFiles(args.installDir, owned);
+    // 就地安装：INSTALL_DIR 就是源码树本身（deploy.sh 的默认用法"在仓库里直接跑"）。
+    // 此时 rsync 的源与目标是同一目录，不存在"把来历不明的代码当受管安装覆盖"的风险，
+    // 放行（否则这条被文档与 --install-dir 默认值共同承诺的路径会被自己挡住）。
+    const inPlace = !!args.sourceRoot && normPath(args.sourceRoot) === normPath(args.installDir);
+    if (!foreign) {
+      ok.push('全新安装：目标目录为空（或只含安装器自建的数据目录/.runtime）且无部署记录');
+    } else if (inPlace) {
+      ok.push('就地安装：安装目录即源码树，rsync 源与目标同目录，无覆盖来历不明代码的风险');
+    } else {
       reject(`安装目录非空但没有 .deployment.json：${args.installDir} 不是本工具管理的安装`
         + '（手工/其他工具部署），就地更新会把来历不明的代码当成受管安装覆盖；'
         + '确认无误请换 --install-dir，或清空该目录后全新安装。');
-    } else {
-      ok.push('全新安装：目标目录为空且无部署记录');
     }
   } else if (!meta || typeof meta !== 'object') {
     // 与旧口径一致：记录损坏不拦（历史上一直放行），交给后续流程报错；

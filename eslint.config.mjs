@@ -24,17 +24,21 @@ const nodeScope = {
   rules: baseRules,
 };
 
-// classic script 时代跨文件共享的全局（定义在 ui/app.js，被 8 个外挂文件引用）。
-// 显式声明“这些是有意共享的全局”，而不是豁免规则 —— 改进方案 §1.3 的 25 符号清单。
+// classic script 时代跨文件共享的全局（定义在 ui/app.js 与 ui/core/*，被 8 个外挂文件引用）。
+// 显式声明“这些是有意共享的全局”，而不是豁免规则 —— 改进方案 §1.3 的符号清单。
+// 这份清单同时也是**冻结契约**：test/ui-contract.test.mjs 断言外挂文件引用的每一个
+// 跨文件全局都在这里，且这里的每个名字都还有定义、确实被别的文件用到（防腐烂/防冗余）。
 // B 档 ESM 化完成后这批声明应随之删除（改为显式 import）。
+// 注：CONSOLE_MARKER 曾列在这里，但它只在 core/api.js 内部使用（没有别的文件引用），
+// 2026-09-30 随 §11 C2 的契约用例清掉。
 const uiSharedGlobals = {
-  // core/api.js 引用它（app.js 顶层 const，经全局词法环境共享）
-  CONSOLE_MARKER: 'readonly',
   $$: 'readonly',
   state: 'readonly',
   api: 'readonly',
   esc: 'readonly',
   $: 'readonly',
+  // core/registry.js 定义；app.js 与两个外挂插件文件都靠它注册/分发渲染钩子
+  QARegistry: 'readonly',
   fmtTime: 'readonly',
   mulOf: 'readonly',
   fmtTokens: 'readonly',

@@ -45,6 +45,7 @@ export const TTS_SERVICES = [
     voicesFlat: ['BV001_streaming', 'BV002_streaming', 'BV700_streaming', 'BV005_streaming', 'BV102_streaming'],
     note: '按官方文档实现。v1 要三样：AppID（应用管理里的一串数字）、Access Token（填「API Key」那一栏）、'
       + 'cluster 填 volcano_tts（**不要填音色名**）；音色写 voice_type（如 BV001_streaming 通用女声）。'
+      + '复刻音色（S_ 开头）会自动改用 cluster=volcano_icl（适配器按音色切，不用手改）。'
       + '这是老接口，自然度不如下面的 2.0；账号没开通 v1 服务时会固定报 3001。'
   },
   {
@@ -175,8 +176,11 @@ export const TTS_SERVICES = [
     ],
     note: '豆包大模型语音合成 2.0（/api/v3/tts/unidirectional，NDJSON 流式）。要填的只有两样：'
       + '「API Key」（语音技术控制台里的密钥，走 X-Api-Key 鉴权，**不需要 AppID / Cluster**）与「音色」。'
-      + '资源 ID 默认 seed-tts-2.0，一般不用改（1.0 的音色要换 seed-tts-1.0，且账号得开通那份资源）。'
-      + '音色表是官方 2.0 全量清单（102 个），实测中文 99 个都可用；自定义/克隆音色（如 ICL_uranus_*）直接手填即可。'
+      + '资源 ID 默认 seed-tts-2.0，一般不用改（1.0 的音色要换 seed-tts-1.0）。'
+      + '**声音复刻音色（S_ 开头）会自动改用 seed-icl-2.0**，但账号要先在控制台开通「声音复刻2.0字符版」'
+      + '（后付费音色还要单独开通「后付费音色服务」），否则报 45000030 resource not granted。'
+      + '音色表是官方 2.0 全量清单（102 个），实测中文 99 个都可用；不在表里的官方音色（如 ICL_uranus_*）'
+      + '直接手填即可，它们与普通 2.0 音色同属 seed-tts-2.0，不需要改资源 ID。'
   },
   {
     id: 'minimax',

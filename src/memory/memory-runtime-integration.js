@@ -1,10 +1,21 @@
 import { IdentityStore } from '../identity/identity-store.js';
 import { safeSlice, sanitizeUserText } from '../core/util.js';
+import { visibleImpressions, memoryVisibilityOf } from '../core/memory-visibility.js';
 
 let activeMemoryStore = null;
 let patched = false;
 
-function normalizeMemoryView(userId, maxMemories = 6) {
+/**
+ * @param userId 目标 QQ
+ * @param maxMemories 最多几条
+ * @param chatKey 当前会话（形如 group:<群号> / private:<QQ号>）。
+ *   必须传：`person_memory_lookup` 工具自述"只返回当前会话可见的旧印象"，而
+ *   memory.visibility 的 perChat / hidePrivateInGroup 都是按 chatKey 判可见性的 ——
+ *   不传就等于绕过策略（2026-09-30 审查 P1）。
+ *   **空串 = 管理视图**（无"当前会话"语义）：不做 perChat 过滤，只保留默认策略；
+ *   否则控制台人物列表 / 手动好友评分会被某个群的 perChat 策略整片滤空。
+ */
+function normalizeMemoryView(userId, maxMemories = 6, chatKey = '') {
   if (!activeMemoryStore) {
     return {
       globalMemories: [],
@@ -15,7 +26,12 @@ function normalizeMemoryView(userId, maxMemories = 6) {
 
   const member = activeMemoryStore.getMember('', String(userId || ''));
   const impressions = Array.isArray(member?.impressions) ? member.impressions : [];
-  const sorted = [...impressions]
+  // #13：按 memory.visibility 过滤到「对当前会话可见」的印象（默认策略下与历史逐字一致）。
+  // 无 chatKey（管理视图）时只按 global+不隐藏走 —— 等价于不按会话过滤。
+  const vis = memoryVisibilityOf();
+  const scoped = chatKey ? vis : { ...vis, mode: 'global' };
+  const visible = visibleImpressions(impressions, chatKey, scoped);
+  const sorted = [...visible]
     .sort((a, b) => (Number(b.lastObservedAt) || Number(b.createdAt) || 0)
       - (Number(a.lastObservedAt) || Number(a.createdAt) || 0));
   const limit = Math.min(20, Math.max(1, Number(maxMemories) || 6));
@@ -41,9 +57,9 @@ function normalizeMemoryView(userId, maxMemories = 6) {
   };
 }
 
-function attachGlobalMemory(person, maxMemories = 6) {
+function attachGlobalMemory(person, maxMemories = 6, chatKey = '') {
   if (!person) return person;
-  const memory = normalizeMemoryView(person.userId, maxMemories);
+  const memory = normalizeMemoryView(person.userId, maxMemories, chatKey);
   return {
     ...person,
     // 统一记忆字段：IdentityStore 只负责身份；人物长期记忆只从 MemoryStore 读取。
@@ -71,7 +87,8 @@ function patchIdentityStore() {
   if (typeof originalGetPerson === 'function') {
     IdentityStore.prototype.getPerson = function getPersonWithGlobalMemory(userId, options = {}) {
       const person = originalGetPerson.call(this, userId, options);
-      return attachGlobalMemory(person, options?.maxMemories);
+      // chatKey 必须透传：可见性按会话判（perChat / hidePrivateInGroup）。
+      return attachGlobalMemory(person, options?.maxMemories, options?.chatKey);
     };
   }
 
@@ -79,8 +96,10 @@ function patchIdentityStore() {
   if (typeof originalListPeople === 'function') {
     IdentityStore.prototype.listPeople = function listPeopleWithGlobalMemory(...args) {
       const people = originalListPeople.apply(this, args);
+      // 管理视图（控制台人物列表、手动好友评分）没有"当前会话"语义：传空 chatKey，
+      // 即按默认策略（global+不隐藏）展示，与历史逐字一致 —— 不该拿某个群的策略过滤管理视图。
       return Array.isArray(people)
-        ? people.map((person) => attachGlobalMemory(person, 6))
+        ? people.map((person) => attachGlobalMemory(person, 6, ''))
         : people;
     };
   }

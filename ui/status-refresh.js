@@ -4,7 +4,10 @@
 // chat-update / 15 秒状态轮询都会调用它，导致好友管理页被整页重建并闪烁。
 // 这里仅保留全局状态与必要的当前页状态刷新；好友工作流由
 // identity-pilot-update、切页、手动刷新和审批操作各自负责刷新。
-refreshStatus = async function refreshStatus() {
+//
+// 经 QARegistry 接管（改进方案 §11 C2「去插件化」）：原先这里是裸赋值
+// `refreshStatus = ...`，靠改写全局生效 —— 模块化后那样的覆盖会静默失效。
+QARegistry.override('refreshStatus', async function refreshStatus() {
   try {
     state.status = await api('/api/status');
     const s = state.status;
@@ -69,7 +72,7 @@ refreshStatus = async function refreshStatus() {
     if (state.tab === 'incidents') loadIncidentFeaturePage();
     renderBanner();
   } catch (e) { /* 忽略瞬时错误 */ }
-};
+});
 
 // 生命周期线程可能在某次模型 Session 已经结束之后，才由恢复循环因为空闲/硬上限
 // 真正关闭。旧 Session 因此不一定有 threadCloseReason；会话详情仍保留了当时的
@@ -144,9 +147,10 @@ function lifecycleEndReasonMeta(s) {
 }
 
 // 不复制 app.js 的大段渲染逻辑，只在原生命周期摘要尾部追加“结束原因”。
-const renderLifecycleOverviewBase = renderLifecycleOverview;
-renderLifecycleOverview = function renderLifecycleOverviewWithEndReason(s) {
-  const html = renderLifecycleOverviewBase(s);
+// 原实现经 QARegistry.base 取回（不再靠 `const x = 全局名` 抓当前值 —— 那种写法
+// 依赖加载顺序，且序号一错就抓到自己造成无限递归）。
+QARegistry.override('renderLifecycleOverview', function renderLifecycleOverviewWithEndReason(s) {
+  const html = QARegistry.base('renderLifecycleOverview')(s);
   const reason = lifecycleEndReasonMeta(s);
   if (!html || !reason) return html;
   const item = `
@@ -156,7 +160,7 @@ renderLifecycleOverview = function renderLifecycleOverviewWithEndReason(s) {
         <small>${esc(reason.detail)}</small>
       </div>`;
   return html.replace(/<\/section>\s*$/, `${item}\n    </section>`);
-};
+});
 
 function installManualFriendReviewButton() {
   const refresh = $('#friend-feature-refresh');
@@ -276,9 +280,8 @@ async function openManualFriendReviewDialog() {
 }
 
 // 好友页原渲染完成后补一个手动入口，不改动 app.js 的大块页面实现。
-const loadFriendFeaturePageBase = loadFriendFeaturePage;
-loadFriendFeaturePage = async function loadFriendFeaturePageWithManualReview(...args) {
-  const value = await loadFriendFeaturePageBase(...args);
+QARegistry.override('loadFriendFeaturePage', async function loadFriendFeaturePageWithManualReview(...args) {
+  const value = await QARegistry.base('loadFriendFeaturePage')(...args);
   installManualFriendReviewButton();
   return value;
-};
+});

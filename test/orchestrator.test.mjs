@@ -831,6 +831,42 @@ describe('Orchestrator', () => {
     assert.match(offPrompt, /画面/);
   });
 
+  it('generate_image 只在图片生成开关打开且配置齐时注入（按张计费，未配就别让模型去调）', async (t) => {
+    const { cfg, runner, append } = fixture(t);
+    const bodies = [];
+    globalThis.fetch = async (_url, options) => {
+      bodies.push(JSON.parse(options.body));
+      return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
+    };
+    const hasImageTool = (body) => body.tools.some((tool) => tool.function.name === 'generate_image');
+    // 1) 默认关：不注入，提示词里也不该有画图引导
+    append(1, '在吗', '42');
+    await runner.wake('group:1');
+    assert.equal(hasImageTool(bodies.at(-1)), false, '默认关不该注入画图工具');
+    assert.doesNotMatch(bodies.at(-1).messages[0].content, /generate_image/);
+    // 2) 开了但没填模型：仍不注入（调用必然失败，还会白花一次请求）
+    cfg.imageGen = { ...(cfg.imageGen || {}), enabled: true, model: '' };
+    setRuntimeConfig(cfg);
+    append(2, '在吗', '42');
+    await runner.wake('group:1');
+    assert.equal(hasImageTool(bodies.at(-1)), false, '没填模型不该注入');
+    // 3) 开 + 有模型（地址留空 = 与模型同域）：注入，提示词同步给画图引导
+    cfg.imageGen = { ...cfg.imageGen, enabled: true, model: 'gpt-image-1', baseUrl: '' };
+    setRuntimeConfig(cfg);
+    append(3, '在吗', '42');
+    await runner.wake('group:1');
+    assert.equal(hasImageTool(bodies.at(-1)), true, '配齐了应注入');
+    assert.match(bodies.at(-1).messages[0].content, /generate_image/);
+    assert.match(bodies.at(-1).messages[0].content, /按张计费/);
+    // 4) 再关掉：工具与引导一起消失
+    cfg.imageGen = { ...cfg.imageGen, enabled: false };
+    setRuntimeConfig(cfg);
+    append(4, '在吗', '42');
+    await runner.wake('group:1');
+    assert.equal(hasImageTool(bodies.at(-1)), false);
+    assert.doesNotMatch(bodies.at(-1).messages[0].content, /generate_image/);
+  });
+
   it('keeps slang injection retired even with legacy config and slang assets', async (t) => {
     // 黑话研究已下线（stable-feature-policy: slangPilot=false）：即使旧配置里
     // enabled=true、磁盘上还有 slang.json，提示词也不应再注入任何黑话段落，

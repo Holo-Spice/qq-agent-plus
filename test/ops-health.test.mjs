@@ -116,6 +116,43 @@ test('连续 3 次失败才通知；恢复时补发一次"已恢复"', async () 
   assert.equal(notes.length, before, '状态没变化就不该再发任何通知');
 });
 
+// ── 2026-09-30 审查 P1：注入的通知器（生产是 notify-owner 的 sendOwnerText）**失败时返回
+//    { ok:false } 而不抛**，原来只 try/catch，于是"没发出去"被记成"已送达"、且因为触发条件是
+//    count===3 的硬相等，一次瞬时失败 = 整段故障期再也不告警。以下两条锁住修复。
+test('通知失败（返回 ok:false）不得记成已送达，且下一轮要继续重试', async () => {
+  const dir = makeDataDir();
+  const attempts = [];
+  // 前 2 次返回失败，第 3 次成功（模拟 OneBot 短暂不可用后恢复）
+  const notify = async (text) => {
+    attempts.push(text);
+    const alertCount = attempts.filter((t) => t.includes('健康告警') && t.includes('onebot-status')).length;
+    return alertCount >= 3 ? { ok: true, detail: '' } : { ok: false, detail: 'OneBot HTTP 500' };
+  };
+  for (let i = 1; i <= 5; i++) {
+    await runHealthCheck({ dataDir: dir, fetchImpl: badFetch, statfs: okStatfs, notify });
+  }
+  const state = JSON.parse(fs.readFileSync(path.join(dir, 'health.json'), 'utf8'));
+  const ob = state.streaks['onebot-status'];
+  assert.ok(ob.lastNotifiedAt, '重试到成功那轮应记下送达时间');
+  assert.ok(!ob.notifyError, '送达成功后应清掉错误痕迹');
+  // 第 1、2 次尝试都失败（每轮 1 次 onebot-status 告警），第 3 次成功 → 共 3 次
+  const onebotAlerts = attempts.filter((t) => t.includes('健康告警') && t.includes('onebot-status'));
+  assert.equal(onebotAlerts.length, 3, '失败后每轮都要重试，直到送达');
+});
+
+test('通知一直失败：记下 notifyError，且不谎报在 notified 里', async () => {
+  const dir = makeDataDir();
+  const notify = async () => ({ ok: false, detail: 'OneBot HTTP 500' });
+  let last = null;
+  for (let i = 1; i <= 4; i++) {
+    last = await runHealthCheck({ dataDir: dir, fetchImpl: badFetch, statfs: okStatfs, notify });
+  }
+  assert.ok(!last.notified.some((n) => n.startsWith('告警:onebot-status')), '没送达就不该出现在 notified');
+  const state = JSON.parse(fs.readFileSync(path.join(dir, 'health.json'), 'utf8'));
+  assert.match(state.streaks['onebot-status'].notifyError, /500/);
+  assert.ok(!state.streaks['onebot-status'].lastNotifiedAt, '失败不得留下送达时间');
+});
+
 test('health.json 落盘含 streaks 与最后结果，权限 0600', async () => {
   const dir = makeDataDir();
   await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null });

@@ -29,6 +29,13 @@ bash -n deploy.sh deploy-all.sh manage.sh   # 改过 shell 才需要
 改了渲染/滚动/用量相关：另跑 `npm run test:render`、`node test/scroll-test.mjs`、
 `node test/usage-e2e.mjs`。CI（`.github/workflows/ci.yml`）会跑全部这些。
 
+**改了 `ui/`（控制台前端）另外三件事**（约定写在 `AGENTS.md`）：
+
+- 接管渲染入口走 `QARegistry`（`onTransform` / `onAfter` / `override` + `base`），
+  **不要**再写 `window[name] = wrapped` 或裸赋值 —— `test/ui-contract.test.mjs` 会判红；
+- 新增跨文件全局必须同时改 `eslint.config.mjs` 的 `uiSharedGlobals`（同样是契约用例在盯）；
+- 跑一遍 `docs/UI-SMOKE.md` 的手工清单（自动化只覆盖"渲染不抛 + 钩子接上了"，布局与事件靠人看）。
+
 **回归判断口径**：Windows 上有已知的环境性失败用例（`docs/KNOWN-ISSUES.md` 记录在案）。
 判断"有没有引入回归"用**失败用例名集合做差集**，不要只看数字：跑完存日志，与基线
 `✖` 行（去掉耗时）`sort -u` 后 diff。CI 的 ubuntu runner 是权威结论。

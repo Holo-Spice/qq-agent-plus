@@ -28,20 +28,35 @@ In particular:
 ## 部署与运维（给 AI 协作者）
 
 要部署、更新或排查线上实例时，先读：`docs/LINUX.md`（部署、控制台、数据与备份、连接排查）、
-`docs/OPS.md`（`src/ops.js` 的运维入口）、`docs/BAOTA.md`（宝塔 / aaPanel 面板环境）。四条硬约束：
+`docs/OPS.md`（`src/ops.js` 的运维入口）、`docs/BAOTA.md`（宝塔 / aaPanel 面板环境）。五条硬约束：
 
 - **不要以 root 部署**：`deploy-all.sh` 直接拒绝 root，`deploy.sh` 也要求以服务用户身份运行。
 - **不要用 PM2 或面板的 Node 项目启动**：进程由 systemd 用户服务托管，`manage.sh` 依赖
   `systemctl --user`。
 - **`manage.sh` 必须在安装目录（含 `.deployment.json` 的那一层）里执行**；在源码 checkout 里跑会
   报 `Deployed Node.js runtime is unavailable` —— 那是目录不对，不要因此重跑 `deploy.sh`。
-- **`install-timers` 现在装三个定时器**：backup（每周）、process-guard（每 10 分钟）、
-  health（每 5 分钟巡检；连续 3 次失败私聊 owner，恢复补发）。
+- **`install-timers` 现在装四个定时器**：backup（每周日 04:10）、process-guard（每 10 分钟）、
+  health（每 5 分钟巡检；连续 3 次失败私聊 owner，恢复补发）、audit-prune（每月 1 日 04:20 清理审计日志）。
 - **更新时 `--install-dir` / `--data-dir` 必须与现有安装一致**：`deploy.sh` 会在部署开始前把全部参数
   与 `.deployment.json` 记录做强校验（`scripts/verify-deployment-target.mjs`），`--data-dir` / `--service` /
   `--repository` / `--branch` 不符直接拒绝（此时什么都没动，无需回滚）；数据目录迁移需同时给
   `--allow-path-change` 并设 `QQ_AGENT_ALLOW_PATH_CHANGE=1`。`--host` / `--port` 可省略（沿用
   `config.json` 里的现值并打印提示），它们的真相源是 `config.json`，与部署记录不一致只会提示漂移。
+
+## 控制台前端（ui/）约定
+
+控制台是 classic script（无构建工具，见 `docs/adr/0001-no-build-tools.md`），跨文件靠全局共享。
+动 `ui/` 时守四条：
+
+- **接管渲染入口走 `QARegistry`**（`ui/core/registry.js`）：`onTransform` / `onAfter` / `override`；
+  原实现用 `QARegistry.base(name)` 取回。**不要**再写 `window[name] = wrapped` 或裸赋值
+  `refreshStatus = ...` —— `test/ui-contract.test.mjs` 会当场判红（模块化后那种覆盖会静默失效）。
+- **新增跨文件全局必须同时改 `eslint.config.mjs` 的 `uiSharedGlobals`**，否则契约用例判红；
+  能改成局部实现就别加全局。
+- **改了 `ui/` 就跑一遍 `docs/UI-SMOKE.md`**：自动化只覆盖"渲染不抛 + 钩子接上了"，
+  布局与事件只有人能看。
+- **安全网**：`node test/render-test.mjs`（176）/ `node test/scroll-test.mjs`（19）/
+  `node --test test/ui-smoke.test.mjs test/ui-contract.test.mjs test/ui-registry.test.mjs test/ui-modules.test.mjs`。
 
 ## 发布节奏
 

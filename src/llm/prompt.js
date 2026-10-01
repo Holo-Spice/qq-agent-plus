@@ -10,7 +10,7 @@
 // 行为规则全部移植自 qq-bridge 的二代仿真 preset（qq-chat-v2），去掉了
 // 沉睡/唤醒/等待机制（由编排器的"已读/未读驱动"取代）。
 
-import { asrAvailable, getConfig } from '../core/config.js';
+import { asrAvailable, getConfig, imageGenAvailable } from '../core/config.js';
 import { visionEnabled } from './vision-scan.js';
 import { cappedByTokenSaver, tokenSaverCapsOf } from '../core/token-saver.js';
 // 滑条换算放在独立模块（零依赖），避免 config.js ↔ prompt.js 循环依赖。
@@ -428,6 +428,12 @@ export function buildSystemPrompt({
     ];
     if (getConfig().tts?.enabled === true) {
       gameLines.push('- 想"说"而不是"打"时可以用 send_voice 发一条短语音（1~3 句、≤120 字）：内容要写成口语，带语气词与标点（「哎——」「不是吧？」「……行吧」）才不会念得像播报；只在被要求或很合适的场合用，平时打字更像真人。');
+    }
+    // 与工具注入用**同一道门**（orchestrator 按 imageGenAvailable 过滤 generate_image）：
+    // 只看 enabled 会在"勾了开关但还没填模型"时告诉模型有个它其实没有的工具
+    // （2026-09-30 审查；asr 段用的是同一套 asrAvailable 口径）。
+    if (imageGenAvailable(getConfig())) {
+      gameLines.push('- 群友要你「画一张」时用 generate_image：prompt 写清画面（主体+风格+氛围），生成后图会进表情库，再用 send_sticker 发出去（记得带上一句自己的话，别只甩图）。这是按张计费的，一天里别主动画、只在群友真开口要时才用。');
     }
     parts.push('', gameLines.join('\n'));
   }

@@ -6,9 +6,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { getConfig } from '../core/config.js';
+import { getConfig, imageGenAvailable, imageGenMaxPerHour } from '../core/config.js';
 import { nextAtFromHHMM } from '../core/reminders.js';
 import { synthesizeSpeech, ttsConfigured } from '../llm/tts.js';
+import { generateImage, MAX_PROMPT_CHARS } from '../llm/image-gen.js';
+import { resolveApiKey } from '../llm/llm.js';
+import { safeFetchBinary } from '../llm/safe-fetch.js';
+import { createQuota } from '../core/quota.js';
+
+// 生图闸门（按张计费，全局；#9 那套双闸在这里只用全局侧 —— 一张图的钱与"哪个群要的"无关，
+// 但额度按会话记账便于排查，且 perChat 不设限）
+const imageQuota = createQuota({ windowMs: 3600_000 });
+/** 仅供测试：清空生图闸门的记录（与 audio-transcribe 导出 consumeAsrQuota 同一用意）。 */
+export function resetImageQuotaForTest() {
+  imageQuota.reset();
+}
 
 // 消息 id 归一化：模型常把聊天记录里的 "#123" 连 # 一起传进来，而 OneBot 只认纯数字 id。
 // store.js 里有一份同名函数但没导出，所以这里保留 tools 层自用的一份。
@@ -74,7 +86,7 @@ async function stickerLookupHint(ctx, key) {
 
 import { normalizeMessageList, safeSlice, sanitizeUserText, textWithQuote, unquoteJsonString } from '../core/util.js';
 import { repairUnescapedStringQuotes } from '../core/json-repair.js';
-import { validateImageUrl, safeFetchBinary } from '../llm/safe-fetch.js';
+import { validateImageUrl } from '../llm/safe-fetch.js';
 import { webSearch, webFetch } from '../llm/web-search.js';
 import { expandForwardNodes, extractMediaFromSegments } from '../onebot/onebot.js';
 import { readForwardMessages } from '../onebot/forward-reader.js';
@@ -507,6 +519,63 @@ export function buildToolDefs() {
             id: saved.id,
             note: saved.localNote,
             kind: saved.localFile ? '本地图库（发出去是图片）' : 'QQ收藏表情'
+          });
+        } catch (error) {
+          return err(error?.message ?? error);
+        }
+      }
+    },
+    {
+      name: 'generate_image',
+      description: '自己画一张图（调用图片生成服务，按张计费、有每小时上限）。适合群友点名要"画一张"：梗图、应景的图。'
+        + 'prompt 要写清楚画面内容（主体、风格、氛围），生成后图片会存进表情库，接着用 send_sticker 发出去。'
+        + '别频繁用（一次调用就是一次真实花费）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string', description: '画面描述：主体 + 风格 + 氛围（如"一只橘猫戴着草帽坐在海边，卡通风格"）' },
+          note: { type: 'string', description: '可选：给这张图起的短语（存进表情库便于以后找）' }
+        },
+        required: ['prompt']
+      },
+      async execute(ctx, args) {
+        try {
+          const cfg = getConfig();
+          if (!imageGenAvailable(cfg)) return err('图片生成未启用或未配置（设置 → 图片生成）');
+          const prompt = String(args.prompt ?? '').trim();
+          if (!prompt) return err('prompt 不能为空');
+          if (prompt.length > MAX_PROMPT_CHARS) return err(`画面描述太长了（≤${MAX_PROMPT_CHARS} 字），说短一点`);
+          // 按张计费：先查闸门再生成，超限直接拒（别生成完才发现不该花这笔钱）
+          // 每次读配置：界面上改上限后不必重启就生效
+          imageQuota.configure({ globalMax: imageGenMaxPerHour(cfg), perChatMax: Infinity });
+          const gate = imageQuota.peek(ctx.chatKey, Date.now());
+          if (!gate.ok) {
+            return err(gate.scope === 'chat'
+              ? '本会话的画图额度用完了（每小时有上限），过一会儿再画'
+              : '画图额度用完了（全局每小时有上限，这是按张计费的）');
+          }
+          const { buffer, revisedPrompt } = await generateImage({
+            cfg,
+            apiCfg: cfg.api,
+            apiKey: resolveApiKey(cfg),
+            prompt,
+            signal: ctx.signal
+          });
+          imageQuota.tryConsume(ctx.chatKey, Date.now());
+          // 落库：走与"控制台上传的自定义表情"同一条路（addManual 自己校验格式与体积并落盘）
+          const label = String(args.note || '').trim() || prompt;
+          const entry = ctx.stickers.addManual({
+            imageBuffer: buffer,
+            desc: label.slice(0, 40),
+            localNote: `生成的图：${prompt}`.slice(0, 300),
+            tags: ['生成'],
+            usage: revisedPrompt ? `提示词修订：${revisedPrompt}`.slice(0, 300) : ''
+          });
+          return ok({
+            id: entry.id,
+            note: entry.localNote,
+            kind: '已存进表情库',
+            next: '用 send_sticker 传这个 id 就能发出去'
           });
         } catch (error) {
           return err(error?.message ?? error);

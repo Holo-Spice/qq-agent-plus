@@ -151,3 +151,47 @@ test('脱敏链：循环引用标 [circular] 且不丢记录；error 走 redactT
   assert.ok(rec.error.includes('[redacted]'));
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// ── 2026-09-30 审查 P1：审计会把**整份配置**落盘（config.update），而原来的脱敏只按字段名判，
+//    按值扫（Bearer/sk-…，即 redactText 的规则）又只作用在 error 上。于是用户把凭据填进
+//    api.extraBody / api.thinkingParams（文档推荐的高级逃生口）或自定义 header 时，
+//    明文就会写进 audit-*.jsonl、并被 /api/audit 原样读回。以下用例锁住修复。
+test('审计落盘：字段名不含关键词但值是密钥（extraBody/headers）也必须脱敏', () => {
+  const dir = tmp();
+  const payload = {
+    api: {
+      extraBody: { dskey_credential: 'sk-super-secret-value-1234567890' },
+      thinkingParams: { low: { 'x-api-key': 'sk-another-secret-0987654321' } },
+      headers: { Authorization: 'Bearer sk-bearer-secret-abcdefg' },
+      myToken: 'sk-token-xyz'
+    }
+  };
+  appendAudit({ dir, action: 'config.update', target: 'config', before: payload, after: payload, at: Date.UTC(2026, 9, 2, 12) });
+  const text = readAll(dir);
+  for (const secret of ['sk-super-secret-value-1234567890', 'sk-another-secret-0987654321',
+    'sk-bearer-secret-abcdefg', 'sk-token-xyz']) {
+    assert.ok(!text.includes(secret), `明文密钥不得落盘：${secret.slice(0, 12)}…`);
+  }
+  // 普通文本不受影响（别把脱敏做成一刀切）
+  const dir2 = tmp();
+  appendAudit({ dir: dir2, action: 'x', ok: true, before: { note: '普通文本不受影响' }, at: Date.UTC(2026, 9, 2, 12) });
+  assert.ok(readAll(dir2).includes('普通文本不受影响'));
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(dir2, { recursive: true, force: true });
+});
+
+test('审计落盘：header 类字段名（authorization / x-api-key / cookie）整值脱敏', () => {
+  const dir = tmp();
+  appendAudit({
+    dir, action: 'x', ok: true, at: Date.UTC(2026, 9, 2, 12),
+    before: {
+      headers: { authorization: 'any-secret-1', 'x-api-key': 'any-secret-2', cookie: 'any-secret-3' },
+      auth: 'any-secret-4'
+    }
+  });
+  const text = readAll(dir);
+  for (const s of ['any-secret-1', 'any-secret-2', 'any-secret-3', 'any-secret-4']) {
+    assert.ok(!text.includes(s), `header 类字段的值必须整值脱敏：${s}`);
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+});

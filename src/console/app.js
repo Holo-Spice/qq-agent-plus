@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRouter } from './router.js';
 
-import { asrApiKey, asrAvailable, asrConfigured, asrKeyHost, asrKeySource, asrLocalBin, asrLocalModel, asrSecretId, asrSecretKey, conversationConfigForChat, findWhisperBinSync, getConfig, identityPilotEnabled, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, DATA_DIR, ROOT } from '../core/config.js';
+import { asrApiKey, asrAvailable, asrConfigured, asrKeyHost, asrKeySource, asrLocalBin, asrLocalModel, asrSecretId, asrSecretKey, conversationConfigForChat, findWhisperBinSync, getConfig, identityPilotEnabled, imageGenAvailable, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, DATA_DIR, ROOT } from '../core/config.js';
 import { tokenSaverEffective } from '../core/token-saver.js';
 import { budgetStatus } from '../core/budget.js';
 import { sanitizeConfigSecrets } from '../core/secret-keys.js';
@@ -29,6 +29,7 @@ import { GroupGameManager } from '../features/group-game.js';
 import { ReminderStore } from '../core/reminders.js';
 import { listModels, chatCompletion, resolveApiKey, cachedTokensOfUsage } from '../llm/llm.js';
 import { synthesizeSpeech } from '../llm/tts.js';
+import { generateImage, resolveImageGenAuth } from '../llm/image-gen.js';
 import { TTS_SERVICES, ttsServiceById, ttsServiceOfBaseUrl, ttsKeyServices, ttsServiceOf, ttsKeyFor } from '../llm/tts-presets.js';
 import { resolveOfficialPrice, listOfficialPrices, listModelAliases, isPeakHour, priceAt, resolveModelPrice, costModeOf, modelLabel, splitModelLabel, vendorOfConfig, UNKNOWN_VENDOR } from '../pricing/model-prices.js';
 import { initPriceFeed, refreshPriceFeed, priceFeedStatus } from '../pricing/price-feed.js';
@@ -1312,6 +1313,9 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       hasApiKey: Boolean(cfgNow.tts?.apiKey || Object.keys(cfgNow.tts?.keys || {}).length),
       currentService: ttsServiceOf(cfgNow.tts)?.id || ''
     };
+    // imageGen 的 Key 同样被 sanitize 删掉了：给界面一个"存过没有"的派生标志
+    // （hasApiKey 由 walk 自动生成，这里的 available 是"能不能真的画"）
+    safe.imageGen = { ...(safe.imageGen || {}), available: imageGenAvailable(cfgNow) };
     return safe;
   }
 
@@ -2461,6 +2465,43 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     }
   });
 
+  // 显示「图片生成」当前生效的明文 Key（与 TTS/模型 API 同一道守卫：本机控制台或带令牌）。
+  // 2026-09-30 审查：界面上有「显示」按钮却没有这条路由，点了没反应、已存的 Key 读不回来。
+  router.add('GET', '/api/imagegen/key', async (req, res) => {
+    if (!keyEndpointAllowed(req)) return json(res, 403, { ok: false, error: '只能在控制台里查看密钥' });
+    const cfgNow = getConfig();
+    const auth = resolveImageGenAuth({
+      imageGen: cfgNow.imageGen,
+      api: cfgNow.api,
+      apiKey: resolveApiKey(cfgNow)
+    });
+    return json(res, 200, { ok: true, apiKey: auth.key || '', reused: auth.reused === true, error: auth.error || '' });
+  });
+
+  router.add('POST', '/api/imagegen/test', async (req, res) => {
+    const cfgNow = getConfig();
+    try {
+      const body = await readBody(req);
+      const prompt = String(body.prompt ?? '').trim().slice(0, 200) || '一只橘猫戴着草帽坐在海边，卡通风格';
+      if (cfgNow.imageGen?.enabled !== true) return json(res, 400, { ok: false, error: '图片生成未启用（勾上并保存后再试）' });
+      if (!imageGenAvailable(cfgNow)) return json(res, 400, { ok: false, error: '还没配好：至少要填模型；地址留空表示与聊天模型同域' });
+      // 试画不落库、不占闸门（它是"验证配置对不对"，不是真用）；计费由服务商算，所以提示里写明。
+      const { buffer } = await generateImage({
+        cfg: cfgNow,
+        apiCfg: cfgNow.api,
+        apiKey: resolveApiKey(cfgNow),
+        prompt
+      });
+      return json(res, 200, {
+        ok: true,
+        bytes: buffer.length,
+        image: `data:image/png;base64,${buffer.toString('base64')}`
+      });
+    } catch (error) {
+      return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+
   router.add('POST', '/api/model-prices/probe', async (req, res) => {
     const cfgNow = getConfig();
     const body = await readBody(req);
@@ -2880,6 +2921,12 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       }
       const submittedKey = String(patch.tts.apiKey ?? '').trim();
       if (!submittedKey || submittedKey === '******') delete patch.tts.apiKey;
+    }
+    // imageGen 的 Key：与 tts 同款语义（留空/掩码 = 保持原值）。前端已按此过滤，
+    // 这里再兜一层 —— 配置是外部可编辑的，别让一次手写的空串把 Key 冲掉。
+    if (patch?.imageGen && typeof patch.imageGen === 'object') {
+      const submitted = String(patch.imageGen.apiKey ?? '').trim();
+      if (!submitted || submitted === '******') delete patch.imageGen.apiKey;
     }
     // 人设真的改了就打一个时间戳：提示词据此在接下来 24 小时里提醒模型
     // "历史里的旧口癖/自称不作数"（换卡后它会被自己的旧发言锚住，实测能锚一天以上）

@@ -18,6 +18,7 @@ import {
   friendProposalEnabled,
   getConfig,
   identityPilotEnabled,
+  imageGenAvailable,
   promptFriendProposalEnabled,
   slangPilotEnabled,
   storeConfigForChat,
@@ -1431,12 +1432,15 @@ export class Orchestrator {
     // 模型自安排唤醒的独立开关：关掉后连工具带提示词一起摘掉，
     // 否则模型还会去调一个"安排了也不会开口"的工具（生成一串假的"我到点再说"）。
     const selfWakeEnabled = cfg.proactive?.selfWakeEnabled !== false;
+    // 图片生成按张计费：没开/没配就不注入工具，否则模型会去调一个必然失败的画图工具
+    const imageGenEnabled = imageGenAvailable(cfg);
     const toolDefs = this.toolDefs.filter((d) => {
       if (!canSeeImages && (d.name === 'get_message_images' || d.name === 'get_sticker_image')) return false;
       if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
       if (!selfWakeEnabled && d.name === 'schedule_wake') return false;
       // ASR 按量计费：开关关掉或没配 key 就不注入，避免模型调用必失败；也防误配置导致意外计费
       if (!asrEnabled && d.name === 'get_message_audio') return false;
+      if (!imageGenEnabled && d.name === 'generate_image') return false;
       if (d.feature === 'identityPilot' && !identityAvailable) return false;
       if (d.feature === 'friendProposal' && !friendProposalAvailable) return false;
       return true;

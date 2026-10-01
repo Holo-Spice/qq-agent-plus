@@ -47,6 +47,10 @@ test('current base tool inventory has an explicit scheduler classification', () 
   assert.equal(classes.get('web_search'), 'parallel-read');
   assert.equal(classes.get('get_message_detail'), 'parallel-read');
   assert.equal(classes.get('finish'), 'terminal');
+
+  // 画图：按张计费 + 外部服务 → 不能并发预启动；结果（条目 id）决定下一步（要拿它去发），
+  // 所以既不是 parallel-read 也不是"可与 finish 同轮"的 ordered-action。
+  assert.equal(classes.get('generate_image'), 'ordered-read');
 });
 
 test('enabled experiment strongly guides same-round finish without mutating base schemas', () => {

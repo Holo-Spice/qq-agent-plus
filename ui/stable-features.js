@@ -237,49 +237,29 @@
     loadAdmin();
   }
 
-  function wrapHtmlRenderer(name, transform) {
-    const original = window[name];
-    if (typeof original !== 'function' || original.__stableFeatureWrapped) return false;
-    const wrapped = function (...args) {
-      return transform(original.apply(this, args), args);
-    };
-    wrapped.__stableFeatureWrapped = true;
-    window[name] = wrapped;
-    return true;
-  }
-
-  function wrapDomRenderer(name, after) {
-    const original = window[name];
-    if (typeof original !== 'function' || original.__stableFeatureWrapped) return false;
-    const wrapped = function (...args) {
-      const result = original.apply(this, args);
-      after(args);
-      return result;
-    };
-    wrapped.__stableFeatureWrapped = true;
-    window[name] = wrapped;
-    return true;
-  }
-
+  // 钩子经 QARegistry 注册（改进方案 §11 C2「去插件化」）：原先这里是 `window[name] = wrapped`，
+  // 只在"脚本顺序刚好、且双方都还是 classic script"时成立 —— ES module 的绑定只读、
+  // 模块作用域也不挂 window，任何一步模块化都会让覆盖**静默失效**。改成显式注册后，
+  // 漏挂/顺序错会当场看得出来（钩子没生效），而不是悄悄不生效。
   // Remove promoted/retired controls before the experiment section reaches DOM.
-  wrapHtmlRenderer('renderExperimentalSettingsSection', stripPromotedExperimentHtml);
+  QARegistry.onTransform('renderExperimentalSettingsSection', (html) => stripPromotedExperimentHtml(html));
 
   // Settings pages are rebuilt on every section switch, so install the one
   // global administrator entry exactly once per render.
-  wrapDomRenderer('renderSettings', () => {
+  QARegistry.onAfter('renderSettings', () => {
     installGlobalAdminPanel();
     for (const selector of legacyOwnerInputs) replaceLegacyOwnerInput(selector);
     syncAdminInputs();
   });
 
   // Feature pages have their own render paths outside Settings.
-  wrapDomRenderer('renderIdentityFeaturePage', () => normalizeFeaturePage('#identity-page'));
-  wrapDomRenderer('renderFriendFeaturePage', () => normalizeFeaturePage('#friend-page'));
-  wrapDomRenderer('renderIncidentFeaturePage', () => normalizeFeaturePage('#incident-page'));
+  QARegistry.onAfter('renderIdentityFeaturePage', () => normalizeFeaturePage('#identity-page'));
+  QARegistry.onAfter('renderFriendFeaturePage', () => normalizeFeaturePage('#friend-page'));
+  QARegistry.onAfter('renderIncidentFeaturePage', () => normalizeFeaturePage('#incident-page'));
 
   normalizeNavigation();
   // Normalize any content that was rendered synchronously before this script
-  // loaded. No observer is installed; future updates go through wrapped renderers.
+  // loaded. No observer is installed; future updates go through the registry hooks.
   normalizeFeaturePage('#identity-page');
   normalizeFeaturePage('#friend-page');
   normalizeFeaturePage('#incident-page');

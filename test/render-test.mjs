@@ -140,7 +140,7 @@ try {
   const ctx = vm.createContext(sandbox);
   // core 两个共享内核文件必须在 app.js 之前进同一沙箱（改进方案 #1 A 档：$/$$/esc/api
   // 的单一实现在 ui/core/ 下；app.js 里已删除本地定义，缺了会在运行时 ReferenceError）
-  for (const coreFile of ['ui/core/dom.js', 'ui/core/api.js']) {
+  for (const coreFile of ['ui/core/registry.js', 'ui/core/dom.js', 'ui/core/api.js']) {
     const coreCode = fs.readFileSync(path.join(ROOT, coreFile), 'utf8');
     new vm.Script(coreCode, { filename: coreFile }).runInContext(ctx);
   }
@@ -1115,6 +1115,31 @@ try {
     && !keyedHtml.includes('这项不会生效');
   asrKeyStateOk ? pass++ : fail++;
   console.log('  ' + (asrKeyStateOk ? 'OK   ' : 'FAIL ') + '设置页：没配 Key 时明说"不生效、不产生费用"，配了则显示已配置');
+
+  // 复刻音色提示（2026-09-30 用户反馈）：必须写明"资源会自动切、但要开通后付费音色服务"，
+  // 否则用户看到 45000030 会以为是自己没买音色槽位。
+  const ttsSectionHtml = String(vm.runInContext('renderAsrSection(state.config || {})', ctx) || '');
+  const cloneHintOk = ttsSectionHtml.includes('id="tts-clone-hint"')
+    && ttsSectionHtml.includes('后付费音色服务')
+    && ttsSectionHtml.includes('声音复刻2.0字符版')
+    && ttsSectionHtml.includes('seed-icl-2.0')
+    && ttsSectionHtml.includes('volcano_icl')
+    && ttsSectionHtml.includes('ICL_uranus_')
+    && ttsSectionHtml.includes('不用手改');
+  cloneHintOk ? pass++ : fail++;
+  console.log('  ' + (cloneHintOk ? 'OK   ' : 'FAIL ') + '设置页：复刻音色提示写明资源自动切 + 要开通后付费音色服务');
+
+  // 图片生成（Issue #21）：控件齐全、默认关、闸门默认值在位
+  const imgOk = ttsSectionHtml.includes('id="settings-imagegen"')
+    && ttsSectionHtml.includes('id="cfg-img-enabled"')
+    && !/id="cfg-img-enabled"[^>]*checked/.test(ttsSectionHtml)          // 默认关
+    && ttsSectionHtml.includes('id="cfg-img-baseurl"')
+    && ttsSectionHtml.includes('id="cfg-img-model"')
+    && ttsSectionHtml.includes('id="cfg-img-max"')
+    && ttsSectionHtml.includes('id="img-test-btn"')
+    && ttsSectionHtml.includes('按张计费');
+  imgOk ? pass++ : fail++;
+  console.log('  ' + (imgOk ? 'OK   ' : 'FAIL ') + '设置页：图片生成区块齐全（默认关、含闸门与试画按钮）');
 
   // 界面 → 配置的映射（审查抓到过：保存时 apiKeyProvider 读了个已删掉的元素，
   // 于是新填的 Key 被记成"上一家的"，轻则该用不用、重则把旧 Key 发给别家）
@@ -2467,23 +2492,31 @@ try {
       const cfgNow = JSON.parse(vm.runInContext('JSON.stringify(state.config || {})', ctx));
       return { ok: true, status: 200, json: async () => ({ ok: true, config: cfgNow }), text: async () => '{}' };
     };
-    const cases = [['asr', 'tts'], ['experiments', 'groupGame'], ['groupGame', 'groupGame'], ['moments', 'groupDigest'], ['reminders', 'reminders']];
-    const allKeys = cases.map(([, k]) => k);
+    // 每个页面允许写出的键：asr 页同时管 tts 与 imageGen（都是"语音/生成"这类按量计费项）；
+    // 其余页各自一个。多写 = 越界（读不到 DOM 会写成空值/清空配置）。
+    const cases = [
+      ['asr', ['tts', 'imageGen']],
+      ['experiments', ['groupGame']],
+      ['groupGame', ['groupGame']],
+      ['moments', ['groupDigest']],
+      ['reminders', ['reminders']]
+    ];
+    const allKeys = [...new Set(cases.flatMap(([, keys]) => keys))];
     const results = [];
-    for (const [sec, key] of cases) {
+    for (const [sec, keys] of cases) {
       vm.runInContext(`state.settingsSection = '${sec}';`, ctx);
       posts.length = 0;
       await vm.runInContext('saveConfig({ quiet: true })', ctx);
       const body = posts.length ? posts[posts.length - 1] : {};
-      const has = Object.prototype.hasOwnProperty.call(body, key);
+      const has = keys.every((k) => Object.prototype.hasOwnProperty.call(body, k));
       // 越界也要查：在 A 页保存不该带上 B 页的键（因为它们读不到 DOM，会写成空值/清空配置）
-      const leaked = allKeys.filter((k) => k !== key && Object.prototype.hasOwnProperty.call(body, k));
-      results.push([sec, key, has, leaked.join('/'), Object.keys(body).slice(0, 6).join(',')]);
+      const leaked = allKeys.filter((k) => !keys.includes(k) && Object.prototype.hasOwnProperty.call(body, k));
+      results.push([sec, keys.join('+'), has, leaked.join('/'), Object.keys(body).slice(0, 6).join(',')]);
     }
     const okBranch = results.every(([, , ok, leaked]) => ok && !leaked);
     okBranch ? pass++ : fail++;
     console.log('  ' + (okBranch ? 'OK   ' : 'FAIL ')
-      + '保存分支：asr→tts / experiments→groupGame / moments→groupDigest'
+      + '保存分支：asr→tts+imageGen / experiments→groupGame / moments→groupDigest'
       + (okBranch ? '' : ' -> ' + JSON.stringify(results)));
   }
 
