@@ -115,7 +115,7 @@ its own idempotency and recovery rules.
 `deploy.sh` is the supported installation and update entry point:
 
 1. Validate Linux, paths, tools, source files and service access.
-2. Reuse Node.js 22.13+ with `node:sqlite`, or download a pinned Node archive and
+2. Reuse Node.js 22.19+ with `node:sqlite`, or download a pinned Node archive and
    verify it against the official SHA-256 manifest.
 3. Lock the data directory and snapshot the previous application/config/unit.
 4. Stop the existing service, synchronize source and run reproducible production

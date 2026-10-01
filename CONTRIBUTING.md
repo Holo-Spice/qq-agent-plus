@@ -66,7 +66,7 @@ bash -n deploy.sh deploy-all.sh manage.sh   # 改过 shell 才需要
 
 ## 环境与依赖
 
-- Node **>= 22.13**（`node:sqlite` 内置模块；`.nvmrc` 记着线上版本）。
+- Node **>= 22.19**（`node:sqlite` 内置模块；`.nvmrc` 记着线上版本）。
 - 运行时依赖保持精简（当前 5 个）；开发工具走 `devDependencies`，生产 `npm ci --omit=dev` 不安装，
   自动更新器同样 `--omit=dev`。**测试要能容忍 devDeps 缺失**（缺件自动 skip，不许硬失败）。
 - 提交前 `git status` 确认没把 `data/`、密钥、日志带进来。

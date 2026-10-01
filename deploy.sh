@@ -30,7 +30,7 @@ Options:
   --port PORT            Console port (default: 3210; on updates the port already
                          recorded in config.json is reused)
   --service NAME         systemd user service name (default: qq-agent-linux)
-  --node PATH            Existing Node.js >=22.13 binary
+  --node PATH            Existing Node.js >=22.19 binary
   --import-bridge PATH   Import legacy Bridge config on first install
   --repository URL       Expected origin repository (auto-update passes it; compared
                          against .deployment.json when provided)
@@ -192,9 +192,11 @@ LOCK_OWNED=true
 
 node_ready() {
   [[ -n "$1" && -x "$1" ]] || return 1
+  # 低限 22.19：运行期依赖 undici 8 声明 engines >=22.19（2026-10-01 升级，
+  # Dependabot 的 undici 6→8）；deploy.sh 自己下载的 .runtime 是 22.23.2，不受影响。
   "$1" --input-type=module -e '
     const [major,minor]=process.versions.node.split(".").map(Number);
-    if (major<22 || (major===22 && minor<13)) process.exit(1);
+    if (major<22 || (major===22 && minor<19)) process.exit(1);
     const {DatabaseSync}=await import("node:sqlite");
     new DatabaseSync(":memory:").close();
   ' >/dev/null 2>&1
@@ -224,7 +226,7 @@ if ! node_ready "$NODE_BIN"; then
   rm -rf "$TMP_DIR"
   NODE_BIN="$RUNTIME_DIR/node-v${NODE_VERSION}-linux-${NODE_ARCH}/bin/node"
 fi
-node_ready "$NODE_BIN" || { printf 'Node.js >=22.13 with node:sqlite is required\n' >&2; exit 1; }
+node_ready "$NODE_BIN" || { printf 'Node.js >=22.19 with node:sqlite is required\n' >&2; exit 1; }
 NODE_BIN="$("$NODE_BIN" -p 'process.execPath')"
 [[ "$NODE_BIN" != *[[:space:]%\"]* ]] || { printf 'Node path contains unsupported characters\n' >&2; exit 2; }
 export PATH="$(dirname "$NODE_BIN"):$PATH"

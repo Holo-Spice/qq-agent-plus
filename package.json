@@ -5,7 +5,7 @@
   "description": "Linux QQ group agent (OneBot v11)：分条发言、贴纸系统、主动发言与内置运维命令。",
   "type": "module",
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=22.19.0"
   },
   "scripts": {
     "start": "node src/server.js",
@@ -26,8 +26,8 @@
     "jce": "0.2.3",
     "node-html-parser": "^9.0.4",
     "silk-wasm": "^3.7.1",
-    "undici": "^6.28.0",
-    "ws": "^8.18.0"
+    "undici": "^8.11.2",
+    "ws": "^8.22.0"
   },
   "license": "MIT",
   "author": "sakurawwwxh",

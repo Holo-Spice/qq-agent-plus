@@ -137,7 +137,7 @@ bash deploy.sh \
   nginx 反向代理时目标亦为 `127.0.0.1`，同样无需对外开放。后续更新若不显式传入
   `--host`/`--port`，脚本会沿用 `config.json` 中记录的现值并打印提示，不会退回默认值。
 - **Node 由脚本准备**：找不到合格的 Node 时，脚本会下载并校验 `22.23.2` 至
-  `INSTALL_DIR/.runtime`。要求为 ≥22.13 且 `node:sqlite` 可用（`package.json` 的 `engines`）。
+  `INSTALL_DIR/.runtime`。要求为 ≥22.19 且 `node:sqlite` 可用（`package.json` 的 `engines`）。
 - **首次启动模式**：首次安装以 `observe` 模式启动，机器人不会发言；确认后再执行激活。
 - **GitHub 不可达时**：将 Release 源码包上传并解压，在解压出的目录中执行同一条 `deploy.sh`。
   自动更新依赖 GitHub，网络不通时保留现状并在控制台说明原因。

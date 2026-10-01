@@ -5,7 +5,7 @@
 
 ## 怎么跑
 
-需要一个 node：部署自带的 `.runtime/node-*/bin/node`，或系统里 **node >= 22.13**（见 `package.json` 的 `engines`）。
+需要一个 node：部署自带的 `.runtime/node-*/bin/node`，或系统里 **node >= 22.19**（见 `package.json` 的 `engines`）。
 
 在仓库根目录执行：
 
