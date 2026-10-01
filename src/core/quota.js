@@ -3,6 +3,9 @@
 //
 // 语义约定：
 // - tryConsume 记录一次；peek 只查不记（调用方想"先判闸、成功后才扣"时用它）；
+//   **并发下要封顶就得用"事前 tryConsume + 失败 refund"**：peek→干活→consume 的组合里，
+//   两个并发调用会双双通过 peek（2026-10-01 审查，生图配额就踩在这里）；
+// - refund：撤掉指定时间戳那一次记录（与 tryConsume 配对用）；
 // - 限值非有限 / ≤0 → 视为不设限（Infinity）——与 #8 预算"0 不当封锁"同口径；
 // - 窗口滑动：只保留 windowMs 内的时间戳（惰性裁剪，无定时器）；
 // - retryAfterMs：最早那次记录滑出窗口还需多久（估算值，用于文案"稍后再试"）。
@@ -57,6 +60,33 @@ export function createQuota({ windowMs = 3600_000, globalMax = Infinity, perChat
     return { ok: true, scope: '', retryAfterMs: 0 };
   }
 
+  /**
+   * 退一次量（tryConsume 的对偶）：把 `at` 那次记录撤掉。
+   *
+   * 用途是"事前原子消费 + 失败退还"：先 tryConsume 把额度**原子**占住（并发下才不会超限），
+   * 真正干活失败时再退回来 —— 既有 peek 的"失败不扣"，又没有 peek 的竞态。
+   * 只撤掉一条与 `at` 相等的记录（各列表里的时间戳可能相同，撤一条即可）。
+   */
+  function refund(chatKey = '', at = 0) {
+    const ts = Number(at);
+    if (!Number.isFinite(ts)) return false;
+    const drop = (list) => {
+      const index = list.indexOf(ts);
+      if (index < 0) return false;
+      list.splice(index, 1);
+      return true;
+    };
+    const key = String(chatKey ?? '');
+    const list = chatTimes.get(key);
+    let removed = false;
+    if (list) {
+      removed = drop(list) || removed;
+      if (!list.length) chatTimes.delete(key);
+    }
+    removed = drop(globalTimes) || removed;
+    return removed;
+  }
+
   function snapshot(now = Date.now()) {
     prune(now);
     const chats = {};
@@ -75,5 +105,5 @@ export function createQuota({ windowMs = 3600_000, globalMax = Infinity, perChat
     if (c !== undefined) cmax = normMax(c);
   }
 
-  return { tryConsume, peek, snapshot, reset, configure };
+  return { tryConsume, peek, refund, snapshot, reset, configure };
 }

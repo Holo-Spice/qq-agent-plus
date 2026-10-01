@@ -1047,3 +1047,108 @@ esac
   const state = readAutoUpdateState(dataDir);
   assert.equal(state.status, 'succeeded');
 });
+
+/**
+ * 一套"什么都不用做"的更新器安装：远端与本地同版本（no-update 立刻收尾），
+ * 因此除了抢锁那一步，跑完是很轻的。用来单独观察锁的行为。
+ */
+function seedIdleUpdater(t, prefix) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const appDir = path.join(root, 'app');
+  const dataDir = path.join(root, 'data');
+  const binDir = path.join(root, 'bin');
+  const revision = 'a'.repeat(40);
+  for (const directory of [appDir, dataDir, binDir]) fs.mkdirSync(directory, { recursive: true });
+  fs.mkdirSync(autoUpdatePaths(dataDir).repository, { recursive: true });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({
+    autoUpdate: {
+      enabled: true,
+      ownerUin: '900001',
+      repository: 'https://github.com/sakurawwwxh/qq-agent-plus.git',
+      branch: 'main',
+      intervalHours: 6
+    },
+    server: { host: '127.0.0.1', port: 3210, token: 'token' }
+  }));
+  fs.writeFileSync(path.join(dataDir, 'deployed-revision'), `${revision}\n`);
+  writeDeployment(appDir, dataDir);
+  fs.writeFileSync(path.join(binDir, 'git'), `#!/bin/sh
+args="$*"
+case "$args" in
+  *" remote") printf '%s\\n' 'origin' ;;
+  *"remote set-url origin"*) ;;
+  *" ls-remote "*) printf '%s\\t%s\\n' '${revision}' 'refs/heads/main' ;;
+  *" fetch "*) ;;
+  *" rev-parse "*) printf '%s\\n' '${revision}' ;;
+  *) printf 'unexpected git command: %s\\n' "$args" >&2; exit 9 ;;
+esac
+`, { mode: 0o700 });
+  return { root, appDir, dataDir, binDir, revision };
+}
+
+// ── 2026-10-01 审查（第五轮）：自动更新抢锁的两处竞态 ──────────────────────────
+// 1) 原来只有 `pid > 0` 才去检查属主活没活，pid 读不出来（空文件 / 写了一半被杀 / 坏 JSON）
+//    就直接 unlink + 重建 —— 等于把"刚 open('wx') 还没写 JSON"的并发进程的锁抢走。
+// 2) 接管的 unlink → open('wx') 不是原子对，两个进程同时判"陈旧"会互相删掉对方刚建的锁，
+//    双双拿到"唯一"锁。现在先抢一个 .takeover 互斥文件，只有赢家动手；互斥本身带陈旧兜底，
+//    否则持有者被 SIGKILL 之后，自动更新会永久卡在"有人在接管"。
+
+// 这两条在 Windows 上跳过：假 git 桩靠 PATH 里塞一个无扩展名的 sh 脚本，Windows 既认 ':' 分隔符
+// 也不认这种脚本，和本文件另三条需要桩 git 的用例一样在 win32 上跑不通（那三条在 fail-base.txt 里）。
+const posixOnly = { skip: process.platform === 'win32' ? '需要 POSIX 假 git 桩（在 Linux 服务器上跑）' : false };
+
+test('自动更新锁：读不出 pid 的锁在宽限期内不被抢，做旧后可以接管', posixOnly, async (t) => {
+  const { appDir, dataDir, binDir } = seedIdleUpdater(t, 'qq-update-stale-');
+  const github = await startFakeGitHub({ status: 'identical' });
+  t.after(() => github.close());
+  const env = { QQ_AGENT_GITHUB_API: github.base };
+  const lockFile = autoUpdatePaths(dataDir).lock;
+
+  fs.writeFileSync(lockFile, '');   // 半成品锁：没有 pid
+  const blocked = runUpdater({ appDir, dataDir, binDir, env });
+  assert.equal(blocked.status, 0, `busy 要按 0 退出：${blocked.stderr}`);
+  assert.match(`${blocked.stdout}${blocked.stderr}`, /Another update process is starting/,
+    '刚建好还没写 pid 的锁要当有并发，不能抢');
+  assert.equal(fs.readFileSync(lockFile, 'utf8'), '', '宽限期内不许动这把锁');
+
+  // 同一把空锁做旧：这才像"写到一半被杀"，应当接管 —— 否则一次崩溃就把自动更新永久钉住
+  const ancient = new Date(Date.now() - 10 * 60 * 1000);
+  fs.utimesSync(lockFile, ancient, ancient);
+  const taken = runUpdater({ appDir, dataDir, binDir, env });
+  assert.equal(taken.status, 0, taken.stderr);
+  assert.doesNotMatch(`${taken.stdout}${taken.stderr}`, /Another update process is starting/,
+    '过期空锁必须能被接管');
+  assert.equal(fs.existsSync(lockFile), false, '接管并跑完后释放自己的锁');
+  assert.equal(readAutoUpdateState(dataDir).status, 'no-update');
+});
+
+test('自动更新锁：接管先抢互斥文件；遗留互斥过 5 分钟可被清掉', posixOnly, async (t) => {
+  const { appDir, dataDir, binDir } = seedIdleUpdater(t, 'qq-update-takeover-');
+  const github = await startFakeGitHub({ status: 'identical' });
+  t.after(() => github.close());
+  const env = { QQ_AGENT_GITHUB_API: github.base };
+  const lockFile = autoUpdatePaths(dataDir).lock;
+  const mutex = `${lockFile}.takeover`;
+
+  // 属主已死的旧锁（pid 来自一个刚退出的进程，必死）+ 一把新的互斥文件 → 有人正在接管
+  const dead = spawnSync(process.execPath, ['-e', '']);
+  const staleOwner = { pid: dead.pid, startedAt: Date.now() - 60 * 60 * 1000 };
+  fs.writeFileSync(lockFile, JSON.stringify(staleOwner));
+  fs.writeFileSync(mutex, '');
+  const blocked = runUpdater({ appDir, dataDir, binDir, env });
+  assert.equal(blocked.status, 0, `被互斥挡住也应按 0 退出：${blocked.stderr}`);
+  assert.match(`${blocked.stdout}${blocked.stderr}`, /taking over the lock/,
+    '互斥文件在手时后来者只能退出，不能一起删锁');
+  assert.equal(JSON.parse(fs.readFileSync(lockFile, 'utf8')).pid, staleOwner.pid, '被挡住时不许动旧锁');
+
+  // 互斥文件做旧（持有者被 SIGKILL 的形态）→ 必须能清掉继续，不能永久卡住
+  const ancient = new Date(Date.now() - 10 * 60 * 1000);
+  fs.utimesSync(mutex, ancient, ancient);
+  const taken = runUpdater({ appDir, dataDir, binDir, env });
+  assert.equal(taken.status, 0, taken.stderr);
+  assert.doesNotMatch(`${taken.stdout}${taken.stderr}`, /taking over the lock/,
+    '陈旧的互斥文件必须能被清掉，否则被 SIGKILL 一次就永久卡住');
+  assert.equal(fs.existsSync(lockFile), false, '接管成功并跑完后释放自己的锁');
+  assert.equal(readAutoUpdateState(dataDir).status, 'no-update');
+});

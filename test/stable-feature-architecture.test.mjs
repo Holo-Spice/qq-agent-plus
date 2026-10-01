@@ -17,6 +17,18 @@ test('promoted-feature UI uses render-boundary normalization instead of DOM muta
   assert.match(source, /cfg-global-admin-owner/);
 });
 
+// 2026-10-01 审查：本模块原来手抄了第 6 份配置请求（自己拼 x-console-token、自己判 ok），
+// 于是 401 时拿不到中央处理（弹登录框、收起 loading 壳），令牌常量也各写一份。
+// 现在必须交给共享的 api()。
+test('stable-features 的配置请求走共享 api()，不再自己手抄一份', () => {
+  const source = read('ui/stable-features.js');
+  assert.match(source, /import\s*\{[^}]*\bapi\b[^}]*\}\s*from\s*'\.\/core\/api\.js'/,
+    '要 import 共享的 api()');
+  assert.match(source, /await api\('\/api\/config'/, '配置请求要交给 api()');
+  assert.doesNotMatch(source, /fetch\('\/api\/config'/, '不许自己再拼一份 fetch');
+  assert.doesNotMatch(source, /x-console-token/, '鉴权头由 api() 统一加，本模块里不该再出现');
+});
+
 test('auto update uses global admin once migrated and only falls back for pre-admin legacy files', () => {
   assert.equal(autoUpdateOwner({
     admin: { ownerUin: '12345678' },

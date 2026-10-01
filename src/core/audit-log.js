@@ -108,7 +108,11 @@ export function appendAudit(entry = {}) {
       ...(partial ? { partial: true } : {})
     };
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    fs.appendFileSync(fileFor(dir, ts), `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    const file = fileFor(dir, ts);
+    fs.appendFileSync(file, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    // btrfs 兜底（Issue #11）：appendFileSync 的 mode 只在新建设备节点时生效，已存在的文件不会被改权限。
+    // 本仓其它落盘点都补了这道 chmod，审计日志漏了 —— 而它恰恰装着配置快照、IP 与 UA。
+    try { fs.chmodSync(file, 0o600); } catch { /* 权限设不上不影响审计本身 */ }
     return record;
   } catch (error) {
     try { console.warn('[audit] 写入失败（已忽略）:', error?.message ?? error); } catch { /* 忽略 */ }

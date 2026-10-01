@@ -49,3 +49,47 @@ test('audit-prune 无 --confirm 时拒绝执行（破坏性操作要有闸门）
   assert.ok(fs.existsSync(path.join(dir, 'audit-log', 'audit-202001.jsonl')), '拒绝时不得删除文件');
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// 2026-10-01 审查：qq-agent-backup.service 的五行 Environment= 原先整段是注释（health 与
+// audit-prune 两个单元都带了），于是自定义部署下备份会打包**默认**数据目录、停**默认**服务名 ——
+// 而备份正是"先停服务、打包、再拉起"，打错目录/停错服务是数据安全事故，不是参数没给全。
+// 断言用 ^...$ 多行锚：`# Environment=...` 这种注释行不能算命中（否则原样也能过）。
+test('install-timers --print：备份单元把路径/服务名/保留份数显式带进环境', () => {
+  const rootDir = '/srv/qq-agent-custom';
+  const r = spawnSync(process.execPath, [path.join(repo, 'src/ops.js'), 'install-timers', '--print'], {
+    encoding: 'utf8',
+    cwd: repo,
+    env: {
+      ...process.env,
+      QQ_AGENT_DIR: rootDir,
+      QQ_AGENT_DATA_DIR: `${rootDir}/mydata`,
+      QQ_AGENT_BACKUP_DIR: `${rootDir}/mybackups`,
+      QQ_AGENT_SERVICE: 'qq-agent-custom.service',
+      QQ_AGENT_KEEP: '9',
+    },
+  });
+  const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+  assert.equal(r.status, 0, out);
+
+  const sections = new Map();
+  for (const part of out.split('──────── ').slice(1)) {
+    const [name, ...rest] = part.split(' ────────');
+    sections.set(name.trim(), rest.join(' ────────'));
+  }
+  const backup = sections.get('qq-agent-backup.service') || '';
+  assert.ok(backup.includes('backup --confirm'), `没取到备份单元内容：${out.slice(0, 300)}`);
+
+  const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  for (const line of [
+    `Environment=QQ_AGENT_DIR=${rootDir}`,
+    `Environment=QQ_AGENT_DATA_DIR=${rootDir}/mydata`,
+    `Environment=QQ_AGENT_BACKUP_DIR=${rootDir}/mybackups`,
+    'Environment=QQ_AGENT_SERVICE=qq-agent-custom.service',
+    'Environment=QQ_AGENT_KEEP=9',
+  ]) {
+    assert.ok(
+      new RegExp(`^${escape(line)}$`, 'm').test(backup),
+      `备份单元缺少生效行（注释不算）：${line}`
+    );
+  }
+});

@@ -1782,6 +1782,32 @@ try {
     console.log(`  FAIL  旧架构服务状态文案异常（未部署 ${legacyOffOk} / 已配置 ${legacyOnOk}）`);
   }
 
+  // 更新检查说明要跟着增量刷新走（2026-10-01 审查）：控制中枢的结构只建一次，
+  // 说明文字原先只在首次建模板时写进 DOM，之后 SSE/轮询推来新结论也不会更新。
+  // 这里刻意**不**重置 __hubBuilt —— 走的就是 updateControlHubFields 那条增量路径
+  // （重置了就变成重建模板，这条用例也就测不到东西了）。
+  const firstNote = String(controlBox.querySelector('[data-hub-update-check]')?.textContent || '');
+  vm.runInContext(`state.autoUpdateStatus = ${JSON.stringify({
+    installed: true,
+    enabled: true,
+    busy: false,
+    status: 'no-update',
+    lastCheckAt: Date.now(),
+    updateNotice: { checkedAt: Date.now(), available: false, reason: 'no-release', version: '' }
+  })};`, ctx);
+  ctx.renderControlHub({ services: [] });
+  const secondNote = String(controlBox.querySelector('[data-hub-update-check]')?.textContent || '');
+  const updateNoteSyncedOk =
+    !firstNote.includes('仓库尚未发布')
+    && secondNote.includes('仓库尚未发布新的 Release');
+  if (updateNoteSyncedOk) {
+    pass++;
+    console.log('  OK    更新检查说明随增量刷新更新（不是只在首次建模板时写一次）');
+  } else {
+    fail++;
+    console.log(`  FAIL  更新检查说明没跟着刷新（首次「${firstNote.slice(0, 20)}」→ 之后「${secondNote.slice(0, 20)}」）`);
+  }
+
   // 更新进度行（2026-09-22 反馈：点「立即更新」后提示框不关、也没有任何进度显示）：
   // 运行中显示阶段与耗时；排队阶段优先看 status（phase 是上一轮残留）；跑完隐藏并清空。
   vm.runInContext(`state.autoUpdateStatus = ${JSON.stringify({

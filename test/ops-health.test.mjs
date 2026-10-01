@@ -202,3 +202,44 @@ test('readOwnerUin：admin 一节存在时是唯一真相，老字段只在无 a
   assert.equal(readOwnerUin({ admin: { ownerUin: '' }, autoUpdate: { ownerUin: '99999' } }), '');
   assert.equal(readOwnerUin({ autoUpdate: { ownerUin: '99999' } }), '99999');
 });
+
+// 2026-10-01 审查：两个本机探测必须带超时。原来交给 undici 的默认上限（约 300 秒），
+// 控制台"接受连接但不响应"时一轮巡检就被拖住整个窗口 —— 而健康定时器就是 5 分钟一次，
+// 巡检会自己叠在一起排不上。变异对照：把 signal 去掉 → 桩走"没传超时信号"分支，断言全红。
+test('巡检：探测带超时，挂死的服务拖不住整轮', async () => {
+  const dir = makeDataDir();
+  // 桩：像真实 fetch 一样尊重 signal；没有 signal 就当"永远不响应"（1.2 秒后报错收场）
+  // 兜底计时器必须是 **ref 的**：AbortSignal.timeout 自带的定时器是 unref 的，
+  // 若桩里只有它，事件循环会被抽空、node:test 判 cancelledByParent（Linux 实测踩到）。
+  const hangingFetch = (_url, init = {}) => new Promise((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) {
+      setTimeout(() => reject(new Error('没有拿到 AbortSignal')), 1200);
+      return;
+    }
+    const guard = setTimeout(() => reject(new Error('既没中止也没超时')), 5000);
+    const onAbort = () => { clearTimeout(guard); reject(signal.reason ?? new Error('aborted')); };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  });
+  const started = Date.now();
+  const r = await runHealthCheck({
+    dataDir: dir, mode: 'observe', fetchImpl: hangingFetch, fetchTimeoutMs: 60, statfs: okStatfs, notify: null
+  });
+  const elapsed = Date.now() - started;
+
+  for (const name of ['console-healthz', 'onebot-status']) {
+    const check = r.checks.find((c) => c.name === name);
+    assert.equal(check.ok, false, `${name} 挂死时必须判失败`);
+    assert.ok(
+      !/没有拿到 AbortSignal|既没中止也没超时/.test(check.detail),
+      `${name} 的探测必须带 AbortSignal：${check.detail}`
+    );
+    assert.match(check.detail, /abort/i, `${name} 的失败原因应是被中止：${check.detail}`);
+  }
+  // 两个探测各 60ms 上限；放宽到 1 秒只为避开 CI 抖动，仍然远小于 undici 的默认上限
+  assert.ok(elapsed < 1000, `整轮巡检不该被挂死服务拖住，实测 ${elapsed}ms`);
+  assert.equal(r.healthy, false);
+  assert.equal(r.code, 1);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

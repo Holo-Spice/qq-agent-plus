@@ -9,6 +9,10 @@ import { openDatabase } from './sqlite.js';
 const OUTBOUND_STALE_MS = 6 * 60 * 60 * 1000;   // 出站水位：6 小时没有任何自己发的消息＝可疑
 const DISK_MIN_BYTES = 1024 * 1024 * 1024;       // 磁盘余量：< 1GB 报警
 const NOTIFY_AFTER_STREAK = 3;                   // 连续失败到第 3 次才通知
+// 两个本机探测必须带超时（2026-10-01 审查）：原来一次 fetch 用 undici 的默认上限（约 5 分钟），
+// 控制台半死不活（接受连接但不响应）时，一轮巡检会被它拖住整个超时窗口 ——
+// 而 qq-agent-health.timer 是 5 分钟一次，等于巡检自己叠在一起排不上。
+const FETCH_TIMEOUT_MS = 10 * 1000;
 
 function loadState(dataDir) {
   try {
@@ -44,16 +48,20 @@ export async function runHealthCheck(opts = {}) {
     outboundStaleMs = OUTBOUND_STALE_MS,
     notify = null,
     fetchImpl = globalThis.fetch,
+    fetchTimeoutMs = FETCH_TIMEOUT_MS,
     statfs = null,
     now = Date.now(),
   } = opts;
 
   const checks = [];
   const add = (name, ok, detail = '') => checks.push({ name, ok, detail });
+  // AbortSignal.timeout 覆盖整次请求（含读 body）：挂死的服务在 fetchTimeoutMs 内必被中止，
+  // 巡检不会为它多等一个 undici 默认超时。
+  const probeSignal = () => AbortSignal.timeout(fetchTimeoutMs);
 
   // ① 控制台 /healthz
   try {
-    const res = await fetchImpl(`http://127.0.0.1:${consolePort}/healthz`);
+    const res = await fetchImpl(`http://127.0.0.1:${consolePort}/healthz`, { signal: probeSignal() });
     add('console-healthz', res.ok, `HTTP ${res.status}`);
   } catch (error) {
     add('console-healthz', false, error?.message ?? String(error));
@@ -63,7 +71,7 @@ export async function runHealthCheck(opts = {}) {
   try {
     const headers = { 'content-type': 'application/json' };
     if (onebotToken) headers.authorization = `Bearer ${onebotToken}`;
-    const res = await fetchImpl(`http://127.0.0.1:${onebotHttpPort}/get_status`, { method: 'POST', headers, body: '{}' });
+    const res = await fetchImpl(`http://127.0.0.1:${onebotHttpPort}/get_status`, { method: 'POST', headers, body: '{}', signal: probeSignal() });
     const data = await res.json().catch(() => ({}));
     add('onebot-status', res.ok && data?.status === 'ok', res.ok ? `retcode=${data?.retcode ?? '?'}` : `HTTP ${res.status}`);
   } catch (error) {

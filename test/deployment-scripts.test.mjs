@@ -45,6 +45,25 @@ test('deploy.sh：只有"属主已死且锁确实超过 5 分钟"才接管陈旧
   assert.doesNotMatch(source, /lock_owner_alive && \[\[ -z "\$\(find/, '不许再用 -z 判陈旧');
 });
 
+// 2026-10-01 审查：deploy.sh 三处收口 —— 路径嵌套要双向都拒、下载 Node 的临时目录要进 EXIT trap、
+// 接管陈旧锁要过一道互斥（否则两个并发部署会互相删锁、双双往下走）。
+test('deploy.sh：路径嵌套双向都拒、TMP_DIR 进 EXIT trap、抢锁走互斥', () => {
+  const source = fs.readFileSync(path.join(repo, 'deploy.sh'), 'utf8');
+  // 正向：安装目录在源码仓库里
+  assert.match(source, /"\$INSTALL_DIR" == "\$ROOT\/"\* \]\]/);
+  // 反向：源码仓库在安装目录里 —— rsync --delete 会把 data/、node_modules/ 连源码目录一起清掉
+  assert.match(source, /"\$ROOT" == "\$INSTALL_DIR\/"\* \]\]/);
+  assert.match(source, /The source repository must not be nested inside the installation path/);
+  // 下载 Node 失败时 set -e 直接退出，临时目录必须由 EXIT trap 清（原来只在成功路径 rm）
+  assert.match(source, /^TMP_DIR=""$/m, 'TMP_DIR 要先声明：set -u 下 trap 引用未定义变量会报错');
+  assert.match(source, /if \[\[ -n "\$TMP_DIR" \]\]; then rm -rf -- "\$TMP_DIR"; fi/,
+    'TMP_DIR 必须挂在 EXIT trap 的清理里');
+  assert.match(source, /TAKEOVER_DIR="\$LOCK_DIR\.takeover"/);
+  assert.match(source, /if mkdir "\$TAKEOVER_DIR" 2>\/dev\/null; then/,
+    '抢锁前先抢互斥（mkdir 是原子的），只有赢家去删锁重建');
+  assert.match(source, /rm -rf -- "\$TAKEOVER_DIR"/, '互斥要跟着 trap 一起收');
+});
+
 // Issue #5（2026-09-22）：国内服务器拉不到 Docker Hub，脚本只报「after 3 attempts」就退出，
 // 用户不知道还能换镜像站。这组断言守住三件事：认用户指定的镜像站、不替用户默认选第三方镜像站、
 // 失败时给可操作的指引。

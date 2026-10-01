@@ -1849,13 +1849,16 @@ Description=QQ Agent data weekly backup
 
 [Service]
 Type=oneshot
+# 显式带路径：ops.js 的默认值可能与本机部署不一致（本单元要在无人值守下自足）。
+# 2026-10-01 审查：这五行原先是注释，于是自定义部署下备份会打包错误的目录、
+# 停错服务（QQ_AGENT_SERVICE 默认 qq-agent-linux.service）；备份会停服务再拉起，
+# 打错目录 / 停错服务都是数据安全事故，不是"参数没给全"。
+Environment=QQ_AGENT_DIR=${cfg.rootDir}
+Environment=QQ_AGENT_DATA_DIR=${cfg.dataDir}
+Environment=QQ_AGENT_BACKUP_DIR=${cfg.backupDir}
+Environment=QQ_AGENT_SERVICE=${serviceName}
+Environment=QQ_AGENT_KEEP=${cfg.keep}
 ExecStart=${nodeBin} ${opsPath} backup --confirm
-# 默认部署根目录 /data/qq-agent，备份输出到 $HOME/qq-agent/backups，保留 4 份：
-# Environment=QQ_AGENT_DIR=${cfg.rootDir}
-# Environment=QQ_AGENT_DATA_DIR=${cfg.dataDir}
-# Environment=QQ_AGENT_BACKUP_DIR=${cfg.backupDir}
-# Environment=QQ_AGENT_SERVICE=${serviceName}
-# Environment=QQ_AGENT_KEEP=${cfg.keep}
 `;
   const backupTimer = `[Unit]
 # 每周日凌晨 4:10 备份一次数据目录；关机错过会在下次开机补跑（Persistent=true）。

@@ -772,13 +772,18 @@ function updateUsagePage(stats, st, prices) {
   set('runs', t.runs || 0);
   set('runs-sub', `今日 ${today.runs ?? 0} 次`);
   // 搜索次数：只列数量，不参与成本计算（搜索通常是资源包或免费的）
+  // 主数字 searchCount 是**联网动作总数**（服务端把 web_search 与 web_fetch 一起记进 webSearchCount），
+  // 所以副标题给的是拆分。原来两个分支写成同一句字面量（死逻辑，2026-10-01 审查）：
+  // 真正要区分的是"搜了没抓" / "抓了没搜" / "两者都有"——抓页要下正文、更占上下文。
   const searches = Number(stats?.searchCount) || 0;
+  const searched = Number(stats?.toolCounts?.web_search) || 0;
+  const fetched = Number(stats?.toolCounts?.web_fetch) || 0;
   set('search', fmtTok(searches));
-  set('search-sub', searches
-    ? (Number(stats?.toolCounts?.web_search) || 0) + (Number(stats?.toolCounts?.web_fetch) || 0) === searches
-      ? '联网搜索 + 抓网页'
-      : '联网搜索 + 抓网页'
-    : '本区间没有联网');
+  set('search-sub', !searches
+    ? '本区间没有联网'
+    : (searched && fetched
+      ? `搜索 ${fmtTok(searched)} 次 + 抓网页 ${fmtTok(fetched)} 次`
+      : (searched ? '只做了联网搜索（没抓网页）' : '只抓了网页（没走搜索）')));
   set('prompt', fmtTok(t.promptTokens));
   set('prompt-sub', `输出 ${fmtTok(t.completionTokens)}`);
   set('rate', `${((t.cacheHitRate || 0) * 100).toFixed(1)}%`);

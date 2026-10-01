@@ -7,6 +7,7 @@
 
 import { QARegistry } from './core/registry.js';
 import { state } from './core/state.js';
+import { api } from './core/api.js';
 (function installStableFeatureUi() {
   const promotedExperimentControls = [
     '#cfg-identity-pilot-enabled',
@@ -43,17 +44,13 @@ import { state } from './core/state.js';
     }
   }
 
+  // 走共享的 api()（ui/core/api.js）：这里原来是它的第 6 份手抄（自己拼 header、自己判 ok），
+  // 于是拿不到中央的 401 处理（弹登录框 + 收起 loading 壳），令牌常量也各写一份（2026-10-01 审查）。
   async function configRequest(method = 'GET', body = null) {
-    const response = await fetch('/api/config', {
+    const data = await api('/api/config', {
       method,
-      headers: {
-        'content-type': 'application/json',
-        'x-console-token': 'qq-agent-console'
-      },
       ...(body ? { body: JSON.stringify(body) } : {})
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
     return data.config || data;
   }
 

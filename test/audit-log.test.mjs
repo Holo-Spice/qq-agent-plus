@@ -70,6 +70,22 @@ test('文件权限：目录 0700、文件 0600（win32 跳过）', { skip: proce
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+// 2026-10-01 审查（第五轮）：上面那条只覆盖"新建文件"这一条路 —— appendFileSync 的 mode 只在
+// 创建时生效，已存在的文件不会被改权限（btrfs/旧版本留下的 0644 会一直留着）。这条锁住兜底 chmod。
+// 变异对照：删掉 appendAudit 里的 chmodSync → 本条必红（0644 保持不动）。
+test('文件已存在且权限宽松（0644）时追加写会收紧回 0600（win32 跳过）', { skip: process.platform === 'win32' }, () => {
+  const dir = tmp();
+  const file = path.join(dir, 'audit-202606.jsonl');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, '{"action":"pre"}\n');
+  fs.chmodSync(file, 0o644);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o644, '前置条件：文件确实是宽松权限（否则本条测不到东西）');
+  appendAudit({ dir, action: 'after-chmod', ok: true, at: Date.UTC(2026, 5, 6, 12) });
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600, '追加写后必须把权限收紧回 0600');
+  assert.ok(fs.readFileSync(file, 'utf8').includes('after-chmod'), '内容照常追加（收紧权限不影响写入）');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('queryAudit：新→旧分页、before 游标、limit 硬上限 500', () => {
   const dir = tmp();
   const base = Date.UTC(2026, 6, 1, 12);

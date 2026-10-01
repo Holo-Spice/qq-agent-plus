@@ -180,3 +180,61 @@ test('守卫：地址指向别家却只填了模型 Key → 拒绝并说明原�
     updateConfig({ imageGen: { enabled: true, model: 'gpt-image-1', baseUrl: '', maxPerHour: 1 } });
   }
 });
+
+// 并发封顶（2026-10-01 审查）：peek → 生成 → tryConsume 的组合在并发下会双双通过 peek，
+// 上限被突破且超限那张照样计费。现在是"事前原子消费 + 失败退还"。
+test('并发两张只能出一张（maxPerHour=1 时闸门必须原子）', async () => {
+  const { updateConfig } = await import('../src/core/config.js');
+  updateConfig({ imageGen: { enabled: true, model: 'gpt-image-1', baseUrl: '', maxPerHour: 1 } });
+  resetImageQuotaForTest();
+  const realFetch = globalThis.fetch;
+  let calls = 0;
+  let release = null;
+  const gatePromise = new Promise((resolve) => { release = resolve; });
+  globalThis.fetch = async () => {
+    calls += 1;
+    await gatePromise;   // 卡住提供方：两个调用都先走到闸门，再一起放行
+    return { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ b64_json: PNG.toString('base64') }] }) };
+  };
+  try {
+    const f1 = context();
+    const f2 = context();
+    const first = tool('generate_image').execute(f1.ctx, { prompt: '并发甲' });
+    const second = tool('generate_image').execute(f2.ctx, { prompt: '并发乙' });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    release();
+    const [a, b] = await Promise.all([first, second]);
+    const okCount = [a, b].filter((r) => r.isError === undefined).length;
+    assert.equal(okCount, 1, `最多只能出一张（拿到 ${okCount} 张）`);
+    const refused = [a, b].find((r) => r.isError);
+    assert.match(refused.content, /画图额度用完了/);
+    assert.equal(calls, 1, '被拒的那次不能真的发请求（按张计费）');
+  } finally {
+    globalThis.fetch = realFetch;
+    updateConfig({ imageGen: { enabled: true, model: 'gpt-image-1', baseUrl: '', maxPerHour: 1 } });
+  }
+});
+
+test('生成失败会把预扣的额度退回来（失败不白花额度）', async () => {
+  const { updateConfig } = await import('../src/core/config.js');
+  updateConfig({ imageGen: { enabled: true, model: 'gpt-image-1', baseUrl: '', maxPerHour: 1 } });
+  resetImageQuotaForTest();
+  const realFetch = globalThis.fetch;
+  let attempt = 0;
+  globalThis.fetch = async () => {
+    attempt += 1;
+    if (attempt === 1) return { ok: false, status: 500, text: async () => 'provider down' };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ b64_json: PNG.toString('base64') }] }) };
+  };
+  try {
+    const f1 = context();
+    const failed = await tool('generate_image').execute(f1.ctx, { prompt: '第一次会失败' });
+    assert.equal(failed.isError, true, '提供方 500 应当报错');
+    const f2 = context();
+    const retry = await tool('generate_image').execute(f2.ctx, { prompt: '重试应当放行' });
+    assert.equal(retry.isError, undefined, `失败不该吃掉额度（第二次被拒了）：${retry.content}`);
+  } finally {
+    globalThis.fetch = realFetch;
+    updateConfig({ imageGen: { enabled: true, model: 'gpt-image-1', baseUrl: '', maxPerHour: 1 } });
+  }
+});

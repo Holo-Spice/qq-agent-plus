@@ -541,38 +541,48 @@ export function buildToolDefs() {
           const prompt = String(args.prompt ?? '').trim();
           if (!prompt) return err('prompt 不能为空');
           if (prompt.length > MAX_PROMPT_CHARS) return err(`画面描述太长了（≤${MAX_PROMPT_CHARS} 字），说短一点`);
-          // 按张计费：先查闸门再生成，超限直接拒（别生成完才发现不该花这笔钱）
+          // 按张计费：**事前原子消费**再生成 —— 这是唯一一道成本闸门，并发下必须封顶。
+          // 以前是 peek → 生成 → tryConsume（且忽略返回值）：两个并发轮次（默认 maxConcurrentRuns=2）
+          // 会双双通过 peek，各生成一张，上限被突破且超限那张照样计费（2026-10-01 审查）。
+          // 用法与 asr 的 consumeAsrQuota 一致；失败/落库失败再 refund 退回（失败不扣）。
           // 每次读配置：界面上改上限后不必重启就生效
           imageQuota.configure({ globalMax: imageGenMaxPerHour(cfg), perChatMax: Infinity });
-          const gate = imageQuota.peek(ctx.chatKey, Date.now());
+          const reservedAt = Date.now();
+          const gate = imageQuota.tryConsume(ctx.chatKey, reservedAt);
           if (!gate.ok) {
             return err(gate.scope === 'chat'
               ? '本会话的画图额度用完了（每小时有上限），过一会儿再画'
               : '画图额度用完了（全局每小时有上限，这是按张计费的）');
           }
-          const { buffer, revisedPrompt } = await generateImage({
-            cfg,
-            apiCfg: cfg.api,
-            apiKey: resolveApiKey(cfg),
-            prompt,
-            signal: ctx.signal
-          });
-          imageQuota.tryConsume(ctx.chatKey, Date.now());
-          // 落库：走与"控制台上传的自定义表情"同一条路（addManual 自己校验格式与体积并落盘）
-          const label = String(args.note || '').trim() || prompt;
-          const entry = ctx.stickers.addManual({
-            imageBuffer: buffer,
-            desc: label.slice(0, 40),
-            localNote: `生成的图：${prompt}`.slice(0, 300),
-            tags: ['生成'],
-            usage: revisedPrompt ? `提示词修订：${revisedPrompt}`.slice(0, 300) : ''
-          });
-          return ok({
-            id: entry.id,
-            note: entry.localNote,
-            kind: '已存进表情库',
-            next: '用 send_sticker 传这个 id 就能发出去'
-          });
+          let buffer; let revisedPrompt;
+          try {
+            ({ buffer, revisedPrompt } = await generateImage({
+              cfg,
+              apiCfg: cfg.api,
+              apiKey: resolveApiKey(cfg),
+              prompt,
+              signal: ctx.signal
+            }));
+            // 落库：走与"控制台上传的自定义表情"同一条路（addManual 自己校验格式与体积并落盘）
+            const label = String(args.note || '').trim() || prompt;
+            const entry = ctx.stickers.addManual({
+              imageBuffer: buffer,
+              desc: label.slice(0, 40),
+              localNote: `生成的图：${prompt}`.slice(0, 300),
+              tags: ['生成'],
+              usage: revisedPrompt ? `提示词修订：${revisedPrompt}`.slice(0, 300) : ''
+            });
+            return ok({
+              id: entry.id,
+              note: entry.localNote,
+              kind: '已存进表情库',
+              next: '用 send_sticker 传这个 id 就能发出去'
+            });
+          } catch (error) {
+            // 没画出来（或没落库）就把占住的额度退回去 —— 预扣只为了堵竞态，不该让失败白花额度
+            imageQuota.refund(ctx.chatKey, reservedAt);
+            throw error;
+          }
         } catch (error) {
           return err(error?.message ?? error);
         }

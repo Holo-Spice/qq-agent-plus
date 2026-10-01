@@ -174,6 +174,26 @@ check('调用次数已填（数字）', /^\d+$/.test(runs), runs);
 check('搜索次数已填（数字）', /^[\d,]+$/.test(search), search);
 check('输入 token 已填', prompt.length > 0, prompt);
 
+// 搜索卡副行（2026-10-01 审查）：两个分支原先写成同一句字面量，等于没有区分。
+// 真根因是 searchCount 记的是「联网动作总数」（web_search + web_fetch），所以副行要按
+// toolCounts 拆开说。用例用真实 stats 的形状覆写三个字段，逐种组合对文案。
+console.log('\n=== 搜索卡副行三种口径 ===');
+const subOf = (override) => {
+  ctx.updateUsagePage({ ...freshStats, ...override }, freshSt, priceData || {});
+  return String(usageBox.querySelector('[data-field="search-sub"]')?.textContent || '');
+};
+const subNone = subOf({ searchCount: 0, toolCounts: {} });
+const subSearchOnly = subOf({ searchCount: 5, toolCounts: { web_search: 5 } });
+const subBoth = subOf({ searchCount: 8, toolCounts: { web_search: 5, web_fetch: 3 } });
+const subFetchOnly = subOf({ searchCount: 2, toolCounts: { web_fetch: 2 } });
+console.log('  无=' + subNone + ' / 只搜=' + subSearchOnly + ' / 都有=' + subBoth + ' / 只抓=' + subFetchOnly);
+check('没有联网时说「没有联网」', subNone.includes('没有联网'), subNone);
+check('纯搜索：说明没抓网页', subSearchOnly.includes('只做了联网搜索') && subSearchOnly.includes('没抓网页'), subSearchOnly);
+check('都做了：两个数字都给出', subBoth.includes('搜索 5 次') && subBoth.includes('抓网页 3 次'), subBoth);
+check('只抓网页：说明没走搜索', subFetchOnly.includes('只抓了网页') && subFetchOnly.includes('没走搜索'), subFetchOnly);
+// 还原成真实数据，后面的用例继续用
+ctx.updateUsagePage(freshStats, freshSt, priceData || {});
+
 // ── 各 range 都试 ──
 console.log('\n=== 各时间范围 ===');
 for (const rg of ['today', '7', '30', 'all']) {

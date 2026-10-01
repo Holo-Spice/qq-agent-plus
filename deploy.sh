@@ -85,8 +85,15 @@ for p in "$INSTALL_DIR" "$DATA_DIR"; do
     exit 2
   }
 done
+# 两个方向都要拒：安装目录在源码仓库里 → rsync --delete 会删掉仓库里的文件；
+# 源码仓库在安装目录里 → --delete 会把 data/、.runtime/、node_modules/ 连源码目录一起清掉。
+# 2026-10-01 审查：原先只查了前一个方向。
 if [[ "$ROOT" != "$INSTALL_DIR" && "$INSTALL_DIR" == "$ROOT/"* ]]; then
   printf 'Installation path must not be nested inside the source repository\n' >&2
+  exit 2
+fi
+if [[ "$ROOT" != "$INSTALL_DIR" && "$ROOT" == "$INSTALL_DIR/"* ]]; then
+  printf 'The source repository must not be nested inside the installation path\n' >&2
   exit 2
 fi
 command -v systemctl >/dev/null || { printf 'systemctl is required: deploy on a Linux host with systemd\n' >&2; exit 1; }
@@ -95,6 +102,9 @@ command -v rsync >/dev/null || { printf 'rsync is required: install it first (De
 mkdir -p "$INSTALL_DIR" "$DATA_DIR"
 
 LOCK_DIR="$DATA_DIR/.deploy.lock"
+TAKEOVER_DIR="$LOCK_DIR.takeover"
+# TMP_DIR 提前声明：Node 下载失败时 set -e 直接退出，EXIT trap 里的清理要能引用到它（set -u 下未定义会报错）。
+TMP_DIR=""
 # 锁的属主写成 pid + 开始时间：SIGKILL（systemd 超时补杀、OOM、掉电）不会执行 EXIT trap，
 # 锁目录会永久留下，无人值守的自动更新从此每次都死在第一条检查上，只能人工 rm。
 # 接管条件取严：属主进程不存在 **且** 锁已超过 5 分钟 —— 刚 mkdir 还没写 pid 的锁不能算陈旧，
@@ -110,9 +120,17 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   # 2026-10-01 审查：原先写成 -z，语义整个反过来 —— 属主已死且确实过期的锁走 else 直接 exit 1
   # （SIGKILL 之后无人值守的更新就永久卡死），而"刚 mkdir 还没写 pid"的并发锁反被抢走 rm -rf。
   if ! lock_owner_alive && [[ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +5 2>/dev/null)" ]]; then
-    printf 'Stale deployment lock (owner process is gone for over 5 minutes): taking it over\n' >&2
-    rm -rf -- "$LOCK_DIR"
-    mkdir "$LOCK_DIR" 2>/dev/null || { printf 'Another deployment may be running.\n' >&2; exit 1; }
+    # 抢锁要过一道互斥（mkdir 原子）：两个并发部署同时判定"陈旧"时，若都直接 rm -rf + mkdir，
+    # 后者会把前者刚建好的新锁删掉，两个进程同时往下走。只有一个能进这段，另一个直接退出。
+    if mkdir "$TAKEOVER_DIR" 2>/dev/null; then
+      printf 'Stale deployment lock (owner process is gone for over 5 minutes): taking it over\n' >&2
+      rm -rf -- "$LOCK_DIR"
+      mkdir "$LOCK_DIR" 2>/dev/null || { printf 'Another deployment may be running.\n' >&2; exit 1; }
+      rmdir "$TAKEOVER_DIR" 2>/dev/null || true
+    else
+      printf 'Another deployment is taking over a stale lock; retry in a moment.\n' >&2
+      exit 1
+    fi
   else
     printf 'Another deployment is running (pid %s, started %s).\n' \
       "$(cat "$LOCK_DIR/pid" 2>/dev/null || printf '?')" "$(cat "$LOCK_DIR/started" 2>/dev/null || printf '?')" >&2
@@ -124,6 +142,9 @@ printf '%s\n' "$$" > "$LOCK_DIR/pid"
 printf '%s\n' "$(date -Is 2>/dev/null || date)" > "$LOCK_DIR/started"
 cleanup_lock() {
   rm -rf -- "$LOCK_DIR"
+  rm -rf -- "$TAKEOVER_DIR"
+  if [[ -n "$TMP_DIR" ]]; then rm -rf -- "$TMP_DIR"; fi
+  return 0
 }
 trap cleanup_lock EXIT
 

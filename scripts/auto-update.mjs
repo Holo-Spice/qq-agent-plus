@@ -137,6 +137,49 @@ function revisionFromFile() {
   }
 }
 
+// 锁的陈旧宽限：只在"读不出属主 pid"和"接管互斥文件被遗留"两种情况下用。
+// 5 分钟与 deploy.sh 的陈旧判据一致；定时器是 1 小时一次，实际不会因此误判并发。
+const LOCK_STALE_MS = 5 * 60 * 1000;
+
+function fileAgeMs(file) {
+  try { return Date.now() - fs.statSync(file).mtimeMs; } catch { return Infinity; }
+}
+
+/**
+ * 接管一个没有活属主的锁。
+ * 2026-10-01 审查：原来是裸的 unlinkSync + openSync('wx') —— 这两步不是原子对，两个进程同时
+ * 判定"陈旧"时会互相删掉对方刚建好的锁，双双拿到"唯一"锁。改成先抢一个互斥文件（open 'wx'
+ * 是原子的），只有赢家去删锁重建；互斥文件本身带陈旧兜底，否则持有者被 SIGKILL 会把
+ * 自动更新永久钉在"有人在接管"上（和 pid 锁当初的坑一模一样）。
+ */
+function autoUpdateTryTakeOver() {
+  const mutex = `${paths.lock}.takeover`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let handle = null;
+    try {
+      handle = fs.openSync(mutex, 'wx', 0o600);
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      if (fileAgeMs(mutex) < LOCK_STALE_MS) return false;
+      try { fs.unlinkSync(mutex); } catch { /* 别人已经清掉了 */ }
+      continue;
+    }
+    try {
+      try { fs.unlinkSync(paths.lock); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
+      lockHandle = fs.openSync(paths.lock, 'wx', 0o600);
+      return true;
+    } catch (error) {
+      // 互斥在手却建不出锁：说明别的进程刚重建了锁（或拿到了它），这次就不抢了
+      if (error?.code === 'EEXIST') return false;
+      throw error;
+    } finally {
+      try { fs.closeSync(handle); } catch { /* ignore */ }
+      try { fs.unlinkSync(mutex); } catch { /* ignore */ }
+    }
+  }
+  return false;
+}
+
 function acquireLock() {
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   try {
@@ -144,25 +187,49 @@ function acquireLock() {
   } catch (error) {
     if (error?.code !== 'EEXIST') throw error;
     let owner = {};
-    try { owner = readObject(paths.lock); } catch { /* stale lock */ }
+    try { owner = readObject(paths.lock); } catch { /* 空/坏锁：走下面的宽限 */ }
     const pid = Number(owner.pid) || 0;
     if (pid > 0) {
+      let alive = true;
       try {
         process.kill(pid, 0);
+      } catch (signalError) {
+        // EPERM 之类表示进程确实还在（只是不归我们管）→ 保守当作活着
+        alive = signalError?.code !== 'ESRCH';
+      }
+      if (alive) {
         throw Object.assign(
           new Error(`Another update process is running (${pid})`),
           { code: 'UPDATE_BUSY' }
         );
-      } catch (signalError) {
-        if (signalError?.code !== 'ESRCH') throw signalError;
       }
+    } else if (fileAgeMs(paths.lock) < LOCK_STALE_MS) {
+      // 读不出 pid：可能是刚 open('wx') 还没写完 JSON 的并发进程，也可能是写了一半被杀。
+      // 前者不能抢，后者才该抢 —— 用时间分开（原来 pid=0 时直接抢，等于把并发进程的锁删掉）。
+      throw Object.assign(
+        new Error('Another update process is starting'),
+        { code: 'UPDATE_BUSY' }
+      );
     }
-    fs.unlinkSync(paths.lock);
-    lockHandle = fs.openSync(paths.lock, 'wx', 0o600);
+    if (!autoUpdateTryTakeOver()) {
+      throw Object.assign(
+        new Error('Another update process is taking over the lock'),
+        { code: 'UPDATE_BUSY' }
+      );
+    }
   }
-  fs.writeFileSync(lockHandle, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+  try {
+    fs.writeFileSync(lockHandle, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+  } catch (error) {
+    // 半成品锁（没有 pid）会把下一个进程推进"宽限期"分支 —— 别把它留在盘上
+    try { fs.closeSync(lockHandle); } catch { /* ignore */ }
+    try { fs.unlinkSync(paths.lock); } catch { /* ignore */ }
+    lockHandle = null;
+    throw error;
+  }
   lockOwned = true;
 }
+
 
 function releaseLock() {
   // 没抢到锁就什么都不动：锁文件、工作目录、源码包都不是这次运行的

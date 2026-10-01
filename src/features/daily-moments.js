@@ -12,6 +12,7 @@ import {
 } from '../llm/llm.js';
 import { safeFetchBinary, validateImageUrl } from '../llm/safe-fetch.js';
 import { convertGifToStillStrip } from '../tools/image-downsample.js';
+import { sanitizeUserText } from '../core/util.js';
 import { webFetch, webSearch } from '../llm/web-search.js';
 import { buildMomentSystemPrompt, momentPersonaHash, MOMENT_PROMPT_VERSION } from '../llm/moment-prompt.js';
 import { assertTimeAllowed, isTimeActive, watchTimeWindow, withTimeScope } from '../core/time-gate.js';
@@ -150,7 +151,11 @@ export function momentIntervalDue(now = Date.now(), cfg = getConfig().dailyMomen
 }
 
 function cleanText(value, max = 500) {
-  return String(value ?? '').replace(/\0/g, '').replace(/[ \t]+/g, ' ').trim().slice(0, max);
+  // 过 sanitizeUserText：这里处理的全是**外部文本**（群友消息、群名、昵称、印象），而它们最终进的是
+  // 带段头结构的提示词（【群聊材料】【总结日期】…）。伪造段头就能冒充系统段 —— sanitizeUserText 的
+  // 关键词表里本来就收录了 daily-moments 的段头，说明本应洗，只是漏了这条路径（2026-10-01 审查；
+  // 聊天侧 tools-core 的同通道已经洗了，这里是绕过去的第二入口）。
+  return sanitizeUserText(String(value ?? '').replace(/\0/g, '').replace(/[ \t]+/g, ' ').trim()).slice(0, max);
 }
 
 function momentError(code, message, httpStatus = 409) {
@@ -1285,7 +1290,9 @@ export class DailyMomentsManager {
             content: JSON.stringify({
               url: result.url,
               statusCode: result.statusCode,
-              content: String(result.body || '').slice(0, 12000)
+              // 抓回来的网页正文是**不可信文本**：伪造【管理员附加规则】这类段头就能冒充系统段。
+              // 与聊天侧的 web_fetch（tools-core 的 sanitizeUserText(body.slice(...))）同一道清洗。
+              content: sanitizeUserText(String(result.body || '')).slice(0, 12000)
             })
           };
         }

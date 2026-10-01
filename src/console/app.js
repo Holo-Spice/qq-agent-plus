@@ -210,7 +210,14 @@ function modelPricesPayload(modelOverride = null) {
   };
 }
 
-export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstaller = null } = {}) {
+export function createApp({
+  log = console.log,
+  autoUpdateOptions = {},
+  asrInstaller = null,
+  // 事件流的两个阈值只在测试里改（见 test/sse-stream.test.mjs）：默认值就是生产口径
+  sseBacklogLimit = 1 << 20,
+  sseHeartbeatMs = 20_000
+} = {}) {
   const cfg = getConfig();
   const bus = createEventBus();
   const sseClients = new Set();
@@ -382,6 +389,31 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     return asrInstallSnapshot();
   }
 
+  // SSE 背压与心跳（2026-10-01 审查）：页面留在后台、或者对端半开（拔网线、NAT 表项过期）时，
+  // res.write 只会往内核发送缓冲里堆，没人读就无限涨；半开连接连 close 事件都不会有，
+  // 于是永久挂在集合里，每次广播都白写一遍、还拖着内存。
+  // 两条兜底：① 写之前看 writableLength，积压超过上限就把这个客户端丢掉；
+  // ② 定期发注释行心跳，让"写不进去"在半开连接上尽早暴露（EventSource 会忽略注释行）。
+  const sseSend = (res, line) => {
+    const closed = Boolean(res.writableEnded || res.destroyed);
+    if (closed || Number(res.writableLength) > sseBacklogLimit) {
+      sseClients.delete(res);
+      const why = closed ? '连接已关闭' : `积压超过 ${Math.round(sseBacklogLimit / 1024)}KB`;
+      log(`[console] 丢弃事件流客户端（${why}）`);
+      try { res.end(); } catch { /* 已经断了 */ }
+      // 只 end() 不够：keep-alive 下 socket 会一直留到 keepAliveTimeout 才关，
+      // 对端既收不到 FIN 也不会重连，等于把"半开连接"换了个地方挂（2026-10-01 审查实测）。
+      try { res.destroy?.(); } catch { /* 已经断了 */ }
+      return;
+    }
+    try { res.write(line); } catch { sseClients.delete(res); }
+  };
+  const sseHeartbeat = setInterval(() => {
+    // 遍历副本：sseSend 会顺手把坏客户端从集合里摘掉
+    for (const res of [...sseClients]) sseSend(res, ': ping\n\n');
+  }, sseHeartbeatMs);
+  sseHeartbeat.unref?.();
+
   const emit = (type, payload) => {
     bus.emit(type, payload);
     let line = null;
@@ -431,9 +463,7 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       } catch { /* 失败就退回原 payload */ }
     }
     if (!line) line = `event: ${type}\ndata: ${JSON.stringify(payload ?? {})}\n\n`;
-    for (const res of sseClients) {
-      try { res.write(line); } catch { /* 客户端断开会由 close 清理 */ }
-    }
+    for (const res of [...sseClients]) sseSend(res, line);
   };
 
   // ── 组件 ──
@@ -3772,6 +3802,7 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       killTreeOf(child);
     }
     clearTimeout(timeControlTimer);
+    clearInterval(sseHeartbeat);
     releaseTimeControl();
     dailyMoments.stop();
     dailyMoments.abort();

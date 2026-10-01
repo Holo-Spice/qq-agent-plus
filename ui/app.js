@@ -403,6 +403,10 @@ function updateControlHubFields(box, statuses, update) {
     setText(box.querySelector('[data-hub-deploy="' + field + '"]'), text);
   }
 
+  // 上次更新检查的说明也要跟着刷新：它原先只在首建 HTML 时渲染一次，之后 SSE 推来的新结论
+  // （连不上 GitHub / 发现新 Release / 已是最新）都进不了这一行（2026-10-01 审查）。
+  setText(box.querySelector('[data-hub-update-check]'), renderUpdateCheckNote(update));
+
   // 输入框：只在用户没在编辑、且值确实不同时同步
   const syncInput = (id, value) => {
     const el = document.getElementById(id);
@@ -802,8 +806,11 @@ function connectSSE() {
   });
   es.addEventListener('status', () => refreshStatus());
   es.addEventListener('feedback', (ev) => {
-    const d = JSON.parse(ev.data);
-    if (d.level === 'error') console.warn('[agent 反馈]', d.message);
+    // 与上面几个事件同一道守卫：载荷坏了不能把监听器抛出去（其它事件都有 try/catch，
+    // 这里原来是裸的 —— 2026-10-01 审查）
+    let d = null;
+    try { d = JSON.parse(ev.data); } catch { return; }
+    if (d?.level === 'error') console.warn('[agent 反馈]', d.message);
   });
   es.onerror = () => { /* EventSource 自动重连 */ };
 }
