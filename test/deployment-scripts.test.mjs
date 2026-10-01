@@ -87,8 +87,30 @@ test('deploy.sh：互斥有陈旧兜底、trap 先于抢锁、持有才清、抢
   assert.match(source, /if \[\[ "\$TAKEOVER_OWNED" == true \]\]/, '清互斥同理');
   assert.match(source, /the lock was refreshed while taking over/,
     '拿到互斥后必须再判一次陈旧（否则会删掉并发赢家刚建好的锁）');
+  // 顺序断言（2026-10-01 第六轮审查）：只钉"有这句话"不够 —— 把 rm 挪到重判**之前**照样全绿，
+  // 而那样正好恢复了"删掉并发赢家新锁"的窗口。钉住 take_over_lock 里的真实次序。
+  {
+    const fnAt = source.indexOf('take_over_lock() {');
+    const fnEnd = source.indexOf('\n}', fnAt);
+    assert.ok(fnAt > 0 && fnEnd > fnAt, 'take_over_lock 的结构变了就更新这条用例');
+    const body = source.slice(fnAt, fnEnd);
+    const recheckAt = body.indexOf('if ! lock_is_stale; then');
+    const removeAt = body.indexOf('rm -rf -- "$LOCK_DIR"');
+    const recreateAt = body.indexOf('mkdir "$LOCK_DIR"');
+    assert.ok(recheckAt > 0 && removeAt > 0 && recreateAt > 0, '三个锚点都要在 take_over_lock 里');
+    assert.ok(recheckAt < removeAt, '重判必须排在删锁之前（否则并发赢家刚建好的锁会被删掉）');
+    assert.ok(removeAt < recreateAt, '先删旧锁再重建（顺序反了等于把刚建的锁又删掉）');
+  }
   assert.match(source, /ROOT_CANON="\$\(canon_path "\$ROOT"\)"/, '嵌套判定前先把路径归一化');
   assert.match(source, /INSTALL_CANON="\$\(canon_path "\$INSTALL_DIR"\)"/);
+  // 归一化失败必须 fail-closed（2026-10-01 第六轮审查）：原先是 `|| printf '%s' "$1"` 退回
+  // 未归一化的原串，等于守卫静默失效 —— 带 `//`、`..`、符号链接的等价写法又能绕过嵌套判定。
+  assert.doesNotMatch(source, /realpath[^\n]*\|\|\s*printf/,
+    '不许在 realpath 失败时退回未归一化的原串');
+  assert.match(source, /Cannot normalize the source path/, '归一化失败要有明确报错');
+  assert.match(source, /Cannot normalize the installation path/);
+  assert.match(source, /\|\| \{ printf 'Cannot normalize the source path[^\n]*exit 2; \}/,
+    '报错之后要真的停（exit 2），不能继续往下跑');
   assert.match(source, /"\$INSTALL_CANON" == "\$ROOT_CANON\/"\*/);
   assert.match(source, /"\$ROOT_CANON" == "\$INSTALL_CANON\/"\*/);
 });

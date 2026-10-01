@@ -1298,6 +1298,39 @@ try {
       + (failOk ? '' : ` -> handlers=${handlers.length} assigned=${JSON.stringify(assigned)} sameNode=${sameNode} value=${JSON.stringify(input.value)} type=${input.type} label=${btn.textContent} revealed=${btn.dataset.revealed} note=${JSON.stringify(noteText)}`));
   }
 
+  // 非 TTS 的开关也要有提示位（2026-10-01 第六轮审查）：KEY_TOGGLES 里 15 个开关原先只有 TTS
+  // 配了 note，其余 14 个取明文失败时点一下毫无反应 —— 状态不翻是对的，但用户看不到任何原因。
+  // 现在没配 note 的会现挂一个 `.key-toggle-note`（垫片没有真实父子关系，退化成 #<input>-note）。
+  {
+    ctx.bindSettingsEvents(cfg);
+    const btn = document.querySelector('#cfg-apikey-toggle');
+    const handlers = btn?._listeners?.click || [];
+    const input = document.querySelector('#cfg-apikey');
+    const before = sandbox.fetch;
+    const readNote = () => String(document.querySelector('#cfg-apikey-note')?.textContent || '');
+    // ① 回读失败 → 提示里要有原因
+    sandbox.fetch = async () => { throw new Error('401 未授权'); };
+    input.value = '******';
+    input.type = 'password';
+    btn.textContent = '显示';
+    btn.dataset.revealed = '0';
+    try { for (const h of handlers) await h({ currentTarget: btn }); } catch { /* 看结果 */ }
+    const failNote = readNote();
+    const untouched = input.value === '******' && btn.textContent === '显示';
+    // ② 回读成功但这一家没存过 Key → 也要有说明（不能静默显示空值）
+    sandbox.fetch = async () => ({ ok: true, status: 200, json: async () => ({ apiKey: '' }), text: async () => '' });
+    btn.textContent = '显示';
+    btn.dataset.revealed = '0';
+    input.value = '******';
+    try { for (const h of handlers) await h({ currentTarget: btn }); } catch { /* 看结果 */ }
+    const emptyNote = readNote();
+    sandbox.fetch = before;
+    const noteOk = handlers.length > 0 && untouched && /读取失败/.test(failNote) && /没有保存过/.test(emptyNote);
+    noteOk ? pass++ : fail++;
+    console.log('  ' + (noteOk ? 'OK   ' : 'FAIL ') + '设置页：没配 note 的密钥开关也有提示位（失败写原因、空值写说明）'
+      + (noteOk ? '' : ` -> handlers=${handlers.length} untouched=${untouched} failNote=${JSON.stringify(failNote)} emptyNote=${JSON.stringify(emptyNote)}`));
+  }
+
   // 分段守卫：bindSettingsEvents 现在由四段拼成（保存与分区 / 列表与分组 / 模型与密钥 / 人设与视觉）。
   // 调度器少调一段，只会让"那一段的控件变成死控件"，页面照样能打开 —— 所以逐段点名一个**无条件绑定**
   // 的代表控件，断言它确实被绑上了。这条用例是分段重构的守卫（2026-10-01 变异验证时发现：
@@ -2457,6 +2490,17 @@ try {
           const subOk = subTxt.includes('只做了联网搜索') && subTxt.includes('没抓网页');
           subOk ? pass++ : fail++;
           console.log('  ' + (subOk ? 'OK   ' : 'FAIL ') + '搜索卡副行按工具明细拆开  副行=' + JSON.stringify(subTxt));
+
+          // token 两张卡的副行也要断言（2026-10-01 第六轮审查：prompt-sub / rate-sub 此前 0 断言，
+          // 副行写死或串错字段都能全绿）。夹具 promptTokens=120000 / completionTokens=34000 /
+          // cachedTokens=80000 / cacheHitRate=0.666 → 主数字与副行都得对上。
+          const tok = (n) => (Number(n) || 0).toLocaleString('zh-CN');
+          const q = (f) => String(usageBox.querySelector(`[data-field="${f}"]`)?.textContent || '');
+          const tokenOk = q('prompt') === tok(120000) && q('prompt-sub') === `输出 ${tok(34000)}`
+            && q('rate') === '66.6%' && q('rate-sub') === `命中 ${tok(80000)} / 输入 ${tok(120000)}`;
+          tokenOk ? pass++ : fail++;
+          console.log('  ' + (tokenOk ? 'OK   ' : 'FAIL ') + 'token 两卡的副行带对数字  输入=' + JSON.stringify(q('prompt-sub'))
+            + ' 缓存=' + JSON.stringify(q('rate-sub')) + ' 主数字=' + JSON.stringify(q('prompt')) + '/' + JSON.stringify(q('rate')));
 
           // 骨架屏应已被真实内容替换
           const noSkeleton = !/usage-card skeleton/.test(html);

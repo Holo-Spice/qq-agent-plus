@@ -73,6 +73,9 @@ async function fetchRealKey(inputId) {
  *   （真存进去会把令牌改成字面量 ******，见 ui/pages/settings-save.js 的同款兜底），
  *   所以 hideTo 给空串。
  * note：取不到明文时把原因写进这个提示元素（例如"这一家还没存过 Key"）。
+ *   **不配也有提示位**：没配 note 的开关会在它所在的字段块里现挂一个 `.key-toggle-note`
+ *   （见 resolveNoteEl）。原先只有 TTS 配了 note，其余 14 个取明文失败时点一下毫无反应 ——
+ *   2026-10-01 第六轮审查。
  * 不读 input.type 判断当前状态（见下），也不在隐藏时再向端点要一次明文。
  */
 const KEY_TOGGLES = [
@@ -124,11 +127,39 @@ const revealedValues = new Map();
 /** 「显示」之前框里是什么（掩码、空串、或用户已经输了一半的新 Key）：隐藏时还原它。 */
 const preShowValues = new Map();
 
+/**
+ * 提示位：配了 note 就用模板里的元素；没配的当场挂一个。
+ *
+ * 为什么不在模板里给 15 个开关各补一个 `<div class="hint" id="…">`：模板散在五个页面，
+ * 补 id 只是把"以后新加密钥又忘了配提示"的老问题复制一遍；现挂天然覆盖所有开关，
+ * 且随模板重渲染一起重建（同一个字段块里只留一个，用类名去重）。
+ * 字段块取 `.field`；没有 `.field` 的布局退回输入框的直接父节点（提示会贴着那一行显示）。
+ * 渲染测试的 DOM 垫片没有真正的父子关系（closest 恒 null）：退化到按 id 取，
+ * 垫片对同一 selector 返回同一个元素，写入照样能被断言。
+ */
+function resolveNoteEl(inputId, configuredId) {
+  if (configuredId) {
+    const byId = $(`#${configuredId}`);
+    if (byId) return byId;
+  }
+  const input = $(`#${inputId}`);
+  const host = input?.closest?.('.field') || input?.parentElement || null;
+  if (host && typeof document.createElement === 'function' && typeof host.appendChild === 'function') {
+    const existing = typeof host.querySelector === 'function' ? host.querySelector('.key-toggle-note') : null;
+    if (existing) return existing;
+    const slot = document.createElement('div');
+    slot.className = 'hint key-toggle-note';
+    host.appendChild(slot);
+    return slot;
+  }
+  return $(`#${inputId}-note`);
+}
+
 async function handleKeyToggle({ btn: btnId, input: inputId, hideTo = '******', note = '' }) {
   const input = $(`#${inputId}`);
   const btn = $(`#${btnId}`);
   if (!input || !btn) return;
-  const noteEl = note ? $(`#${note}`) : null;
+  const noteEl = resolveNoteEl(inputId, note);
   // 显示/隐藏的判据用按钮上的标记，**不读 input.type** —— 渲染测试用的 DOM 垫片
   // （test/render-test.mjs）不把 type="password" 属性映射成 .type 属性，读它永远得到
   // undefined，于是"显示"会走进隐藏分支（2026-10-01 实测踩到）。标记落在按钮上，

@@ -935,6 +935,8 @@ esac
 // 两边同时往下走（与 deploy.sh 的 take_over_lock 同一个道理）。
 // 这条是结构断言：要在行为上稳定复现这个窗口得靠调度时序，做不到确定性复现。
 // 变异对照：删掉互斥内的 lockJudgement() 调用 → 本条必红。
+// 2026-10-01 第六轮审查补强：原先只钉了"互斥 → 重判"，没钉"重判 → 删锁"—— 把删旧锁挪到
+// 重判之前同样全绿，而那正是要防的窗口。现在把三步的相对次序都钉住。
 test('auto-update：拿到接管互斥后再判一次锁的状态，判定逻辑只有一处', () => {
   const source = fs.readFileSync(path.join(repo, 'scripts/auto-update.mjs'), 'utf8');
   const takeOverAt = source.indexOf('function autoUpdateTryTakeOver()');
@@ -943,7 +945,12 @@ test('auto-update：拿到接管互斥后再判一次锁的状态，判定逻辑
   const body = source.slice(takeOverAt, acquireAt);
   const mutexAt = body.indexOf("fs.openSync(mutex, 'wx', 0o600)");
   const recheckAt = body.indexOf('lockJudgement().takeable');
+  const removeAt = body.indexOf('fs.unlinkSync(paths.lock)');
+  const recreateAt = body.indexOf("lockHandle = fs.openSync(paths.lock, 'wx'");
   assert.ok(mutexAt > 0 && recheckAt > mutexAt, '互斥拿到手之后必须再判一次锁是否仍可接管');
+  assert.ok(removeAt > 0 && recreateAt > 0, '删锁与重建锁两个锚点都要在（删的是陈旧锁、建的是自己的锁）');
+  assert.ok(recheckAt < removeAt, '重判必须排在删锁之前：反了就会删掉并发赢家刚建好的锁');
+  assert.ok(removeAt < recreateAt, '先删陈旧锁再重建（顺序反了等于把刚建的锁又删掉）');
   // 判定只留一份：acquireLock 与互斥内各写一套迟早漂开（口径必须完全一致）
   assert.equal((source.match(/function lockJudgement\(\)/g) || []).length, 1, 'lockJudgement 只定义一次');
   assert.ok((source.match(/lockJudgement\(\)/g) || []).length >= 2, 'acquireLock 与互斥内都要调用它');

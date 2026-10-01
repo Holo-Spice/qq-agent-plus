@@ -90,11 +90,14 @@ done
 # 2026-10-01 审查：原先只查了前一个方向。
 # 判定前先归一化：`/srv/app` 与 `/srv//app`、`/srv/x/../app`、以及经符号链接指向同一处的写法
 # 是同一个目录，只做未归一化的字符串前缀比较会漏判（另一条同类审查意见）。
+# 归一化失败**不退回原串**（2026-10-01 第六轮审查）：退回等于守卫静默失效 —— 带 `//`、`..`
+# 或符号链接的等价写法又能绕过两条嵌套判定。realpath 属 coreutils，本脚本本来就要求
+# Linux + systemd + rsync + node，这里 fail-closed：调用点失败即停（见下面两条）。
 canon_path() {
-  realpath -m -- "$1" 2>/dev/null || printf '%s' "$1"
+  realpath -m -- "$1"
 }
-ROOT_CANON="$(canon_path "$ROOT")"
-INSTALL_CANON="$(canon_path "$INSTALL_DIR")"
+ROOT_CANON="$(canon_path "$ROOT")" || { printf 'Cannot normalize the source path: %s\n' "$ROOT" >&2; exit 2; }
+INSTALL_CANON="$(canon_path "$INSTALL_DIR")" || { printf 'Cannot normalize the installation path: %s\n' "$INSTALL_DIR" >&2; exit 2; }
 if [[ "$ROOT_CANON" != "$INSTALL_CANON" && "$INSTALL_CANON" == "$ROOT_CANON/"* ]]; then
   printf 'Installation path must not be nested inside the source repository\n' >&2
   exit 2

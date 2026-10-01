@@ -84,7 +84,8 @@ HTML 也认 If-Modified-Since / HTML 的 ETag 改成体积+时间 —— 逐条�
 - `eslint.config.mjs` 里"ui/app.js（骨架，5000+ 行）…… 豁免"已经过期：app.js 已缩到千行量级
   （同一数字问题，见上；`wc -l ui/app.js` 为准），
   按那句"缩到阈值以内后才纳入约束"自己的规矩，`max-lines` 的作用域已从
-  `core/pages/i18n` 扩到**整个 `ui/`**（含 app.js 与 8 个外挂插件，最大的 `global-memory.js` 377 行）。
+  `core/pages/i18n` 扩到**整个 `ui/`**（含 app.js 与 8 个外挂插件 —— 谁最大、各多少行
+  以 `wc -l ui/*.js` 现算为准，别沿用写在这里的数字）。
   同时把 eslint 的两条覆盖拆开：`no-unused-vars: off` 仍只给 `core/pages/i18n`（它们的定义
   是给别的 script 用的），别把 app.js 与插件并进去——那会让业务/插件代码的未用变量失守。
   *（2026-10-01 补：ESM 化后这条 `no-unused-vars: off` 覆盖已整体删除 —— 跨文件引用改为 `import`，
