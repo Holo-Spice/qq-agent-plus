@@ -140,15 +140,29 @@ async function handleKeyToggle({ btn: btnId, input: inputId, hideTo = '******', 
     // 用户在这个框里输了一半（既不是空、也不是掩码、也不是上次显示出来的那串明文）时，
     // 只切明文让他看清自己输的，**不要**用服务端回读的值盖掉 —— 那是未保存的用户输入。
     const typedByUser = Boolean(before) && before !== '******' && before !== known;
+    if (typedByUser) {
+      preShowValues.set(inputId, before);
+      input.type = 'text';
+      btn.textContent = '隐藏';
+      btn.dataset.revealed = '1';
+      return;
+    }
+    // 先把明文取回来**再**翻按钮状态（2026-10-01 审查）：原来是先翻再 await，端点 401 /
+    // 网络失败时按钮已经写着「隐藏」、框里却还是掩码，用户会以为"显示成功了但没值"，
+    // 再点一下走的是隐藏分支、更莫名其妙。取不到就什么都不动，只把原因写进提示。
+    let real;
+    try {
+      real = await fetchRealKey(inputId);
+    } catch (error) {
+      if (noteEl) noteEl.textContent = `读取失败：${String(error?.message || error)}`;
+      return;
+    }
     preShowValues.set(inputId, before);
+    revealedValues.set(inputId, real);
+    input.value = real;
     input.type = 'text';
     btn.textContent = '隐藏';
     btn.dataset.revealed = '1';
-    if (typedByUser) return;
-    // 明文只能向后端受守卫的端点取（/api/config 里密钥是删掉的）
-    const real = await fetchRealKey(inputId);
-    revealedValues.set(inputId, real);
-    input.value = real;
     if (noteEl) noteEl.textContent = real ? '' : '这一家还没有保存过 Key';
     return;
   }

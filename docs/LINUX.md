@@ -294,7 +294,9 @@ immediately. The general “Save Settings” action cannot change the Token.
 
 API keys are never included in `GET /api/config`: any config field whose name matches the
 secret pattern (`apikey`, `api_key`, `accesstoken`, `access_token`, `secret`, `password`,
-`privatekey`, `authorization`, or the exact names `token` / `auth` / `cookie` / `bearer`) is
+`privatekey`, `private_key`, `authorization`, `x-api-key`, `x_api_key`, or the exact names
+`token` / `auth` / `cookie` / `bearer` — the single source of truth is `SECRET_KEY_PATTERN`
+in `src/core/secret-keys.js`) is
 deleted before the response and replaced with `hasX` flags, so the settings page can show
 "configured" without the value. Plaintext keys are echoed **only on demand** by the dedicated
 key endpoints (`/api/api-key`, `/api/search-key`, `/api/onebot-key`, `/api/providers/key`,

@@ -997,11 +997,16 @@ export class DailyMomentsManager {
           name: cleanText(member.name || '群友', 60),
           impressions: member.impressions.slice(-3).map((item) => cleanText(item.content, 220))
         })),
+        // 交接文本是模型从群消息整理出来的（很可能原样搬了群友的话），而它是**另一条**注入路径：
+        // 整个 snapshot.groups 会被 JSON.stringify 进写说说的提示词（见下面 userPrompt 的拼装），
+        // 所以要和记忆读侧（memory-global.formatHandoffForPrompt 必洗）同一口径。
+        // 2026-10-01 审查：A1 只洗了群材料，这四行漏了 —— 群友伪造段头被模型写进交接后正好绕过去。
         handoff: group.handoff ? {
-          topic: group.handoff.topic,
-          summary: group.handoff.summary,
-          facts: group.handoff.facts,
-          nextStep: group.handoff.nextStep
+          topic: cleanText(group.handoff.topic, 200),
+          summary: cleanText(group.handoff.summary, 1200),
+          facts: (Array.isArray(group.handoff.facts) ? group.handoff.facts : [])
+            .slice(0, 8).map((item) => cleanText(item, 240)).filter(Boolean),
+          nextStep: cleanText(group.handoff.nextStep, 400)
         } : null
       };
     });

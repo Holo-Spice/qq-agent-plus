@@ -24,9 +24,12 @@ process.env.QQ_AGENT_DATA_DIR = dataDir;
 // config.server.port（默认 3210）。宿主机上跑着生产实例时（服务器上就是常态），
 // 整条 npm test 会被 EADDRINUSE 打断 —— 把隔离端口显式写进临时配置，让本测试
 // 真正自包含，不依赖"宿主机 3210 恰好空闲"。
-fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({
-  server: { port: 40995, host: '127.0.0.1' }
-}));
+// 种子配置用应用自己的 DEFAULT_CONFIG **整份**写盘（2026-10-01 审查）：原来只写 server 一节，
+// 剩下全靠"缺省合并"兜住 —— 那样测不到真实配置形态下的读取路径（少一个键就少一段覆盖）。
+const { DEFAULT_CONFIG } = await import('../src/core/config.js');
+const seededConfig = structuredClone(DEFAULT_CONFIG);
+seededConfig.server = { ...seededConfig.server, port: 40995, host: '127.0.0.1' };
+fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify(seededConfig));
 process.on('exit', () => { try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch { /* Windows 上可能被句柄占着 */ } });
 const { createApp } = await import('../src/console/app.js');
 
@@ -182,15 +185,27 @@ const subOf = (override) => {
   ctx.updateUsagePage({ ...freshStats, ...override }, freshSt, priceData || {});
   return String(usageBox.querySelector('[data-field="search-sub"]')?.textContent || '');
 };
+const numberOf = (override) => {
+  ctx.updateUsagePage({ ...freshStats, ...override }, freshSt, priceData || {});
+  return String(usageBox.querySelector('[data-field="search"]')?.textContent || '');
+};
 const subNone = subOf({ searchCount: 0, toolCounts: {} });
 const subSearchOnly = subOf({ searchCount: 5, toolCounts: { web_search: 5 } });
 const subBoth = subOf({ searchCount: 8, toolCounts: { web_search: 5, web_fetch: 3 } });
 const subFetchOnly = subOf({ searchCount: 2, toolCounts: { web_fetch: 2 } });
-console.log('  无=' + subNone + ' / 只搜=' + subSearchOnly + ' / 都有=' + subBoth + ' / 只抓=' + subFetchOnly);
+// 只有总数、没有工具明细（老会话的 messages 里没有 toolCall）：不能凭空断言"只抓了网页"
+const subUnknown = subOf({ searchCount: 46, toolCounts: { send_message: 133, finish: 149 } });
+console.log('  无=' + subNone + ' / 只搜=' + subSearchOnly + ' / 都有=' + subBoth + ' / 只抓=' + subFetchOnly + ' / 不明=' + subUnknown);
 check('没有联网时说「没有联网」', subNone.includes('没有联网'), subNone);
 check('纯搜索：说明没抓网页', subSearchOnly.includes('只做了联网搜索') && subSearchOnly.includes('没抓网页'), subSearchOnly);
 check('都做了：两个数字都给出', subBoth.includes('搜索 5 次') && subBoth.includes('抓网页 3 次'), subBoth);
 check('只抓网页：说明没走搜索', subFetchOnly.includes('只抓了网页') && subFetchOnly.includes('没走搜索'), subFetchOnly);
+check('只有总数没有明细：不许硬说「只抓了网页」',
+  subUnknown.includes('明细未记录') && !subUnknown.includes('只抓了网页'), subUnknown);
+// 主数字是"联网动作总数"（= searchCount），不随拆分口径变；换个值要跟着变（别把主数字写死）
+const num5 = numberOf({ searchCount: 5, toolCounts: { web_search: 5 } });
+const num1234 = numberOf({ searchCount: 1234, toolCounts: { web_search: 1234 } });
+check('主数字跟随 stats.searchCount（含千分位）', num5 === '5' && num1234 === '1,234', `${num5} / ${num1234}`);
 // 还原成真实数据，后面的用例继续用
 ctx.updateUsagePage(freshStats, freshSt, priceData || {});
 

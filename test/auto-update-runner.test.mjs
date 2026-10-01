@@ -930,6 +930,25 @@ esac
   assert.equal(state.transport, 'api');
 });
 
+// 2026-10-01 第五轮审查（P2）：判定"可以接管"与抢互斥文件之间会被调度挂起，期间并发赢家
+// 可能已经建好新锁并跑起来 —— 拿到互斥后必须**再判一次**，否则会删掉别人正在用的锁、
+// 两边同时往下走（与 deploy.sh 的 take_over_lock 同一个道理）。
+// 这条是结构断言：要在行为上稳定复现这个窗口得靠调度时序，做不到确定性复现。
+// 变异对照：删掉互斥内的 lockJudgement() 调用 → 本条必红。
+test('auto-update：拿到接管互斥后再判一次锁的状态，判定逻辑只有一处', () => {
+  const source = fs.readFileSync(path.join(repo, 'scripts/auto-update.mjs'), 'utf8');
+  const takeOverAt = source.indexOf('function autoUpdateTryTakeOver()');
+  const acquireAt = source.indexOf('function acquireLock()');
+  assert.ok(takeOverAt > 0 && acquireAt > takeOverAt, '两个函数都要在（脚本结构变了就更新这条用例）');
+  const body = source.slice(takeOverAt, acquireAt);
+  const mutexAt = body.indexOf("fs.openSync(mutex, 'wx', 0o600)");
+  const recheckAt = body.indexOf('lockJudgement().takeable');
+  assert.ok(mutexAt > 0 && recheckAt > mutexAt, '互斥拿到手之后必须再判一次锁是否仍可接管');
+  // 判定只留一份：acquireLock 与互斥内各写一套迟早漂开（口径必须完全一致）
+  assert.equal((source.match(/function lockJudgement\(\)/g) || []).length, 1, 'lockJudgement 只定义一次');
+  assert.ok((source.match(/lockJudgement\(\)/g) || []).length >= 2, 'acquireLock 与互斥内都要调用它');
+});
+
 test('并发更新：抢锁失败的一方不碰胜出方的锁与源码包（2026-09-29 审查 P1）', async (t) => {
   // 背景：releaseLock() 里的 unlink/rmSync 原先写在 `if (lockHandle !== null)` 之外，
   // 于是抢锁失败的一方（UPDATE_BUSY 时 lockHandle 仍是 null）也会把**胜出方**的锁文件和

@@ -54,7 +54,15 @@ jobs:
           for f in "${files[@]}"; do node --check "$f"; done
           echo "语法检查通过（${#files[@]} 个文件）"
       - name: Shell 脚本语法检查
-        run: bash -n deploy.sh deploy-all.sh manage.sh
+      # 与 ci.yml 同口径：全仓库的 .sh 都检（原先写死三个文件名，
+      # 新加脚本不会被检查 —— 当前恰好只有三个，属埋雷不是漏检）。
+      - name: Shell 脚本语法检查
+        run: |
+          set -e
+          mapfile -t shells < <(find . -maxdepth 2 -name '*.sh' -not -path './node_modules/*' | sort)
+          [[ ${#shells[@]} -gt 0 ]] || { echo "没有找到任何 .sh"; exit 1; }
+          for f in "${shells[@]}"; do bash -n "$f"; done
+          echo "Shell 语法检查通过（${#shells[@]} 个）"
       - run: node src/ops.js scan --strict
       - run: npm run test:unit
       - run: npm run test:local

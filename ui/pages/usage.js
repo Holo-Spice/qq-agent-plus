@@ -783,7 +783,11 @@ function updateUsagePage(stats, st, prices) {
     ? '本区间没有联网'
     : (searched && fetched
       ? `搜索 ${fmtTok(searched)} 次 + 抓网页 ${fmtTok(fetched)} 次`
-      : (searched ? '只做了联网搜索（没抓网页）' : '只抓了网页（没走搜索）')));
+      : (searched ? '只做了联网搜索（没抓网页）'
+        : (fetched ? '只抓了网页（没走搜索）'
+          // 有总数却没有工具明细（老会话的 messages 里没有 toolCall 记录）：这里只能说不清，
+          // 不能默认"只抓了网页"——那是凭空的结论（2026-10-01 第五轮审查）。
+          : '明细未记录（工具计数是较新版本才记的）'))));
   set('prompt', fmtTok(t.promptTokens));
   set('prompt-sub', `输出 ${fmtTok(t.completionTokens)}`);
   set('rate', `${((t.cacheHitRate || 0) * 100).toFixed(1)}%`);

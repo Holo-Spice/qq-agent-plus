@@ -1268,6 +1268,36 @@ try {
       + (ttsOk ? '' : ` -> handlers=${ttsHandlers.length} shown=${shown} label=${labelShown} masked=${masked} keptOnShow=${keptOnShow} keptOnHide=${keptOnHide} revealedAgain=${revealedAgain} keptEdit=${keptEdit} fetched=${fetched} value=${JSON.stringify(ttsInput.value)}`));
   }
 
+  // 回读失败时不许"先翻状态再失败"（2026-10-01 审查）：原先「显示」是先把按钮与输入框切成
+  // 明文态、再去 await 取明文。端点 401 / 网络失败时按钮已经写着「隐藏」、框里却还是掩码，
+  // 用户会以为"显示成功但没值"；再点一下走的是隐藏分支，更莫名其妙。
+  {
+    // 不重新 bindSettingsEvents：那会重建设置页的 DOM 垫片、拿到的是另一批节点，
+    // 而复用上一段的按钮/输入框（同一个桩）才打得中同一份状态。
+    const btn = document.querySelector('#tts-reveal-key-btn');
+    const handlers = btn?._listeners?.click || [];
+    const input = document.querySelector('#cfg-tts-key');
+    const note = document.querySelector('#tts-key-hint');
+    const before = sandbox.fetch;
+    sandbox.fetch = async () => { throw new Error('401 未授权'); };
+    input.value = '******';
+    input.type = 'password';
+    const assigned = input.value;
+    const sameNode = input === document.querySelector('#cfg-tts-key');
+    btn.textContent = '显示';
+    btn.dataset.revealed = '0';
+    if (note) note.textContent = '';
+    try { for (const h of handlers) await h({ currentTarget: btn }); } catch { /* 看结果 */ }
+    sandbox.fetch = before;
+    const untouched = input.value === '******' && input.type === 'password'
+      && btn.textContent === '显示' && btn.dataset.revealed === '0';
+    const noteText = String(document.querySelector('#tts-key-hint')?.textContent || '');
+    const failOk = handlers.length > 0 && untouched && /读取失败/.test(noteText);
+    failOk ? pass++ : fail++;
+    console.log('  ' + (failOk ? 'OK   ' : 'FAIL ') + '设置页：取明文失败时按钮/输入框状态不变，只把原因写进提示'
+      + (failOk ? '' : ` -> handlers=${handlers.length} assigned=${JSON.stringify(assigned)} sameNode=${sameNode} value=${JSON.stringify(input.value)} type=${input.type} label=${btn.textContent} revealed=${btn.dataset.revealed} note=${JSON.stringify(noteText)}`));
+  }
+
   // 分段守卫：bindSettingsEvents 现在由四段拼成（保存与分区 / 列表与分组 / 模型与密钥 / 人设与视觉）。
   // 调度器少调一段，只会让"那一段的控件变成死控件"，页面照样能打开 —— 所以逐段点名一个**无条件绑定**
   // 的代表控件，断言它确实被绑上了。这条用例是分段重构的守卫（2026-10-01 变异验证时发现：
@@ -2419,6 +2449,14 @@ try {
           filled ? pass++ : fail++;
           console.log('  ' + (filled ? 'OK   ' : 'FAIL ') + '数值已填充  成本=' + costTxt
             + ' 调用=' + runsTxt + ' 搜索=' + searchTxt);
+
+          // 搜索卡的**副行**也要被填（2026-10-01 第五轮审查：这里原先只断言主数字，
+          // 副行写死在模板里也能全绿）。夹具是 searchCount=46 且 toolCounts 只有 web_search=39
+          // → 应当说"只做了联网搜索（没抓网页）"；把判据里的 searched 改成 fetched 这条必红。
+          const subTxt = String(usageBox.querySelector('[data-field="search-sub"]')?.textContent || '');
+          const subOk = subTxt.includes('只做了联网搜索') && subTxt.includes('没抓网页');
+          subOk ? pass++ : fail++;
+          console.log('  ' + (subOk ? 'OK   ' : 'FAIL ') + '搜索卡副行按工具明细拆开  副行=' + JSON.stringify(subTxt));
 
           // 骨架屏应已被真实内容替换
           const noSkeleton = !/usage-card skeleton/.test(html);

@@ -88,11 +88,18 @@ done
 # 两个方向都要拒：安装目录在源码仓库里 → rsync --delete 会删掉仓库里的文件；
 # 源码仓库在安装目录里 → --delete 会把 data/、.runtime/、node_modules/ 连源码目录一起清掉。
 # 2026-10-01 审查：原先只查了前一个方向。
-if [[ "$ROOT" != "$INSTALL_DIR" && "$INSTALL_DIR" == "$ROOT/"* ]]; then
+# 判定前先归一化：`/srv/app` 与 `/srv//app`、`/srv/x/../app`、以及经符号链接指向同一处的写法
+# 是同一个目录，只做未归一化的字符串前缀比较会漏判（另一条同类审查意见）。
+canon_path() {
+  realpath -m -- "$1" 2>/dev/null || printf '%s' "$1"
+}
+ROOT_CANON="$(canon_path "$ROOT")"
+INSTALL_CANON="$(canon_path "$INSTALL_DIR")"
+if [[ "$ROOT_CANON" != "$INSTALL_CANON" && "$INSTALL_CANON" == "$ROOT_CANON/"* ]]; then
   printf 'Installation path must not be nested inside the source repository\n' >&2
   exit 2
 fi
-if [[ "$ROOT" != "$INSTALL_DIR" && "$ROOT" == "$INSTALL_DIR/"* ]]; then
+if [[ "$ROOT_CANON" != "$INSTALL_CANON" && "$ROOT_CANON" == "$INSTALL_CANON/"* ]]; then
   printf 'The source repository must not be nested inside the installation path\n' >&2
   exit 2
 fi
@@ -105,6 +112,19 @@ LOCK_DIR="$DATA_DIR/.deploy.lock"
 TAKEOVER_DIR="$LOCK_DIR.takeover"
 # TMP_DIR 提前声明：Node 下载失败时 set -e 直接退出，EXIT trap 里的清理要能引用到它（set -u 下未定义会报错）。
 TMP_DIR=""
+LOCK_OWNED=false
+TAKEOVER_OWNED=false
+# trap 必须在**抢锁之前**挂上：抢锁窗口里被打断（下面那几条 exit 1、SIGTERM）也要把互斥目录收掉。
+# 2026-10-01 审查 P1：原来 trap 挂在抢锁之后，于是"删锁重建失败 → exit 1"会留下互斥目录，
+# 而互斥没有陈旧兜底时，此后每次接管都死在"retry in a moment"——把锁修成了新的死锁。
+# SIGKILL/OOM/掉电不执行 trap，那条路由下面互斥目录的 5 分钟陈旧宽限兜底。
+cleanup_lock() {
+  if [[ "$TAKEOVER_OWNED" == true ]]; then rm -rf -- "$TAKEOVER_DIR"; fi
+  if [[ "$LOCK_OWNED" == true ]]; then rm -rf -- "$LOCK_DIR"; fi
+  if [[ -n "$TMP_DIR" ]]; then rm -rf -- "$TMP_DIR"; fi
+  return 0
+}
+trap cleanup_lock EXIT
 # 锁的属主写成 pid + 开始时间：SIGKILL（systemd 超时补杀、OOM、掉电）不会执行 EXIT trap，
 # 锁目录会永久留下，无人值守的自动更新从此每次都死在第一条检查上，只能人工 rm。
 # 接管条件取严：属主进程不存在 **且** 锁已超过 5 分钟 —— 刚 mkdir 还没写 pid 的锁不能算陈旧，
@@ -115,38 +135,57 @@ lock_owner_alive() {
   [[ -n "$pid" ]] || return 1
   kill -0 "$pid" 2>/dev/null
 }
+# find 的 -mmin +5 命中时才打印路径：判"是否超过 5 分钟"要的是**输出非空**（-n）。
+# 2026-10-01 审查：原先写成 -z，语义整个反过来 —— 属主已死且确实过期的锁走 else 直接 exit 1
+# （SIGKILL 之后无人值守的更新就永久卡死），而"刚 mkdir 还没写 pid"的并发锁反被抢走 rm -rf。
+stale_enough() {
+  [[ -n "$(find "$1" -maxdepth 0 -mmin +5 2>/dev/null)" ]]
+}
+lock_is_stale() {
+  ! lock_owner_alive && stale_enough "$LOCK_DIR"
+}
+# 抢到互斥之后才真正删锁重建。返回非 0 = 不该抢，调用方退出（trap 会清掉互斥）。
+take_over_lock() {
+  # 拿到互斥后**再判一次**：判定与抢互斥之间可能被调度挂起，期间别的进程可能已经建好新锁
+  # （它先判定、再抢到互斥、跑完释放），照删就会把人家正在用的锁删掉（2026-10-01 审查 P2）。
+  if ! lock_is_stale; then
+    printf 'Another deployment is running (the lock was refreshed while taking over).\n' >&2
+    return 1
+  fi
+  printf 'Stale deployment lock (owner process is gone for over 5 minutes): taking it over\n' >&2
+  rm -rf -- "$LOCK_DIR"
+  mkdir "$LOCK_DIR" 2>/dev/null || { printf 'Another deployment may be running.\n' >&2; return 1; }
+  LOCK_OWNED=true
+  return 0
+}
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  # find 的 -mmin +5 命中时才打印路径：判"锁已超过 5 分钟"要的是**输出非空**（-n）。
-  # 2026-10-01 审查：原先写成 -z，语义整个反过来 —— 属主已死且确实过期的锁走 else 直接 exit 1
-  # （SIGKILL 之后无人值守的更新就永久卡死），而"刚 mkdir 还没写 pid"的并发锁反被抢走 rm -rf。
-  if ! lock_owner_alive && [[ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +5 2>/dev/null)" ]]; then
-    # 抢锁要过一道互斥（mkdir 原子）：两个并发部署同时判定"陈旧"时，若都直接 rm -rf + mkdir，
-    # 后者会把前者刚建好的新锁删掉，两个进程同时往下走。只有一个能进这段，另一个直接退出。
-    if mkdir "$TAKEOVER_DIR" 2>/dev/null; then
-      printf 'Stale deployment lock (owner process is gone for over 5 minutes): taking it over\n' >&2
-      rm -rf -- "$LOCK_DIR"
-      mkdir "$LOCK_DIR" 2>/dev/null || { printf 'Another deployment may be running.\n' >&2; exit 1; }
-      rmdir "$TAKEOVER_DIR" 2>/dev/null || true
-    else
-      printf 'Another deployment is taking over a stale lock; retry in a moment.\n' >&2
-      exit 1
-    fi
-  else
+  if ! lock_is_stale; then
     printf 'Another deployment is running (pid %s, started %s).\n' \
       "$(cat "$LOCK_DIR/pid" 2>/dev/null || printf '?')" "$(cat "$LOCK_DIR/started" 2>/dev/null || printf '?')" >&2
     printf 'If that process is really gone, remove the lock and retry: rm -rf -- %s\n' "$LOCK_DIR" >&2
     exit 1
   fi
+  # 抢锁要过一道互斥（mkdir 原子）：两个并发部署同时判定"陈旧"时，若都直接 rm -rf + mkdir，
+  # 后者会把前者刚建好的新锁删掉，两个进程同时往下走。只有一个能进这段，另一个退出。
+  if ! mkdir "$TAKEOVER_DIR" 2>/dev/null; then
+    # 互斥本身也可能被 SIGKILL 遗留（trap 不执行）：过 5 分钟就清掉重来，
+    # 否则自动更新会被永久钉在"有人正在接管"上 —— 和当初那把陈旧锁是同一个坑。
+    if ! stale_enough "$TAKEOVER_DIR"; then
+      printf 'Another deployment is taking over a stale lock; retry in a moment.\n' >&2
+      exit 1
+    fi
+    printf 'Leftover takeover lock (older than 5 minutes): removing it\n' >&2
+    rm -rf -- "$TAKEOVER_DIR"
+    mkdir "$TAKEOVER_DIR" 2>/dev/null || { printf 'Another deployment is taking over a stale lock; retry in a moment.\n' >&2; exit 1; }
+  fi
+  TAKEOVER_OWNED=true
+  take_over_lock || exit 1
+  rmdir "$TAKEOVER_DIR" 2>/dev/null || true
+  TAKEOVER_OWNED=false
 fi
 printf '%s\n' "$$" > "$LOCK_DIR/pid"
 printf '%s\n' "$(date -Is 2>/dev/null || date)" > "$LOCK_DIR/started"
-cleanup_lock() {
-  rm -rf -- "$LOCK_DIR"
-  rm -rf -- "$TAKEOVER_DIR"
-  if [[ -n "$TMP_DIR" ]]; then rm -rf -- "$TMP_DIR"; fi
-  return 0
-}
-trap cleanup_lock EXIT
+LOCK_OWNED=true
 
 node_ready() {
   [[ -n "$1" && -x "$1" ]] || return 1

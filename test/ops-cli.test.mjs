@@ -81,15 +81,22 @@ test('install-timers --print：备份单元把路径/服务名/保留份数显�
 
   const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (const line of [
-    `Environment=QQ_AGENT_DIR=${rootDir}`,
-    `Environment=QQ_AGENT_DATA_DIR=${rootDir}/mydata`,
-    `Environment=QQ_AGENT_BACKUP_DIR=${rootDir}/mybackups`,
-    'Environment=QQ_AGENT_SERVICE=qq-agent-custom.service',
-    'Environment=QQ_AGENT_KEEP=9',
+    `Environment="QQ_AGENT_DIR=${rootDir}"`,
+    `Environment="QQ_AGENT_DATA_DIR=${rootDir}/mydata"`,
+    `Environment="QQ_AGENT_BACKUP_DIR=${rootDir}/mybackups"`,
+    'Environment="QQ_AGENT_SERVICE=qq-agent-custom.service"',
+    'Environment="QQ_AGENT_KEEP=9"',
   ]) {
     assert.ok(
       new RegExp(`^${escape(line)}$`, 'm').test(backup),
       `备份单元缺少生效行（注释不算）：${line}`
     );
+  }
+  // 值必须整体加引号：systemd 的 Environment= 未加引号时按空白切词，路径里有空格就会被拆开
+  // （变成"目录只读到空格前"），而这里三个路径恰好都可以来自用户环境变量（另一条审查意见）。
+  // 口径与 scripts/install-service.mjs 生成的单元一致。
+  for (const unit of sections.values()) {
+    const unquoted = unit.split('\n').filter((line) => /^Environment=QQ_AGENT_[A-Z_]+=[^"]/.test(line));
+    assert.deepEqual(unquoted, [], `Environment 值必须加引号：${unquoted.join(' / ')}`);
   }
 });

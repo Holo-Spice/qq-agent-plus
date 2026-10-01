@@ -146,6 +146,33 @@ function fileAgeMs(file) {
 }
 
 /**
+ * 现在这把锁能不能接管？返回 { takeable, reason }。
+ * reason 是要报给用户的话（不可接管时用），`takeable: true` 时为空串。
+ */
+function lockJudgement() {
+  let owner = {};
+  try { owner = readObject(paths.lock); } catch { /* 空/坏锁：走下面的宽限 */ }
+  const pid = Number(owner.pid) || 0;
+  if (pid > 0) {
+    let alive = true;
+    try {
+      process.kill(pid, 0);
+    } catch (signalError) {
+      // EPERM 之类表示进程确实还在（只是不归我们管）→ 保守当作活着
+      alive = signalError?.code !== 'ESRCH';
+    }
+    if (alive) return { takeable: false, reason: `Another update process is running (${pid})` };
+    return { takeable: true, reason: '' };
+  }
+  // 读不出 pid：可能是刚 open('wx') 还没写完 JSON 的并发进程，也可能是写了一半被杀。
+  // 前者不能抢，后者才该抢 —— 用时间分开（原来 pid=0 时直接抢，等于把并发进程的锁删掉）。
+  if (fileAgeMs(paths.lock) < LOCK_STALE_MS) {
+    return { takeable: false, reason: 'Another update process is starting' };
+  }
+  return { takeable: true, reason: '' };
+}
+
+/**
  * 接管一个没有活属主的锁。
  * 2026-10-01 审查：原来是裸的 unlinkSync + openSync('wx') —— 这两步不是原子对，两个进程同时
  * 判定"陈旧"时会互相删掉对方刚建好的锁，双双拿到"唯一"锁。改成先抢一个互斥文件（open 'wx'
@@ -165,6 +192,9 @@ function autoUpdateTryTakeOver() {
       continue;
     }
     try {
+      // 拿到互斥后**再判一次**：判定与抢互斥之间可能被挂起，期间别的进程可能已经建好新锁
+      // （它先判、再抢到互斥、跑完释放），这时照删就把人家正在用的锁删掉了（2026-10-01 审查 P2）。
+      if (!lockJudgement().takeable) return false;
       try { fs.unlinkSync(paths.lock); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
       lockHandle = fs.openSync(paths.lock, 'wx', 0o600);
       return true;
@@ -186,30 +216,9 @@ function acquireLock() {
     lockHandle = fs.openSync(paths.lock, 'wx', 0o600);
   } catch (error) {
     if (error?.code !== 'EEXIST') throw error;
-    let owner = {};
-    try { owner = readObject(paths.lock); } catch { /* 空/坏锁：走下面的宽限 */ }
-    const pid = Number(owner.pid) || 0;
-    if (pid > 0) {
-      let alive = true;
-      try {
-        process.kill(pid, 0);
-      } catch (signalError) {
-        // EPERM 之类表示进程确实还在（只是不归我们管）→ 保守当作活着
-        alive = signalError?.code !== 'ESRCH';
-      }
-      if (alive) {
-        throw Object.assign(
-          new Error(`Another update process is running (${pid})`),
-          { code: 'UPDATE_BUSY' }
-        );
-      }
-    } else if (fileAgeMs(paths.lock) < LOCK_STALE_MS) {
-      // 读不出 pid：可能是刚 open('wx') 还没写完 JSON 的并发进程，也可能是写了一半被杀。
-      // 前者不能抢，后者才该抢 —— 用时间分开（原来 pid=0 时直接抢，等于把并发进程的锁删掉）。
-      throw Object.assign(
-        new Error('Another update process is starting'),
-        { code: 'UPDATE_BUSY' }
-      );
+    const judgement = lockJudgement();
+    if (!judgement.takeable) {
+      throw Object.assign(new Error(judgement.reason), { code: 'UPDATE_BUSY' });
     }
     if (!autoUpdateTryTakeOver()) {
       throw Object.assign(

@@ -39,29 +39,58 @@ test('deploy.sh：只有"属主已死且锁确实超过 5 分钟"才接管陈旧
   const source = fs.readFileSync(path.join(repo, 'deploy.sh'), 'utf8');
   assert.match(
     source,
-    /if ! lock_owner_alive && \[\[ -n "\$\(find "\$LOCK_DIR" -maxdepth 0 -mmin \+5/,
+    /\[\[ -n "\$\(find "\$1" -maxdepth 0 -mmin \+5/,
     '判据必须是 -n（find 的 -mmin +5 命中时才打印路径）；写成 -z 会把语义反过来'
   );
-  assert.doesNotMatch(source, /lock_owner_alive && \[\[ -z "\$\(find/, '不许再用 -z 判陈旧');
+  assert.match(
+    source,
+    /! lock_owner_alive && stale_enough "\$LOCK_DIR"/,
+    '两个条件都要满足：属主进程不在 **且** 锁确实超过 5 分钟'
+  );
+  assert.doesNotMatch(source, /-z "\$\(find/, '不许再用 -z 判陈旧');
 });
 
 // 2026-10-01 审查：deploy.sh 三处收口 —— 路径嵌套要双向都拒、下载 Node 的临时目录要进 EXIT trap、
 // 接管陈旧锁要过一道互斥（否则两个并发部署会互相删锁、双双往下走）。
 test('deploy.sh：路径嵌套双向都拒、TMP_DIR 进 EXIT trap、抢锁走互斥', () => {
   const source = fs.readFileSync(path.join(repo, 'deploy.sh'), 'utf8');
-  // 正向：安装目录在源码仓库里
-  assert.match(source, /"\$INSTALL_DIR" == "\$ROOT\/"\* \]\]/);
-  // 反向：源码仓库在安装目录里 —— rsync --delete 会把 data/、node_modules/ 连源码目录一起清掉
-  assert.match(source, /"\$ROOT" == "\$INSTALL_DIR\/"\* \]\]/);
+  // 两个方向的拒绝文案都要在（具体比较见下一条用例：已改成归一化后的 *_CANON）
+  assert.match(source, /Installation path must not be nested inside the source repository/);
   assert.match(source, /The source repository must not be nested inside the installation path/);
   // 下载 Node 失败时 set -e 直接退出，临时目录必须由 EXIT trap 清（原来只在成功路径 rm）
   assert.match(source, /^TMP_DIR=""$/m, 'TMP_DIR 要先声明：set -u 下 trap 引用未定义变量会报错');
   assert.match(source, /if \[\[ -n "\$TMP_DIR" \]\]; then rm -rf -- "\$TMP_DIR"; fi/,
     'TMP_DIR 必须挂在 EXIT trap 的清理里');
   assert.match(source, /TAKEOVER_DIR="\$LOCK_DIR\.takeover"/);
-  assert.match(source, /if mkdir "\$TAKEOVER_DIR" 2>\/dev\/null; then/,
+  assert.match(source, /if ! mkdir "\$TAKEOVER_DIR" 2>\/dev\/null; then/,
     '抢锁前先抢互斥（mkdir 是原子的），只有赢家去删锁重建');
   assert.match(source, /rm -rf -- "\$TAKEOVER_DIR"/, '互斥要跟着 trap 一起收');
+});
+
+// 2026-10-01 第五轮审查 P1/P2：修锁的时候不能把锁修成新的死锁。
+//  · 互斥目录自己也要有陈旧兜底：SIGKILL/OOM/掉电不执行 trap，互斥永久遗留时，
+//    之后每次接管都会死在"retry in a moment"上；
+//  · trap 必须**先于**抢锁安装：抢锁窗口里 exit 1（比如"别的进程刚建了锁"）也要把互斥收掉；
+//  · 清理按"确实持有"来：没抢到锁的一方绝不能删别人的锁；
+//  · 拿到互斥后要再判一次：判定与抢互斥之间可能被挂起，期间锁已被赢家刷新；
+//  · 嵌套判定前先归一化：`//`、`..`、符号链接这些等价写法不能绕过双向拒绝。
+test('deploy.sh：互斥有陈旧兜底、trap 先于抢锁、持有才清、抢到互斥后再判一次、路径先归一化', () => {
+  const source = fs.readFileSync(path.join(repo, 'deploy.sh'), 'utf8');
+  assert.match(source, /stale_enough "\$TAKEOVER_DIR"/,
+    '互斥目录本身要过 5 分钟陈旧宽限，否则一次 SIGKILL 就永久卡住自动更新');
+  assert.match(source, /Leftover takeover lock \(older than 5 minutes\)/);
+  const trapAt = source.indexOf('trap cleanup_lock EXIT');
+  const lockAt = source.indexOf('if ! mkdir "$LOCK_DIR" 2>/dev/null; then');
+  assert.ok(trapAt > 0 && lockAt > 0, '两个锚点都要在（脚本结构变了就更新这条用例）');
+  assert.ok(trapAt < lockAt, 'trap 必须在抢锁之前安装：抢锁窗口里的 exit 1 也要清掉互斥');
+  assert.match(source, /if \[\[ "\$LOCK_OWNED" == true \]\]/, '清锁前要确认确实持有它');
+  assert.match(source, /if \[\[ "\$TAKEOVER_OWNED" == true \]\]/, '清互斥同理');
+  assert.match(source, /the lock was refreshed while taking over/,
+    '拿到互斥后必须再判一次陈旧（否则会删掉并发赢家刚建好的锁）');
+  assert.match(source, /ROOT_CANON="\$\(canon_path "\$ROOT"\)"/, '嵌套判定前先把路径归一化');
+  assert.match(source, /INSTALL_CANON="\$\(canon_path "\$INSTALL_DIR"\)"/);
+  assert.match(source, /"\$INSTALL_CANON" == "\$ROOT_CANON\/"\*/);
+  assert.match(source, /"\$ROOT_CANON" == "\$INSTALL_CANON\/"\*/);
 });
 
 // Issue #5（2026-09-22）：国内服务器拉不到 Docker Hub，脚本只报「after 3 attempts」就退出，
