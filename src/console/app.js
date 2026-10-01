@@ -88,6 +88,37 @@ function uiBuildStamp() {
 }
 const UI_BUILD = uiBuildStamp();
 
+// ── UI 静态资源的版本令牌（改进方案 §11「给 core/* 加内容哈希长缓存」）──
+// 令牌 = 文件内容的 sha256 前 12 位，按 (size, mtime) 记忆，避免每次请求重算哈希。
+// 用途在 handleHttp：下发 index.html 时把自家资源改写成 "?v=<令牌>"，带对令牌的请求回长缓存；
+// 令牌对不上或没带 → 退回回源校验（否则旧 URL 会把旧脚本钉在浏览器里）。
+const ASSET_TOKEN_CACHE = new Map();
+function assetToken(fullPath) {
+  const stat = fs.statSync(fullPath);
+  const stamp = `${stat.size}:${Math.round(stat.mtimeMs)}`;
+  const hit = ASSET_TOKEN_CACHE.get(fullPath);
+  if (hit && hit.stamp === stamp) return hit.token;
+  const token = crypto.createHash('sha256').update(fs.readFileSync(fullPath)).digest('hex').slice(0, 12);
+  ASSET_TOKEN_CACHE.set(fullPath, { stamp, token });
+  return token;
+}
+
+// 把 HTML 里"自家静态资源"的引用改成带内容哈希的 URL。只动以 / 开头、且没有查询串的路径：
+// 外链（http(s):// 或 //cdn）与已经带 ?v= 的原样保留；目标文件不存在也原样保留
+// （让正常路径去报 404，别在改写阶段把它吃掉）。
+function rewriteAssetUrls(html) {
+  return html.replace(/(\s(?:src|href))="(\/[^"?#]+\.(?:js|css|svg|png))"/g, (whole, attr, urlPath) => {
+    const target = path.join(UI_DIR, ...urlPath.slice(1).split('/'));
+    const rel = path.relative(UI_DIR, target);
+    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return whole;
+    try {
+      return `${attr}="${urlPath}?v=${assetToken(target)}"`;
+    } catch {
+      return whole;
+    }
+  });
+}
+
 // ── 白名单判断（移植自原版 allowed()） ───────────────────────────────────
 function allowed(kind, id, cfg) {
   const s = String(id);
@@ -2924,6 +2955,8 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     }
     // imageGen 的 Key：与 tts 同款语义（留空/掩码 = 保持原值）。前端已按此过滤，
     // 这里再兜一层 —— 配置是外部可编辑的，别让一次手写的空串把 Key 冲掉。
+    // （派生结论 available/hasApiKey 的剥离在 migrateConfig：那是所有写入路径的必经口，
+    //   也顺带兜住读盘 —— 与 asr 同款，见 IMAGEGEN_DERIVED_KEYS 的说明）
     if (patch?.imageGen && typeof patch.imageGen === 'object') {
       const submitted = String(patch.imageGen.apiKey ?? '').trim();
       if (!submitted || submitted === '******') delete patch.imageGen.apiKey;
@@ -3539,18 +3572,50 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         return;
       }
       try {
-        const data = fs.readFileSync(fullPath);
+        const stat = fs.statSync(fullPath);
         const ext = path.extname(fullPath);
         const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png' };
-        const stat = fs.statSync(fullPath);
+        let body = fs.readFileSync(fullPath);
+        let etag;
+        let cacheControl = 'no-cache';
+        const askedToken = new URL(req.url, 'http://127.0.0.1').searchParams.get('v') || '';
+        if (ext === '.html') {
+          // 下发的 HTML 里把自家脚本/样式换成带**内容哈希**的 URL；ETag 取改写后的字节 ——
+          // 这样"某个脚本变了、HTML 自己没变"也会换 ETag，浏览器不会攥着旧 HTML 里的旧令牌不放。
+          body = Buffer.from(rewriteAssetUrls(body.toString('utf8')));
+          etag = `W/"${crypto.createHash('sha256').update(body).digest('hex').slice(0, 16)}"`;
+        } else {
+          const token = assetToken(fullPath);
+          if (askedToken && askedToken === token) {
+            // 令牌对得上 = 这个 URL 的内容是不可变的：长缓存，别再回源。
+            cacheControl = 'public, max-age=31536000, immutable';
+            etag = `"${token}"`;   // 强 ETag（内容哈希）
+          } else {
+            // 没带令牌（老书签/直接访问）或令牌对不上（部署换过文件）：退回回源校验，
+            // 不给人"用旧 URL 钉住旧脚本"的机会。
+            etag = `W/"${stat.size.toString(16)}-${Math.round(stat.mtimeMs).toString(16)}"`;
+          }
+        }
+        // 真 304：此前只发了 ETag/Last-Modified 却从不判 If-None-Match，于是 no-cache 强制回源
+        // 而每次都是 200 + 全文 —— 实测每开一次控制台就把 30 个脚本整个重下一遍。
+        // HTML 只认 If-None-Match（它的 ETag 是改写后内容的哈希）；其余文件两种校验都认。
+        const inm = String(req.headers['if-none-match'] || '');
+        const matched = inm
+          ? inm.split(',').some((t) => t.trim() === etag || t.trim() === `W/${etag}` || `W/${t.trim()}` === etag)
+          : (ext !== '.html' && String(req.headers['if-modified-since'] || '') !== ''
+            && Date.parse(req.headers['if-modified-since']) >= Math.floor(stat.mtimeMs / 1000) * 1000);
+        if (matched) {
+          res.writeHead(304, { etag, 'cache-control': cacheControl });
+          res.end();
+          return;
+        }
         res.writeHead(200, {
           'content-type': types[ext] ?? 'application/octet-stream',
-          // no-cache = 每次使用前必须回源校验；带 ETag/Last-Modified 让未变时走 304
-          'cache-control': 'no-cache',
-          etag: `W/"${stat.size.toString(16)}-${Math.round(stat.mtimeMs).toString(16)}"`,
+          'cache-control': cacheControl,
+          etag,
           'last-modified': stat.mtime.toUTCString()
         });
-        res.end(data);
+        res.end(body);
         return;
       } catch {
         res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });

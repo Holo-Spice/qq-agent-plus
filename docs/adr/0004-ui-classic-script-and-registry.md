@@ -49,3 +49,27 @@
   且它的第一步（去插件化）已经完成。
 - 以后若要再提"抽 lifecycle.js"，先重跑这次测量：闭包没降到可接受规模（比如 < 50），
   就说明前提仍然不成立。
+
+## 补记（2026-10-01）：按域拆完 ui/app.js 后，顺手拆了 core/widgets.js；新增的
+`core/lifecycle-labels.js` 与本 ADR 不冲突
+
+这一天 ui/app.js 从 13,130 行拆到 1,019 行（core/* + pages/*，逐声明字节守恒），随后又把这套
+拆分里唯一名不副实的文件 `ui/core/widgets.js`（1,606 行）按"谁在用它"拆开：chat 列表与消息渲染
+归 `pages/chat.js`、用量页归 `pages/usage.js`、动态与空间状态加载归 `pages/moments.js`、价格弹窗归
+`pages/settings.js`、实验功能状态拉取归 `pages/features.js`。它当初是"零依赖叶子"的统一桶，
+于是把好几个域的整块渲染装到了一起 —— **教训：按依赖层级分桶会得到"按名字看不出内容"的文件，
+按调用方分域才对**。
+
+拆剩 5 个声明（`triggerKindOf`/`triggerKindLabel`/`lifecycleStateOf`/`lifecycleRemainingText`/
+`lifecycleRunsFor`）放进新的 `ui/core/lifecycle-labels.js`（40 行）。**它不违反本 ADR 的决策 1**，
+按本 ADR 自己给的判据重新量过（声明级引用闭包，2026-10-01，全 ui 379 个顶层声明）：
+
+| 种子 | 闭包规模 |
+|---|---|
+| 那 5 个叶子 | **8 / 379（2%）** —— 含 `state` 与 `TRIGGER_KIND_LABEL`、`fmtRemainingMs` |
+| 本 ADR 当年那批 18 个符号（取 6 个代表） | 329 / 379（87%）—— 与当年记录的 327/357 同量级 |
+
+即：判据是"闭包 < 50 才成立"，5 个叶子（8）成立，当年那 18 个（329）不成立。它们留在 core 层是因为
+`core/state.js` 也在用（调用期解析），且被 `pages/status.js`、`pages/sessions.js` 与外挂
+`status-refresh.js` 共用。**别再往这个文件里加东西** —— 它不是 lifecycle 域，只是"几个标签/换算
+小件"的落脚点。

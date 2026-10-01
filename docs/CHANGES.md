@@ -106,6 +106,13 @@
   关闭时不注入工具、提示词也不提画图。测试：适配器 6 例 + 端到端 4 例（真落库→真能发）+ 渲染 2 例 +
   编排器 1 例；4 条变异验证（跨域回退用模型 Key / 去掉体积上限 / 闸门恒放行 / 未开仍注入）——
   其中"体积上限"与"未开仍注入"头两次是**假绿**（变异后仍全绿），各补了用例才钉住。
+  **2026-09-30 审查又补三处**（均为本批引入、未发布的缺陷）：① `available`/`hasApiKey` 这类
+  "给界面看的派生结论"会被控制台整段展开回传写进 config.json，旧结论从此冒充当前状态 —— 按
+  `IMAGEGEN_DERIVED_KEYS` 在 `migrateConfig` 里统一剔除（该口也是读盘必经，顺带清掉遗留脏字段）；
+  ② 提示词原按 `enabled` 判断、而工具过滤按 `imageGenAvailable`，"勾了开关但没填模型"时会
+  一边摘掉工具一边教模型去调 —— 两处口径统一为 `imageGenAvailable`；③ 控制台的「显示」按钮
+  有控件无绑定（点了没反应），补 `GET /api/imagegen/key` 端点（守卫同 `/api/tts/key`）并接上事件。
+  新增 `test/imagegen-config-api.test.mjs` 4 例 + 编排器/渲染各 1 例断言，三条修复各做变异验证（均如期变红）。
 - **全量审查修复（针对改进方案 C0–#13 那 47 个提交）**：`deploy.sh`、`scripts/verify-deployment-target.mjs`、
   `src/core/health-check.js`、`src/core/secret-keys.js`、`src/core/redact.js`、`src/memory/memory-runtime-integration.js`、
   `src/ops.js`、`src/console/app.js`、`src/llm/prompt.js`、`ui/app.js`。
@@ -135,7 +142,8 @@
   并把按值脱敏抽成 `redactSecretValue` 接到 `redactSecretFields` 的字符串分支上。
   另修 P2：`ops audit-prune` 的 help 与 `docs/OPS.md` 写了 `--data=目录` 但代码忽略它（会删**默认**目录的审计文件）。
   以上每条都补了用例并做变异验证（还原修复必红）；顺带补掉 `generate_image` 的两处接口不一致
-  （提示词与工具注入的门不统一、控制台「显示」按钮没有对应路由点了没反应）。
+  （提示词与工具注入的门不统一、控制台「显示」按钮没有对应路由点了没反应 —— 与上一条
+  「画出图来」的 2026-09-30 审查补记是同一处缺陷，统合后只保留一处实现与一套用例）。
 - **定时提醒**：`src/features/reminders.js`、`src/console/app.js`、`ui/app.js`。
   失败模式：提醒原来只在内存里、重启就丢；多条同时到点会叠着派发；派发前不预检会把提醒标成已发生却没真提醒。
   现行做法：落盘持久化、同会话多条合并、派发前预检（模型忙/会话在跑就排队），控制台新增"定时提醒"页
@@ -172,6 +180,15 @@
   同步文档：`docs/UI-SMOKE.md`（新增，UI 手工烟测清单）、`docs/adr/0001~0004`（新增，其中 0004 用
   实测记下"不抽 `core/lifecycle.js`"的原因：那 18 个符号的传递闭包是 357 个顶层声明里的 327 个）、
   AGENTS.md 的 UI 约定与定时器条数更正（三个→四个，audit-prune 早就加了）。
+- **健康巡检误报"收发停止"（生产实测，2026-10-01 凌晨）**：`src/core/health-check.js`、`test/ops-health.test.mjs`。
+  失败模式：`outbound-freshness` 的判据是"6 小时内没有任何出站消息＝可疑"，而**深夜/冷清时段群里本来就没人说话**，
+  于是每次在安静时段部署（部署会重启服务、出站水位跟着停住）之后，恰好 6 小时越过阈值 → 连击 3 次 →
+  私聊 owner 报"收发停止"。2026-10-01 06:24 实测就是这么误报的：那一夜 6.7 小时里**一条入站消息都没有**
+  （最后一条入站 23:40:37、最后一条出站 23:40:53，都答完了），其余 6 项检查全绿。
+  方案 §#7 只写了"observe 模式要跳过"，把其它静默期留给"连续 3 次"的抑制口径 —— 但抑制只压抖动，
+  压不住"本来就没人的时段"。现行做法：判据改成"**有人说话而 bot 一条都没回**"才算故障 ——
+  窗口内有入站消息且出站超时才失败；窗口内没有入站（或库里根本没有入站记录）记为**静默期**（ok，明细写明各自时间）。
+  三处新用例（有入站且超时必红 / 无入站记静默 / 从来没有入站记静默）+ 2 条变异验证（拆掉两个静默期分支，对应用例如期变红）。
 
 ## 1. 思考控制与表情匹配（v0.7.4 起）
 
@@ -196,6 +213,17 @@
   现行做法：分级匹配（备注优先，只在同一级内要求唯一）id/md5/url → 备注精确相等 → 备注包含查询 → 查询包含备注 →
   标签；展示性修饰做成"由长到短"的形态阶梯、从最完整形态开始试（备注自身以括号结尾如「裂开（崩溃）」时不会被
   剥短形态劫持到别的条目）；能从「（stickerId：xxx）」里抠出 id 兜底。生产库 37 条清单行 + 截断行实测 66/66 命中。
+- **OpenDesign（amr-link 网关）渠道预设**：`src/core/provider-presets.js`、`ui/app.js`、`docs/CONFIG-EXAMPLES.md`。
+  失败模式：该网关虽属"聚合网关"一类，行为却与既有的 Command Code 预设不同 —— 四轮探针实测（2026-09-30）表明它
+  **吞掉全部 thinking 类参数**（`thinking` / `enable_thinking` / `thinking_budget` / `reasoning` 均被忽略、请求成功
+  但推理照跑），只认 `reasoning_effort`；且接受度**逐模型不同**：deepseek 系（v4-flash / v4-flash-vision-exp /
+  v4-pro / v4.1-flash）六档全通且 `none` 真正关闭（推理 token 从 100+ 归零，各模型 3 次复现），
+  glm-5.3 系只认 low/high/max，传 `none` 与 `medium` 直接 400。
+  现行做法：off 映射为 `reasoning_effort: none`（不是历史默认的 `thinking.type` —— 实测会被吞掉），
+  档位只列**两端都通过**的 low/high/max（同渠道内模型不同时取交集，与智谱条目同一约定）；`medium` 不进表，
+  要它的用户走「额外请求参数」。glm 系的 400 由既有的"400 且文本含 reasoning → 摘参重试"兜底
+  （实测该 400 原文命中该正则），故 `canDisable` 保持 `null` 而非 `false` —— 该发 none 让 deepseek 系真关掉。
+  模型例：deepseek-v4.1-flash、glm-5.3-flash、kimi-k2.7-code、mimo-v2.6-pro。
 - **工具报错写进 journal 并统一脱敏**：`src/core/orchestrator.js`、`src/core/redact.js`（新增）。
   失败模式：工具失败只进控制台异常面板，journal 里查不到，排查时容易漏（Issue #17 的补充建议）。现行做法：
   同一判定口径下补一行 `[tool] … 出错：…`，文本走统一脱敏（与 incident-pilot 入库同一套规则），并把

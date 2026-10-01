@@ -20,9 +20,18 @@ process.on('exit', () => {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
-const SRC = path.join(ROOT, 'ui', 'app.js');
-const code = fs.readFileSync(SRC, 'utf8');
 const indexHtml = fs.readFileSync(path.join(ROOT, 'ui', 'index.html'), 'utf8');
+// script 清单的唯一真相源 = index.html（与 ui-smoke / ui-modules 同一口径）
+const htmlScriptFiles = () => [...indexHtml.matchAll(/<script\s+src="([^"]+)"/g)].map((m) => m[1].replace(/^\//, ''));
+// 本用例的沙箱只铺到 app.js 为止（8 个外挂插件要 NodeFilter 等真实 DOM 能力，由 ui-smoke
+// 用 happy-dom 覆盖）。拆模块后 app.js 之前多出 core/pages 若干文件，按清单顺序取到 app.js（含）即止。
+const htmlFilesUpToApp = () => {
+  const all = htmlScriptFiles();
+  return all.slice(0, all.indexOf('app.js') + 1);
+};
+// 源码断言用的"全部前端源码"：拆模块后某段字符串可能已搬去 core/pages，
+// 用 app.js 单文件去断言会假红（"这里没有"其实是"搬到别处了"）。按 index.html 顺序全量拼接。
+const code = htmlScriptFiles().map((f) => fs.readFileSync(path.join(ROOT, 'ui', f), 'utf8')).join('\n');
 
 // ── 极简 DOM 桩 ──
 function makeEl(id = '', cls = '') {
@@ -138,14 +147,13 @@ const results = [];
 
 try {
   const ctx = vm.createContext(sandbox);
-  // core 两个共享内核文件必须在 app.js 之前进同一沙箱（改进方案 #1 A 档：$/$$/esc/api
-  // 的单一实现在 ui/core/ 下；app.js 里已删除本地定义，缺了会在运行时 ReferenceError）
-  for (const coreFile of ['ui/core/registry.js', 'ui/core/dom.js', 'ui/core/api.js']) {
-    const coreCode = fs.readFileSync(path.join(ROOT, coreFile), 'utf8');
-    new vm.Script(coreCode, { filename: coreFile }).runInContext(ctx);
+  // 按 index.html 的 script 清单**真实顺序**加载（唯一真相源）。拆模块后清单会变，
+  // 在这里写死文件名就会静默缺文件 —— 轻则 ReferenceError，重则少加载一个页面文件而
+  // 渲染函数悄悄退化成"未定义"，测试却照绿。
+  for (const srcFile of htmlFilesUpToApp()) {
+    const srcCode = fs.readFileSync(path.join(ROOT, 'ui', srcFile), 'utf8');
+    new vm.Script(srcCode, { filename: `ui/${srcFile}` }).runInContext(ctx);
   }
-  // 用 Script 执行（app.js 是普通脚本，非 module）
-  new vm.Script(code, { filename: SRC }).runInContext(ctx);
 
   // 取出渲染函数并执行
   const sections = [
@@ -1137,9 +1145,53 @@ try {
     && ttsSectionHtml.includes('id="cfg-img-model"')
     && ttsSectionHtml.includes('id="cfg-img-max"')
     && ttsSectionHtml.includes('id="img-test-btn"')
+    && ttsSectionHtml.includes('id="cfg-img-reveal-key-btn"')            // Key 要有「显示」按钮
     && ttsSectionHtml.includes('按张计费');
   imgOk ? pass++ : fail++;
-  console.log('  ' + (imgOk ? 'OK   ' : 'FAIL ') + '设置页：图片生成区块齐全（默认关、含闸门与试画按钮）');
+  console.log('  ' + (imgOk ? 'OK   ' : 'FAIL ') + '设置页：图片生成区块齐全（默认关、含闸门、显示按钮与试画按钮）');
+
+  // 「显示」按钮必须是活的（2026-09-30 审查：控件在、却没有任何绑定，点了没反应）。
+  // 与 tts 那把同款：点一下要向后端专用端点取明文（/api/imagegen/key），不是读已脱敏的 state.config。
+  {
+    vm.runInContext("state.settingsSection = 'asr';", ctx);
+    const imgCfg = { ...cfg, imageGen: { ...cfg.imageGen, enabled: true, model: 'gpt-image-1', hasApiKey: true } };
+    vm.runInContext(`state.config = ${JSON.stringify(imgCfg)};`, ctx);
+    ctx.bindSettingsEvents(imgCfg);   // 重新绑一次（每次 renderSettings 都会绑）
+    const revealBtn = document.querySelector('#cfg-img-reveal-key-btn');
+    const handlers = revealBtn?._listeners?.click || [];
+    let fetched = null;
+    const before = sandbox.fetch;
+    sandbox.fetch = async (url) => {
+      fetched = String(url);
+      return { ok: true, status: 200, json: async () => ({ ok: true, apiKey: 'img-secret' }), text: async () => '' };
+    };
+    try { for (const h of handlers) await h({ currentTarget: revealBtn }); } catch { /* 看结果 */ }
+    sandbox.fetch = before;
+    const keyNode = document.querySelector('#cfg-img-key');
+    const revealOk = handlers.length > 0 && /\/api\/imagegen\/key/.test(String(fetched))
+      && keyNode.value === 'img-secret' && keyNode.type === 'text';
+    revealOk ? pass++ : fail++;
+    console.log('  ' + (revealOk ? 'OK   ' : 'FAIL ') + '设置页：图片生成的「显示」按钮真的向后端要明文（不是死按钮）'
+      + (revealOk ? '' : ` -> handlers=${handlers.length} fetched=${fetched} value=${keyNode?.value} type=${keyNode?.type}`));
+  }
+
+  // 分段守卫：bindSettingsEvents 现在由四段拼成（保存与分区 / 列表与分组 / 模型与密钥 / 人设与视觉）。
+  // 调度器少调一段，只会让"那一段的控件变成死控件"，页面照样能打开 —— 所以逐段点名一个**无条件绑定**
+  // 的代表控件，断言它确实被绑上了。这条用例是分段重构的守卫（2026-10-01 变异验证时发现：
+  // 删掉"模型与密钥"那段的调用，原有用例全绿，只有这条会红）。
+  {
+    ctx.bindSettingsEvents(cfg);
+    const segs = [
+      ['保存与分区', '#save-cfg-btn'],
+      ['列表与分组', '#change-console-token-btn'],
+      ['模型与密钥', '#test-provider-btn'],
+      ['人设与视觉', '#toggle-persona-edit']
+    ];
+    const missing = segs.filter(([, sel]) => !(document.querySelector(sel)?._listeners?.click || []).length).map(([label, sel]) => `${label}(${sel})`);
+    missing.length === 0 ? pass++ : fail++;
+    console.log('  ' + (missing.length ? 'FAIL ' : 'OK   ') + '设置页：四段绑定各自的代表控件都绑上了（分段漏调会在这里红）'
+      + (missing.length ? ` -> 没绑上：${missing.join(', ')}` : ''));
+  }
 
   // 界面 → 配置的映射（审查抓到过：保存时 apiKeyProvider 读了个已删掉的元素，
   // 于是新填的 Key 被记成"上一家的"，轻则该用不用、重则把旧 Key 发给别家）

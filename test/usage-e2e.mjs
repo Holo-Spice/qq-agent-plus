@@ -111,12 +111,13 @@ sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
 
 const ctx = vm.createContext(sandbox);
-// core 共享内核先于 app.js 进沙箱（$ / $$ / esc / api 的单一实现在 ui/core/ 下；
-// app.js 已删本地定义，缺失会在运行时 ReferenceError）—— 与 render-test 同款适配
-for (const coreFile of ['ui/core/registry.js', 'ui/core/dom.js', 'ui/core/api.js']) {
-  new vm.Script(fs.readFileSync(path.join(ROOT, coreFile), 'utf8'), { filename: coreFile }).runInContext(ctx);
+// 按 index.html 的 script 清单、按序加载（唯一真相源；写死文件名会在拆模块后静默缺文件）。
+// 沙箱只铺到 app.js 为止 —— 8 个外挂插件要 NodeFilter 等真实 DOM 能力，由 ui-smoke 覆盖。
+const allScripts = [...fs.readFileSync(path.join(ROOT, 'ui', 'index.html'), 'utf8')
+  .matchAll(/<script\s+src="([^"]+)"/g)].map((m) => m[1].replace(/^\//, ''));
+for (const srcFile of allScripts.slice(0, allScripts.indexOf('app.js') + 1)) {
+  new vm.Script(fs.readFileSync(path.join(ROOT, 'ui', srcFile), 'utf8'), { filename: `ui/${srcFile}` }).runInContext(ctx);
 }
-new vm.Script(fs.readFileSync(path.join(ROOT, 'ui', 'app.js'), 'utf8'), { filename: 'ui/app.js' }).runInContext(ctx);
 
 // ── 真实加载配置与价格（模拟启动流程）──
 console.log('=== 模拟启动：拉配置与价格 ===');

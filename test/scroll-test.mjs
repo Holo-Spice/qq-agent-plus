@@ -9,7 +9,12 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
-const code = fs.readFileSync(path.join(ROOT, 'ui', 'app.js'), 'utf8');
+const indexHtml = fs.readFileSync(path.join(ROOT, 'ui', 'index.html'), 'utf8');
+// script 清单的唯一真相源 = index.html（与 render-test / ui-smoke / ui-modules 同一口径）。
+// 写死文件名会在拆模块后静默缺文件，所以按清单全量、按序加载；沙箱只铺到 app.js 为止
+// （8 个外挂插件要 NodeFilter 等真实 DOM 能力，由 ui-smoke 用 happy-dom 覆盖）。
+const htmlScriptFiles = () => [...indexHtml.matchAll(/<script\s+src="([^"]+)"/g)].map((m) => m[1].replace(/^\//, ''));
+const htmlFilesUpToApp = () => { const all = htmlScriptFiles(); return all.slice(0, all.indexOf('app.js') + 1); };
 
 let pass = 0, fail = 0;
 const check = (n, c, e = '') => { if (c) { pass++; console.log('  OK   ' + n); } else { fail++; console.log('  FAIL ' + n + (e ? ' -> ' + e : '')); } };
@@ -94,13 +99,9 @@ sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
 
 const ctx = vm.createContext(sandbox);
-// core 共享内核先于 app.js 进沙箱（$ / $$ / esc / api 的单一实现在 ui/core/ 下；
-// app.js 已删本地定义，缺失会在运行时 ReferenceError）—— 与 render-test 同款适配
-for (const coreFile of ['ui/core/registry.js', 'ui/core/dom.js', 'ui/core/api.js']) {
-  const coreCode = fs.readFileSync(path.join(ROOT, coreFile), 'utf8');
-  new vm.Script(coreCode, { filename: coreFile }).runInContext(ctx);
+for (const srcFile of htmlFilesUpToApp()) {
+  new vm.Script(fs.readFileSync(path.join(ROOT, 'ui', srcFile), 'utf8'), { filename: `ui/${srcFile}` }).runInContext(ctx);
 }
-new vm.Script(code, { filename: 'ui/app.js' }).runInContext(ctx);
 
 const CHAT_MSG_PAGE_GUESS = 500;
 const state_currentChatKey = 'group:test';

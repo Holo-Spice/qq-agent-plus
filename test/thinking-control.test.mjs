@@ -39,6 +39,7 @@ test('按 baseUrl 主机名匹配渠道（含表外与非法地址）', () => {
   assert.equal(modelServiceOfBaseUrl('https://api.z.ai/api/paas/v4')?.id, 'zhipu');
   assert.equal(modelServiceOfBaseUrl('https://api.commandcode.ai/provider/v1')?.id, 'commandcode');
   assert.equal(modelServiceOfBaseUrl('https://opencode.ai/zen/go/v1')?.id, 'opencode');
+  assert.equal(modelServiceOfBaseUrl('https://amr-link.open-design.ai/v1')?.id, 'opendesign');
   assert.equal(modelServiceOfBaseUrl('https://dashscope.aliyuncs.com/compatible-mode/v1')?.id, 'qwen');
   assert.equal(modelServiceOfBaseUrl('https://my-own-gateway.example.com/v1'), null);
   assert.equal(modelServiceOfBaseUrl(''), null);
@@ -182,4 +183,42 @@ test('任务用途（judge / write）逐用途解析，未配用途跟随 defaul
   assert.deepEqual(resolveThinkingPatch('commandcode', normalizeThinkingIntent(per, 'judge')).patch, { reasoning_effort: 'high' });
   assert.deepEqual(resolveThinkingPatch('commandcode', normalizeThinkingIntent(per, 'write')).patch, { reasoning_effort: 'max' });
   assert.equal(resolveThinkingPatch('commandcode', normalizeThinkingIntent(per, 'unknown-task')), null);
+});
+
+// OpenDesign（amr-link 网关）2026-09-30 四轮探针实测的结论锁定。
+// 关键事实：该网关吞掉所有 thinking 类参数（thinking/enable_thinking/thinking_budget/extra 全被忽略，
+// 请求成功但推理照跑），只认 reasoning_effort；且接受度**逐模型不同** ——
+// deepseek 系六档全通、none 真正关闭；glm-5.3 系只认 low/high/max，none 与 medium 直接 400。
+test('OpenDesign 预设：off 走 none，档位取两端交集，逐模型差异交给 400 安全兜底', async () => {
+  // off 用 none（不是历史默认的 thinking.type —— 实测该网关会吞掉它）
+  assert.deepEqual(thinkingPatchFor('opendesign', 'off'), { patch: { reasoning_effort: 'none' }, approx: false, suppressed: false });
+  // 档位：low/high/max 两端都实测 200
+  assert.deepEqual(thinkingPatchFor('opendesign', 'low'), { patch: { reasoning_effort: 'low' }, approx: false, suppressed: false });
+  assert.deepEqual(thinkingPatchFor('opendesign', 'high'), { patch: { reasoning_effort: 'high' }, approx: false, suppressed: false });
+  assert.deepEqual(thinkingPatchFor('opendesign', 'max'), { patch: { reasoning_effort: 'max' }, approx: false, suppressed: false });
+  // medium 只有 deepseek 系认、glm 会 400 —— 不进档位条（不给用户一个按模型时灵时不灵的档）
+  assert.equal(thinkingPatchFor('opendesign', 'medium'), null);
+  // 'on' 不发参数
+  assert.equal(thinkingPatchFor('opendesign', 'on'), null);
+  // 界面档位：off 在列（deepseek 系可关；glm 系 400 由安全兜底摘参重试）
+  assert.deepEqual(thinkingUiLevels('opendesign'), ['off', 'low', 'high', 'max']);
+  // canDisable 不是 false：不能像智谱那样"不发也不假装"，该发 none 让 deepseek 系真关掉
+  const { MODEL_SERVICES } = await import('../src/core/provider-presets.js');
+  const od = MODEL_SERVICES.find((s) => s.id === 'opendesign');
+  assert.equal(od.thinking.canDisable, null);
+  assert.notEqual(od.thinking.off, null);
+  // 400 兜底的判据：该网关拒绝时的错误文本必须命中 llm.js 的 /thinking|reasoning/i
+  // （实测原文："[code=invalid_request_error] reasoning effort is unsupported for glm-5.3-flash"）
+  const realErrorText = '{"error":{"code":"invalid_request_error","message":"[code=invalid_request_error] reasoning effort is unsupported for glm-5.3-flash; use one of low, high, max"}}';
+  assert.ok(/thinking|reasoning/i.test(realErrorText), '400 原文必须命中安全兜底正则');
+});
+
+test('OpenDesign 与内置表其它渠道互不串味（自定义映射不覆盖内置）', async () => {
+  const { resolveThinkingPatch } = await import('../src/core/provider-presets.js');
+  const params = { off: { thinking: { type: 'disabled' } }, low: { reasoning_effort: 'low' } };
+  // 内置渠道走内置形状，用户的 thinkingParams 不该把它改回会被吞的 thinking 形状
+  assert.deepEqual(resolveThinkingPatch('opendesign', 'off', params).patch, { reasoning_effort: 'none' });
+  assert.deepEqual(resolveThinkingPatch('opendesign', 'low', params).patch, { reasoning_effort: 'low' });
+  // 表外渠道仍走用户映射（不被新预设影响）
+  assert.deepEqual(resolveThinkingPatch('', 'off', params).patch, { thinking: { type: 'disabled' } });
 });

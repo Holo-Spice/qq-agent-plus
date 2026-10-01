@@ -25,12 +25,24 @@ test('index.html 的 script 清单与 ui/ 实际 .js 文件一一对应（双向
   assert.deepEqual(dangling, [], `index.html 引用了不存在的文件：${dangling.join(', ')}`);
 });
 
-test('app.js 仍在业务脚本中第一个加载（classic script 的全局依赖顺序）', () => {
+// 2026-10-01 拆模块后的加载分层（classic script 的全局依赖顺序）：
+//   /i18n/** → /core/** → /pages/** → /app.js → 8 个外挂插件
+// app.js 在**加载时**就执行 QARegistry.register('renderSettings', renderSettingsImpl) 之类的
+// 注册（把底座实现登记进注册表），所以 core/pages 必须已经先声明过那些名字；反过来，
+// 外挂插件在加载时读 app.js 暴露的全局、并往同一个注册表上挂 transform，必须在 app.js 之后。
+test('业务脚本加载顺序：i18n/core/pages 先于 app.js，外挂插件在其后', () => {
   const srcs = [...html.matchAll(/<script\s+src="([^"]+)"/g)].map((m) => m[1]);
   const appIdx = srcs.indexOf('/app.js');
   assert.ok(appIdx !== -1, 'index.html 必须加载 /app.js');
-  const otherBusiness = srcs.filter((s) => s !== '/app.js' && !s.startsWith('/i18n/') && !s.startsWith('/core/'));
-  for (const s of otherBusiness) {
-    assert.ok(appIdx < srcs.indexOf(s), `${s} 不能排在 app.js 之前（跨文件全局来自 app.js）`);
+  const offenders = [];
+  for (const [idx, s] of srcs.entries()) {
+    if (s === '/app.js') continue;
+    const first = s.startsWith('/i18n/') || s.startsWith('/core/') || s.startsWith('/pages/');
+    if (first) {
+      if (idx > appIdx) offenders.push(`${s} 必须排在 app.js 之前（app.js 加载时的 QARegistry.register 要用到它）`);
+    } else if (idx < appIdx) {
+      offenders.push(`${s} 必须排在 app.js 之后（外挂插件依赖 app.js 已声明的全局与注册表）`);
+    }
   }
+  assert.deepEqual(offenders, [], offenders.join('; '));
 });

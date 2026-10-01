@@ -10,7 +10,7 @@ const { runHealthCheck } = await import('../src/core/health-check.js');
 const { openDatabase } = await import('../src/core/sqlite.js');
 const { readOwnerUin } = await import('../src/core/notify-owner.js');
 
-function makeDataDir({ withDb = true, withUpdaterState = false, withMarker = false } = {}) {
+function makeDataDir({ withDb = true, withUpdaterState = false, withMarker = false, outboundAgoMs = 0, inboundAgoMs = 0 } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-health-'));
   if (withDb) {
     const db = openDatabase(path.join(dir, 'messages.sqlite'));
@@ -22,7 +22,12 @@ function makeDataDir({ withDb = true, withUpdaterState = false, withMarker = fal
       state TEXT NOT NULL DEFAULT 'pending', lease_id TEXT, attempts INTEGER NOT NULL DEFAULT 0,
       available_at INTEGER NOT NULL DEFAULT 0, error TEXT
     )`);
-    db.prepare('INSERT INTO messages (chat_key, id, ts, text, self) VALUES (?, ?, ?, ?, 1)').run('group:1', 1, Date.now(), 'hi');
+    const now = Date.now();
+    db.prepare('INSERT INTO messages (chat_key, id, ts, text, self) VALUES (?, ?, ?, ?, 1)').run('group:1', 1, now - outboundAgoMs, 'hi');
+    // inboundAgoMs = null 表示"库里从来没有入站记录"
+    if (inboundAgoMs !== null) {
+      db.prepare('INSERT INTO messages (chat_key, id, ts, text, self) VALUES (?, ?, ?, ?, 0)').run('group:1', 2, now - inboundAgoMs, '有人吗');
+    }
     db.close();
   }
   if (withUpdaterState) {
@@ -64,14 +69,43 @@ test('observe 模式跳过出站水位（不发消息不算故障）', async () 
 });
 
 test('active 模式出站水位陈旧 → 失败；新鲜 → 通过', async () => {
-  const dir = makeDataDir();
-  const stale = await runHealthCheck({
-    dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null,
-    now: Date.now() + 7 * 60 * 60 * 1000, outboundStaleMs: 6 * 60 * 60 * 1000,
+  // 窗口内**有**入站消息（10 分钟前有人说话）时，出站 7 小时没动静才是"收发停止"
+  const stale = makeDataDir({ outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 10 * 60 * 1000 });
+  const staleRun = await runHealthCheck({
+    dataDir: stale, fetchImpl: okFetch, statfs: okStatfs, notify: null,
+    outboundStaleMs: 6 * 60 * 60 * 1000,
   });
-  assert.equal(stale.checks.find((c) => c.name === 'outbound-freshness').ok, false);
-  const fresh = await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null });
-  assert.equal(fresh.checks.find((c) => c.name === 'outbound-freshness').ok, true);
+  const staleItem = staleRun.checks.find((c) => c.name === 'outbound-freshness');
+  assert.equal(staleItem.ok, false);
+  assert.match(staleItem.detail, /入站距今/);
+
+  const fresh = makeDataDir({ outboundAgoMs: 60 * 1000, inboundAgoMs: 10 * 60 * 1000 });
+  const freshRun = await runHealthCheck({ dataDir: fresh, fetchImpl: okFetch, statfs: okStatfs, notify: null });
+  assert.equal(freshRun.checks.find((c) => c.name === 'outbound-freshness').ok, true);
+});
+
+test('active 模式：窗口内没人说话（最后一条入站也在窗口外）→ 静默期，不算故障', async () => {
+  // 2026-10-01 实测误报：凌晨 00:13 部署后群里没人说话，出站水位 6 小时越线，
+  // 连击 3 次就私聊 owner 报"收发停止" —— 判据要是"有人说话而 bot 没回"，不是"bot 没说话"
+  const dir = makeDataDir({ outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 7 * 60 * 60 * 1000 });
+  const r = await runHealthCheck({
+    dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null,
+    outboundStaleMs: 6 * 60 * 60 * 1000,
+  });
+  const item = r.checks.find((c) => c.name === 'outbound-freshness');
+  assert.equal(item.ok, true, '安静时段不该报"收发停止"');
+  assert.match(item.detail, /静默期/);
+});
+
+test('active 模式：库里从来没有入站记录 → 静默期，不算故障', async () => {
+  const dir = makeDataDir({ outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: null });
+  const r = await runHealthCheck({
+    dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null,
+    outboundStaleMs: 6 * 60 * 60 * 1000,
+  });
+  const item = r.checks.find((c) => c.name === 'outbound-freshness');
+  assert.equal(item.ok, true);
+  assert.match(item.detail, /静默期/);
 });
 
 test('磁盘余量不足 → 失败', async () => {

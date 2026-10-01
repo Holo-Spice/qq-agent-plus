@@ -850,6 +850,9 @@ describe('Orchestrator', () => {
     append(2, '在吗', '42');
     await runner.wake('group:1');
     assert.equal(hasImageTool(bodies.at(-1)), false, '没填模型不该注入');
+    // 提示词的口径必须与工具过滤一致：只看 enabled 的话，这里会一边摘掉工具、
+    // 一边还在教模型去调 generate_image（2026-09-30 审查：探针复现提示词含该工具）
+    assert.doesNotMatch(bodies.at(-1).messages[0].content, /generate_image/, '没填模型时提示词也不该提画图');
     // 3) 开 + 有模型（地址留空 = 与模型同域）：注入，提示词同步给画图引导
     cfg.imageGen = { ...cfg.imageGen, enabled: true, model: 'gpt-image-1', baseUrl: '' };
     setRuntimeConfig(cfg);

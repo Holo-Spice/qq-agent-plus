@@ -1,9 +1,16 @@
 # 控制台手工烟测清单（UI-SMOKE）
 
 自动化只覆盖到「渲染函数不抛异常 + 真实 DOM 能加载 + 钩子接上了」这三层
-（`test/render-test.mjs` 176 条、`test/scroll-test.mjs` 19 条、`test/ui-smoke.test.mjs`
-4 条、`test/ui-contract.test.mjs`、`test/ui-modules.test.mjs`）。**布局、事件、真实数据下的
+（`test/render-test.mjs` 178 条、`test/scroll-test.mjs` 19 条、`test/ui-smoke.test.mjs` 4 条、
+`test/ui-contract.test.mjs` 4 条、`test/ui-modules.test.mjs` 2 条、`test/static-cache.test.mjs` 5 条）。
+**布局、事件、真实数据下的
 观感只有人看得见**，所以每次动到 `ui/` 就照下面走一遍。
+
+> **`ui-modules` 与 `ui-smoke` 不是可选用例。** 30 个 classic script 共享同一个全局词法环境，
+> 加载顺序错了或漏加载一个文件，浏览器里往往**不报错** —— 只是某个页面空白、或某个外挂改造
+> 悄悄失效（`status-refresh.js` 掉了就是"状态不再自动刷新"，页面上看不出异常）。
+> 能当场抓住这类静默失效的只有 `ui-modules`（清单一一对应 + 加载顺序）与 `ui-smoke`
+> （真实 DOM 按 index.html 顺序加载全部脚本）。
 
 打开方式见 [`../AGENTS.md`](../AGENTS.md)（`console-tunnel.bat` 或
 `SSHHOST=user@host node src/ops.js console --open`）。
@@ -39,8 +46,9 @@
 ## 3. 人物印象 / 好友管理 / 异常
 
 - [ ] 三个页面打开都有内容，且**没有区域被整块删除**
-- [ ] 人物印象页与异常页出现的是「人物印象」「异常处理」字样（钩子改过的文案），
-      不是「统一身份库」「异常处理试点」
+- [ ] 人物印象页与异常页**不该再出现旧文案**「统一身份库」「异常处理试点」
+      （实际渲染：tab 标签是「人物印象」，页头是「人物统一印象」、异常页是「异常处理…」——
+      判据以"旧文案不出现"为准，别拿页头必须等于 tab 名去卡）
 - [ ] 好友管理页右上角有「手动触发评分」按钮（`loadFriendFeaturePage` 接管加的），
       点开弹窗能列出身位库里的人；`state.config` 未加载时按钮为灰
 - [ ] 好友候选/入站申请的旧「owner」输入框已被隐藏成 hidden input（不应再看到可编辑的旧输入框）
@@ -53,9 +61,14 @@
 
 ## 5. 改完 UI 之后
 
-- [ ] `npm run lint`（0 error / 0 warning）
-- [ ] `node test/render-test.mjs` → ALL PASSED 176
+- [ ] `npm run lint`（0 error / 0 warning；`max-lines` 对**整个 ui/** 生效，阈值 1800）
+- [ ] `node test/render-test.mjs` → ALL PASSED 178
 - [ ] `node test/scroll-test.mjs` → ALL PASSED 19
 - [ ] `node --test test/ui-smoke.test.mjs test/ui-contract.test.mjs test/ui-registry.test.mjs test/ui-modules.test.mjs`
-- [ ] 新增跨文件全局时，**同时**改 `eslint.config.mjs` 的 `uiSharedGlobals` ——
-      不改会被 `test/ui-contract.test.mjs` 当场判红（这是有意的）
+      （ui-contract 4 条 / ui-modules 2 条 / ui-registry 9 条 / ui-smoke 4 条）
+- [ ] `node --test test/static-cache.test.mjs`（动了 `src/console/app.js` 的静态服务才需要：
+      它盯 HTML 里的内容哈希令牌、immutable 头与真 304）
+- [ ] 新增/移动跨文件全局时，**同时**改 `eslint.config.mjs` 的 `uiSharedGlobals` ——
+      不改会被 `test/ui-contract.test.mjs` 当场判红（这是有意的）；搬走定义后成为"文件私有"的
+      名字也要从清单里删掉（同一条用例的防冗余断言会揪出来）
+

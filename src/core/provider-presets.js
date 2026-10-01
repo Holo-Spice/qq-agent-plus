@@ -150,6 +150,33 @@ export const MODEL_SERVICES = [
     }
   },
   {
+    id: 'opendesign',
+    label: 'OpenDesign（amr-link 网关）',
+    baseUrl: 'https://amr-link.open-design.ai/v1',
+    // 网关自己的控制台没探到（open-design.ai 主站只有桌面端，无 Key 管理页）；
+    // 仿 OpenCode 先给主站，用户拿 Key 的实际入口以官方通知为准。
+    keyUrl: 'https://open-design.ai/',
+    hosts: ['amr-link.open-design.ai'],
+    source: '本机实测 2026-09-30（探针 4 轮）：吞 thinking 类参数（thinking/enable_thinking/thinking_budget/extra 全被忽略，推理照跑）；reasoning_effort 被接受且**逐模型**生效——deepseek 系 none/low/medium/high/xhigh/max 均 200 且 none 真正关闭（4 个模型各 3 次复现，推理 token 从 100+ 归零）；glm-5.3 系只认 low/high/max，none 与 medium 直接 400',
+    thinking: {
+      canDisable: null,
+      // deepseek 系实测 none 可关闭；glm-5.3 系传 none 会 400——不确定就交给安全兜底
+      // （llm.js 的"400 且文本含 reasoning → 摘参重试"路径，实测该 400 文本命中正则）。
+      off: { reasoning_effort: 'none' },
+      offIsApprox: false,
+      // 只列两端都实测 200 的档位（同渠道内模型不同，取交集是既有约定：见上方智谱条目）。
+      // medium 只有 deepseek 系认、glm 系会 400 —— 不进补丁表，要它的用户走「额外请求参数」。
+      efforts: {
+        low: { reasoning_effort: 'low' },
+        high: { reasoning_effort: 'high' },
+        max: { reasoning_effort: 'max' }
+      },
+      uiLevels: ['off', 'low', 'high', 'max'],
+      defaultNote: '随模型（实测：deepseek 系默认思考、glm-5.3 系默认低思考）',
+      note: '实测：deepseek 系可关（none 真正关闭）、档位 low/medium/high/xhigh/max；glm-5.3 系只认 low/high/max（none 与 medium 会 400，由安全兜底自动摘参重试）。界面只列两端都通的 off/low/high/max。模型例：deepseek-v4.1-flash、glm-5.3-flash。'
+    }
+  },
+  {
     id: 'opencode',
     label: 'OpenCode（Go 订阅）',
     baseUrl: 'https://opencode.ai/zen/go/v1',

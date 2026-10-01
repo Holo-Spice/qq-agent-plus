@@ -1,14 +1,17 @@
 // 跨文件全局契约冻结（改进方案 §11 C3）
 //
-// 背景：classic script 时代 ui/ 下 9 个 JS 靠"全局词法环境"互相看见 —— app.js 的顶层
-// 函数被 8 个外挂文件直接调用。这类隐式耦合没有任何编译期检查：谁都能随手引一个新全局，
-// 而 app.js 里删掉一个函数也不会有人报错。这个用例把当前事实**钉死**：
+// 背景：classic script 时代 ui/ 下的 JS 靠"全局词法环境"互相看见 —— 顶层函数被别的文件
+// 直接调用。这类隐式耦合没有任何编译期检查：谁都能随手引一个新全局，而某处删掉一个函数
+// 也不会有人报错。这个用例把当前事实**钉死**：
 //
-//   ① 外挂文件引用的 app.js / ui/core 顶层名字，必须全部登记在 eslint.config.mjs 的
+//   ① 任一文件引用的"别的文件顶层名字"，必须全部登记在 eslint.config.mjs 的
 //      uiSharedGlobals 清单里（新增跨文件耦合 = 必须显式改清单 = 当场红）；
-//   ② 清单里每个名字都还能在 app.js 或 ui/core 里找到定义（防清单腐烂：删了函数忘了删清单）；
+//   ② 清单里每个名字都还能在 ui/ 的某个文件里找到顶层声明（防清单腐烂：删了函数忘了删清单）；
 //   ③ 没有任何文件再靠改写全局来"包裹"渲染入口（改进方案 §11 C2 去插件化后的纪律：
 //      要接管请走 QARegistry，别再 `window[name] = wrapped` / 裸赋值）。
+//
+// 2026-10-01 拆模块（ui/app.js → ui/core/** + ui/pages/**）后，判定改为**分层无关**：
+// 不再假设"定义只在 app.js / ui/core"，否则搬家即误报。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -154,64 +157,86 @@ function declaredTopLevel(src) {
   return names;
 }
 
-const coreFiles = listJs(path.join(UI, 'core'));
 const shared = sharedGlobals();
-const coreDeclared = new Set();
-for (const rel of coreFiles) coreDeclared.add(path.basename(rel, '.js'));
-const appDeclared = declaredTopLevel(fs.readFileSync(path.join(UI, 'app.js'), 'utf8'));
-for (const rel of coreFiles) for (const name of declaredTopLevel(fs.readFileSync(path.join(UI, rel), 'utf8'))) coreDeclared.add(name);
 
-// 定义方（app.js / ui/core）之外的文件才算"引用方"
-const consumers = listJs(UI).filter((rel) => rel !== 'app.js' && !rel.startsWith('core/'));
-const definers = new Set([...appDeclared, ...coreDeclared]);
+// ── 统一口径（2026-10-01 拆模块后） ──
+// 加载分层：ui/core/**  →  ui/pages/**  →  ui/app.js  →  8 个外挂插件（见 index.html）。
+// 「跨文件全局」= 某个 ui 文件顶层声明、被**另一个** ui 文件引用的名字 —— 判定不再关心
+// 名字住在哪一层。拆模块把约六成定义从 app.js 搬进了 ui/pages/**，继续拿「app.js + core」
+// 当定义方，会把它们集体误判成"清单腐烂"。
+const UI_FILES = listJs(UI);
+const declByFile = new Map(UI_FILES.map((rel) => [rel, declaredTopLevel(fs.readFileSync(path.join(UI, rel), 'utf8'))]));
+const declHomes = new Map(); // name -> Set(声明它的文件)
+for (const [rel, names] of declByFile) {
+  for (const name of names) {
+    if (!declHomes.has(name)) declHomes.set(name, new Set());
+    declHomes.get(name).add(rel);
+  }
+}
 
-test('外挂文件引用的跨文件全局都已登记在 uiSharedGlobals（新增耦合必须显式改清单）', () => {
+// 一个文件"引用到"的名字，分两路收，用途不同：
+//   identifierRefs —— 代码里的标识符引用（eslint 的 no-undef 看得见的那一路）；
+//   registryKeys   —— QARegistry 的字符串键。去插件化（§11 C2）后"接管某个入口"只以键名
+//                     出现（代码里不再有该标识符），所以它**不算**标识符引用（登记进
+//                     uiSharedGlobals 也治不了 no-undef），但确实是"有人在用"。
+function identifierRefs(rel) {
+  const raw = fs.readFileSync(path.join(UI, rel), 'utf8');
+  // `...X` 展开：`.` 被排除在标识符边界外（为躲属性访问 a.b），先把连续三点抹成空格，
+  // 否则 `[...FOO]` 会被当成"没引用"（曾把 STICKER_MAX_CHOICES 误报成冗余）。
+  const blanked = blankSource(raw).replace(/\.\.\./g, '   ');
+  const names = new Set();
+  for (const match of blanked.matchAll(/(?<![\w$.\-])([A-Za-z_$][\w$]*)(?![\w$\-])/g)) names.add(match[1]);
+  return names;
+}
+
+function registryKeys(rel) {
+  const raw = fs.readFileSync(path.join(UI, rel), 'utf8');
+  return new Set([...raw.matchAll(/QARegistry\.(?:onTransform|onAfter|override|register)\(\s*'([^']+)'/g)].map((m) => m[1]));
+}
+
+const refsByFile = new Map(UI_FILES.map((rel) => [rel, identifierRefs(rel)]));
+const keysByFile = new Map(UI_FILES.map((rel) => [rel, registryKeys(rel)]));
+
+// name -> Set(引用了它、且自己没声明它的文件)：只看标识符引用，即"必须登记在清单里"的那批
+const externalUsers = new Map();
+for (const rel of UI_FILES) {
+  for (const name of refsByFile.get(rel)) {
+    if (!declHomes.has(name)) continue;         // 浏览器全局 / 局部名，不在契约范围
+    if (declHomes.get(name).has(rel)) continue; // 自家声明的，不算跨文件
+    if (!externalUsers.has(name)) externalUsers.set(name, new Set());
+    externalUsers.get(name).add(rel);
+  }
+}
+
+// name -> 是否"被声明它的文件之外的文件用到"（标识符或注册表键，任一即可）—— 防冗余用
+const usedOutsideHome = new Set();
+for (const rel of UI_FILES) {
+  for (const name of refsByFile.get(rel)) {
+    if (declHomes.has(name) && !declHomes.get(name).has(rel)) usedOutsideHome.add(name);
+  }
+  for (const name of keysByFile.get(rel)) {
+    if (declHomes.has(name) && !declHomes.get(name).has(rel)) usedOutsideHome.add(name);
+  }
+}
+
+test('引用别的文件顶层名字 = 必须登记在 uiSharedGlobals（新增耦合必须显式改清单）', () => {
   const offenders = [];
-  for (const rel of consumers) {
-    const src = fs.readFileSync(path.join(UI, rel), 'utf8');
-    const own = declaredTopLevel(src);
-    const blanked = blankSource(src);
-    for (const match of blanked.matchAll(/(?<![\w$.\-])([A-Za-z_$][\w$]*)(?![\w$\-])/g)) {
-      const name = match[1];
-      if (!definers.has(name) || own.has(name) || shared.has(name)) continue;
-      offenders.push(`${rel}: ${name}`);
-    }
+  for (const [name, users] of externalUsers) {
+    if (shared.has(name)) continue;
+    for (const rel of users) offenders.push(`${rel} → ${name}`);
   }
   assert.deepEqual([...new Set(offenders)].sort(), [],
     '这些跨文件全局没登记在 eslint.config.mjs 的 uiSharedGlobals 里（新增请显式登记，或改用 QARegistry/局部实现）');
 });
 
 test('uiSharedGlobals 里每个名字都还有定义（防清单腐烂）', () => {
-  const dead = [...shared].filter((name) => !definers.has(name)).sort();
-  assert.deepEqual(dead, [], `这些名字已不在 app.js / ui/core 里定义，请从 uiSharedGlobals 删除：${dead.join(', ')}`);
+  const dead = [...shared].filter((name) => !declHomes.has(name)).sort();
+  assert.deepEqual(dead, [], `这些名字在 ui/ 里已无顶层声明（删了函数忘了删清单），请从 uiSharedGlobals 删除：${dead.join(', ')}`);
 });
 
 test('uiSharedGlobals 里每个名字都被"声明它的文件之外"的文件用到（防清单冗余）', () => {
-  // 声明方（app.js / core 文件）也可能在用别的 core 文件里的东西（例如 app.js 用 core/dom.js
-  // 的 $$），所以引用方要算全部 ui/**；只在"自家文件里定义又只用在自己家里"的名字才叫冗余。
-  const referencers = new Map(); // name -> Set(rel)
-  for (const rel of listJs(UI)) {
-    const raw = fs.readFileSync(path.join(UI, rel), 'utf8');
-    const blanked = blankSource(raw);
-    for (const match of blanked.matchAll(/(?<![\w$.\-])([A-Za-z_$][\w$]*)(?![\w$\-])/g)) {
-      if (!shared.has(match[1])) continue;
-      if (!referencers.has(match[1])) referencers.set(match[1], new Set());
-      referencers.get(match[1]).add(rel);
-    }
-    // 去插件化后"接管某个入口"写在 QARegistry 的字符串键里，代码里不再出现该名字
-    for (const match of raw.matchAll(/QARegistry\.(?:onTransform|onAfter|override|register)\(\s*'([^']+)'/g)) {
-      if (!shared.has(match[1])) continue;
-      if (!referencers.has(match[1])) referencers.set(match[1], new Set());
-      referencers.get(match[1]).add(rel);
-    }
-  }
-  const redundant = [];
-  for (const name of shared) {
-    const declaring = listJs(UI).filter((rel) => declaredTopLevel(fs.readFileSync(path.join(UI, rel), 'utf8')).has(name));
-    const others = [...(referencers.get(name) || [])].filter((rel) => !declaring.includes(rel));
-    if (others.length === 0) redundant.push(name);
-  }
-  assert.deepEqual(redundant.sort(), [], `这些名字只在自家文件里用，请从 uiSharedGlobals 删除：${redundant.join(', ')}`);
+  const redundant = [...shared].filter((name) => !usedOutsideHome.has(name)).sort();
+  assert.deepEqual(redundant, [], `这些名字只在自家文件里用，请从 uiSharedGlobals 删除：${redundant.join(', ')}`);
 });
 
 test('再没有文件靠改写全局包裹渲染入口（要接管请走 QARegistry）', () => {

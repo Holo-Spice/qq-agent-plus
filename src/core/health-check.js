@@ -70,19 +70,32 @@ export async function runHealthCheck(opts = {}) {
     add('onebot-status', false, error?.message ?? String(error));
   }
 
-  // ③ 出站消息水位：observe 模式本来就不发消息，跳过（否则每 5 分钟固定误报"收发停止"）
+  // ③ 出站消息水位：判据是"**有人说话而 bot 一条都没回**"，不是"bot 一直没说话"。
+  // - observe 模式本来就不发消息 → 跳过（否则每 5 分钟固定误报）。
+  // - 窗口内没有入站消息（深夜/冷清时段）→ 静默期，出站为空是正常行为 → 记 ok。
+  //   2026-10-01 实测踩到：凌晨 00:13 部署后群里没人说话，出站水位在 05:40 越过 6 小时，
+  //   连击到 3 次就私聊 owner 报"收发停止" —— 纯误报，而且**每次在安静时段部署都会复现一次**。
+  //   方案 §#7 只写了 observe 要跳过、把"时间控制/游戏等待等合法静默期"留给抑制口径，
+  //   但抑制只压抖动、压不住"本来就没人的时段"，所以要在判据本身把静默期排除掉。
   if (mode === 'observe') {
     add('outbound-freshness', true, '跳过（observe 模式不发消息）');
   } else {
     try {
       const db = openDatabase(path.join(dataDir, 'messages.sqlite'), { readOnly: true });
       try {
-        const row = db.prepare('SELECT max(ts) AS m FROM messages WHERE self=1').get();
-        if (!row || row.m === null) {
+        const out = db.prepare('SELECT max(ts) AS m FROM messages WHERE self=1').get();
+        const inbound = db.prepare('SELECT max(ts) AS m FROM messages WHERE self=0').get();
+        const outAge = out === undefined || out.m === null ? null : now - Number(out.m);
+        const inAge = inbound === undefined || inbound.m === null ? null : now - Number(inbound.m);
+        if (outAge === null) {
           add('outbound-freshness', true, '跳过（还没有出站消息记录）');
+        } else if (inAge === null) {
+          add('outbound-freshness', true, '静默期：还没有入站消息记录（没有人在说话，出站为空属正常）');
+        } else if (inAge > outboundStaleMs) {
+          add('outbound-freshness', true, `静默期：最近一次入站距今 ${Math.round(inAge / 60000)} 分钟（超过 ${Math.round(outboundStaleMs / 60000)} 分钟没人说话，出站为空属正常）`);
         } else {
-          const age = now - Number(row.m);
-          add('outbound-freshness', age <= outboundStaleMs, `最近一次出站距今 ${Math.round(age / 60000)} 分钟`);
+          add('outbound-freshness', outAge <= outboundStaleMs,
+            `最近一次出站距今 ${Math.round(outAge / 60000)} 分钟 · 入站距今 ${Math.round(inAge / 60000)} 分钟`);
         }
       } finally { db.close(); }
     } catch (error) {

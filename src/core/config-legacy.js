@@ -689,6 +689,14 @@ export const ASR_DERIVED_KEYS = [
 ];
 
 /**
+ * 同理：/api/config 在 imageGen 上附加的"运行时结论"。
+ * `available`（能不能真的画）每次 GET 都重算，前端展开回传后会被写进 config.json，
+ * 之后升级改了判定口径、旧结论还留在文件里冒充当前状态（2026-09-30 审查，真实往返复现）。
+ * hasApiKey 由 secret-keys 的 walk 自动生成，一并按 /^has[A-Z]/ 剔掉。
+ */
+export const IMAGEGEN_DERIVED_KEYS = ['available'];
+
+/**
  * 这个凭据能不能用于"当前配的这家"：凭据记着存它时的供应商（OpenAI 兼容的还记地址主机）。
  * 换了服务/换了地址就不再拿旧凭据去发请求 —— 否则"把腾讯的 SecretKey 当讯飞 APISecret 发出去"
  * 会静默发生（2026-09-26 审查，两种情形都实测复现过）。
@@ -805,6 +813,15 @@ function migrateConfig(parsed) {
     // 恰好是"把 A 家的 Key 当成 B 家的"那条路。归属只在读盘（loadConfig）或用户重填时记。
     for (const key of ASR_DERIVED_KEYS) delete out.asr[key];
     for (const key of Object.keys(out.asr)) if (/^has[A-Z]/.test(key)) delete out.asr[key];
+  }
+  // ── 图片生成（imageGen）──
+  if (isPlainObject(out.imageGen)) {
+    // 同一条道理：GET /api/config 下发的 hasApiKey/available 是"给界面看的派生结论"，
+    // 前端会把整份配置展开成 patch 回传 —— 不在这里剔掉，保存一次就落进 config.json，
+    // 往后每份配置都带着上个版本算出来的结论（2026-09-30 审查，真实往返复现）。
+    for (const key of Object.keys(out.imageGen)) {
+      if (/^has[A-Z]/.test(key) || IMAGEGEN_DERIVED_KEYS.includes(key)) delete out.imageGen[key];
+    }
   }
   return out;
 }
