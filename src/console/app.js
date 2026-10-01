@@ -9,6 +9,7 @@ import { createRouter } from './router.js';
 
 import { asrApiKey, asrAvailable, asrConfigured, asrKeyHost, asrKeySource, asrLocalBin, asrLocalModel, asrSecretId, asrSecretKey, conversationConfigForChat, findWhisperBinSync, getConfig, identityPilotEnabled, imageGenAvailable, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, pinImageGenKeyHost, DATA_DIR, ROOT } from '../core/config.js';
 import { tokenSaverEffective } from '../core/token-saver.js';
+import { catchupReplyWindowMs, catchupLogLine, isFreshForReply } from '../core/catchup-policy.js';
 import { budgetStatus } from '../core/budget.js';
 import { sanitizeConfigSecrets } from '../core/secret-keys.js';
 import { appendAudit, queryAudit } from '../core/audit-log.js';
@@ -490,6 +491,7 @@ export function createApp({
     httpUrl: cfg.onebot?.httpUrl,
     accessToken: cfg.onebot?.accessToken,
     httpToken: cfg.onebot?.httpAccessToken || cfg.onebot?.accessToken,
+    heartbeat: cfg.onebot?.wsHeartbeat,
     onEvent: (event) => handleOneBotEvent(event).catch((error) => {
       incidentPilot?.capture(error, {
         source: 'onebot-ingress',
@@ -1038,6 +1040,7 @@ export function createApp({
   }
   async function catchUpMissedMessages() {
     const cfgNow = getConfig();
+    const windowMs = catchupReplyWindowMs(cfgNow);
     const targets = [
       ...(cfgNow.allow?.groups ?? []).map((g) => ({ kind: 'group', id: String(g) })),
       ...(cfgNow.allow?.private ?? []).map((p) => ({ kind: 'private', id: String(p) }))
@@ -1050,16 +1053,19 @@ export function createApp({
           : await onebot.call('get_friend_msg_history', { user_id: Number(id), count: 20 }, 20000, null);
         const list = Array.isArray(data?.messages) ? data.messages : [];
         let added = 0;
+        let recordedOnly = 0;
         for (const item of list) {
           const mid = item?.message_id;
           if (mid === undefined || mid === null) continue;
           if (store.findByMid(chatKey, mid)) continue;         // 库里已有（含自己发的），跳过
           const ts = Math.round(Number(item?.time || 0) * 1000) || Date.now();
-          const fresh = Date.now() - ts <= 30 * 60 * 1000;     // 半小时内的按新消息处理，更早的只补记录
+          const fresh = isFreshForReply(ts, Date.now(), windowMs);  // 窗口内的按新消息处理，更早的只补记录
+          if (!fresh) recordedOnly += 1;
           await ingestMessage(kind, id, item, !fresh);
           added += 1;
         }
-        if (added) console.log(`[catchup] ${chatKey} 补进 ${added} 条（重启/断线期间漏掉的）`);
+        const line = catchupLogLine(chatKey, added, recordedOnly);
+        if (line) console.log(line);
       } catch (error) {
         console.log(`[catchup] ${chatKey} 补齐失败：${error?.message ?? error}`);
       }

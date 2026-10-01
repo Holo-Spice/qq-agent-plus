@@ -244,7 +244,12 @@ export const DEFAULT_CONFIG = {
     wsUrl: 'ws://127.0.0.1:3001',
     httpUrl: 'http://127.0.0.1:3000',
     accessToken: '',           // WebSocket 令牌
-    httpAccessToken: ''        // HTTP API 令牌（SnowLuma 可与 WS 不同；留空沿用 accessToken）
+    httpAccessToken: '',       // HTTP API 令牌（SnowLuma 可与 WS 不同；留空沿用 accessToken）
+    // WebSocket 心跳 ping 策略：auto（默认）第一次遇到"发 ping 就被断开"的对端后不再发
+    // （NapCat 的实测行为，Issue #22）；on 始终发；off 从不发。改完要重启才生效。
+    wsHeartbeat: 'auto',
+    // 断线/重启后补回的消息超过这个时长只入库不回复（0 = 一律只补记录，不唤醒模型）。默认 30 分钟。
+    catchupReplyWindowMs: 30 * 60 * 1000
   },
   // 人设与行为
   persona: {

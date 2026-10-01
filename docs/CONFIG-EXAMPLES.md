@@ -429,6 +429,28 @@
 - 少于 5 条消息的群当天跳过；生成走 `purpose:'write'`，吃对应思考档位与省 Token 上限。
 - 手动触发/查看状态：`POST /api/group-digest/run`、`GET /api/group-digest/status`。
 
+## onebot：WebSocket 心跳与「补课」回复窗口
+
+```json
+{
+  "onebot": {
+    "wsHeartbeat": "auto",
+    "catchupReplyWindowMs": 1800000
+  }
+}
+```
+
+- `wsHeartbeat`：`auto`（默认）/ `on` / `off`。心跳（每 30 秒一个 WebSocket PING）用来发现
+  "连接已经死了但事件还没到"的半开连接。**NapCat 收到 PING 会直接销毁连接**（客户端看到
+  `close code=1006`、永远收不到 pong，Issue #22）——`auto` 在第一次遇到这种对端后就不再发送，
+  改由 close/error 事件发现断线；`on` 始终发送（老行为，适合会回 pong 的协议端）；
+  `off` 从不发送。非法值按 `auto` 兜底。**改完重启生效**（连接只在启动时建立）。
+  控制台「设置 → OneBot」里有同一个开关。
+- `catchupReplyWindowMs`：断线或重启后从历史里补回的消息，超过这个时长只入库不回复，
+  默认 30 分钟（`1800000`）；`0` = 一律只补记录、不唤醒模型。补课日志会把两个数分开写
+  （「补进 5 条 —— 其中 2 条超过回复窗口，只补记录、不回复」），避免"补进来了却不回"看起来像故障。
+  控制台同一处填分钟数；留空 = 不改动当前值。
+
 ## reminders：定时提醒（默认开启）
 
 ```json
