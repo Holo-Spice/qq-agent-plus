@@ -1535,2079 +1535,1890 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
   router.add('GET', '/api/slang-pilot/status', async (req, res) => json(res, 200, slangPilotStatus()));
   router.add('GET', '/api/incident-pilot/status', async (req, res) => json(res, 200, incidentPilotStatus()));
 
-  async function handleHttp(req, res) {
-    if (await router.handle(req, res)) return;   // 已迁移的路由先走表；未迁移的落回下方 if 链
-    const url = new URL(req.url, 'http://127.0.0.1');
-    const pathname = url.pathname;
-    if (pathname.startsWith('/api/')) {
-      if (!authorize(req)) return json(res, 401, { error: '未授权' });
-      const method = req.method;
-      const cfgNow = getConfig();
+  router.add('POST', '/api/integrations/snowluma/password', async (req, res) => {
+    const body = await readBody(req);
+    try {
+      return json(res, 200, await updateSnowLumaPassword(body));
+    } catch (error) {
+      return json(res, error.httpStatus || 502, {
+        error: String(error?.message ?? error)
+      });
+    }
+  });
+  router.add('PUT', '/api/auto-update/settings', async (req, res) => {
+    const body = await readBody(req);
+    try {
+      autoUpdate.configure({
+        ownerUin: body.ownerUin,
+        intervalHours: body.intervalHours
+      });
+      return json(res, 200, { ok: true, status: autoUpdate.status() });
+    } catch (error) {
+      return json(res, error.httpStatus || 400, {
+        error: String(error?.message ?? error)
+      });
+    }
+  });
+  router.add('POST', '/api/auto-update/run', async (req, res) => {
+    const body = await readBody(req);
+    if (body.confirm !== true) {
+      return json(res, 409, { error: '手动更新需要显式确认' });
+    }
+    try {
+      const status = autoUpdate.requestManual({ version: body.version });
+      return json(res, 202, { ok: true, status });
+    } catch (error) {
+      return json(res, error.httpStatus || 409, {
+        error: String(error?.message ?? error)
+      });
+    }
+  });
+  router.add('POST', '/api/auto-update/resume', async (req, res) => {
+    const body = await readBody(req);
+    if (body.confirm !== true) {
+      return json(res, 409, { error: '恢复自动更新需要显式确认' });
+    }
+    try {
+      autoUpdate.resume({
+        ownerUin: body.ownerUin,
+        intervalHours: body.intervalHours
+      });
+      return json(res, 200, { ok: true, status: autoUpdate.status() });
+    } catch (error) {
+      return json(res, error.httpStatus || 400, {
+        error: String(error?.message ?? error)
+      });
+    }
+  });
+  router.add('POST', '/api/auto-update/pause', async (req, res) => {
+    const body = await readBody(req);
+    if (body.confirm !== true) {
+      return json(res, 409, { error: '暂停自动更新需要显式确认' });
+    }
+    autoUpdate.pause();
+    return json(res, 200, { ok: true, status: autoUpdate.status() });
+  });
+  router.add('POST', '/api/auto-update/notify-pending', async (req, res) => {
+    const status = await autoUpdate.handlePendingFailure();
+    return json(res, 200, { ok: true, status });
+  });
+  router.add('GET', '/api/auto-update/check', async (req, res) => {
+    // 「发现新版本」提示：只读检查 + Release 说明，结果缓存 30 分钟。
+    // 点「立即更新」不走这里，仍由 /api/auto-update/run 触发既有部署链路。
+    try {
+      const notice = await checkForUpdate(DATA_DIR, getConfig());
+      const state = readAutoUpdateState(DATA_DIR);
+      return json(res, 200, {
+        ok: true,
+        notice,
+        ignoredVersion: String(state.ignoredVersion || ''),
+        // 已经提交、还没跑完的更新（见 autoUpdatePending）：前端据此不再重复弹同一个版本
+        pending: autoUpdatePending(DATA_DIR)
+      });
+    } catch (error) {
+      return json(res, 500, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', '/api/auto-update/ignore', async (req, res) => {
+    const body = await readBody(req);
+    const version = ignoreVersion(DATA_DIR, body.version);
+    if (!version) return json(res, 400, { error: '缺少要忽略的版本号' });
+    return json(res, 200, { ok: true, ignoredVersion: version });
+  });
+  router.add('POST', '/api/runtime', async (req, res) => {
+    const body = await readBody(req);
+    if (!['observe', 'active'].includes(body.mode)) return json(res, 400, { error: 'Invalid mode' });
+    if (body.mode === 'active' && body.confirmExclusive !== true) {
+      return json(res, 409, { error: 'Confirm that the old instance is disabled for these chats or use a different QQ account.' });
+    }
+    if (body.mode === 'observe') {
+      for (const controller of orchestrator.controllers.values()) controller.abort(new Error('Run cancelled'));
+      slangPilot?.abortResearch('机器人已切换到观察模式');
+    }
+    if (body.skipBacklog === true) for (const key of store.listChats()) store.markAllRead(key);
+    updateConfig({ runtime: { mode: body.mode } });
+    if (body.mode === 'active') slangPilot?.resumeQueued();
+    emit('status', { mode: body.mode });
+    return json(res, 200, { ok: true, mode: body.mode });
+  });
 
-
-
-      if (pathname === '/api/integrations/snowluma/password' && method === 'POST') {
-        const body = await readBody(req);
-        try {
-          return json(res, 200, await updateSnowLumaPassword(body));
-        } catch (error) {
-          return json(res, error.httpStatus || 502, {
-            error: String(error?.message ?? error)
-          });
-        }
+  router.add('POST', /^\/api\/chats\/(group|private)_(\d+)\/(retry-failed|resolve-held)$/, async (req, res, params) => {
+    const body = await readBody(req);
+    const key = `${params[1]}:${params[2]}`;
+    if (body.confirm !== true) return json(res, 409, { error: 'Explicit confirmation required' });
+    const count = params[3] === 'retry-failed' ? store.retryFailed(key) : store.resolveHeld(key);
+    emit('chat-update', key);
+    return json(res, 200, { ok: true, count });
+  });
+  router.add('GET', /^\/api\/chats\/(group|private)_(\d+)\/runtime-control$/, async (req, res, params) => {
+    const key = `${params[1]}:${params[2]}`;
+    const meta = store.getChatMeta(key);
+    return json(res, 200, {
+      control: incidentPilot?.getChatControl(key) || {
+        chatKey: key, mode: 'auto', reason: '', version: 0
+      },
+      decision: incidentPilot?.chatDecision(key, meta) || {
+        allowed: meta.held === 0,
+        mode: 'legacy',
+        effectiveState: meta.held > 0 ? 'blocked' : 'normal',
+        reason: meta.held > 0 ? '存在发送结果待确认' : ''
+      },
+      unread: meta.unread,
+      held: meta.held
+    });
+  });
+  router.add('PUT', /^\/api\/chats\/(group|private)_(\d+)\/runtime-control$/, async (req, res, params) => {
+    if (!incidentPilot?.active) {
+      return json(res, 409, { error: '异常处理实验当前未启用' });
+    }
+    const key = `${params[1]}:${params[2]}`;
+    const body = await readBody(req);
+    if (!['auto', 'blocked', 'continue'].includes(body.mode)) {
+      return json(res, 400, { error: 'mode 必须是 auto、blocked 或 continue' });
+    }
+    if (body.mode === 'continue' && body.confirm !== true) {
+      return json(res, 409, { error: '继续处理需要显式确认' });
+    }
+    const control = incidentPilot.setChatControl(key, {
+      mode: body.mode,
+      reason: body.reason,
+      expectedVersion: body.expectedVersion,
+      updatedBy: 'console'
+    });
+    const decision = orchestrator.enforceChatControl(key);
+    let backlog = { action: 'keep', marked: 0, kept: store.unreadCount(key) };
+    if (decision.allowed && body.backlogAction === 'discard') {
+      backlog = { action: 'discard', marked: store.markAllRead(key), kept: 0 };
+    } else if (decision.allowed && body.backlogAction === 'recent') {
+      backlog = { action: 'recent', ...store.keepLatestPending(key) };
+      if (backlog.kept > 0) orchestrator.scheduleWake(key, 0);
+    }
+    emit('chat-update', key);
+    return json(res, 200, { ok: true, control, decision, backlog });
+  });
+  router.add('GET', /^\/api\/chats\/(group|private)_(\d+)\/messages$/, async (req, res, params, url) => {
+    const chatKey = `${params[1]}:${params[2]}`;
+    // 单群消息上限 2^20（Kondius 钦定）：约等于不限，存档一口气全给
+    const limit = Math.min(1048576, Math.max(1, Number(url.searchParams.get('limit')) || 1048576));
+    const messages = store.recent(chatKey, { limit }).map((m) => ({
+      id: m.id, mid: m.mid, ts: m.ts, senderId: m.senderId, senderName: m.senderName,
+      // 与提示词同一套渲染：正文缺引用块时补上（回复 + 合并转发卡片那类记录）
+      text: textWithQuote(m), self: m.self, read: m.read, reply: m.reply,
+      media: m.media || []
+    }));
+    return json(res, 200, { chatKey, messages });
+  });
+  router.add('GET', /^\/api\/groups\/(\d+)\/members$/, async (req, res, params) => {
+    try {
+      const list = await onebot.call('get_group_member_list', { group_id: Number(params[1]) });
+      const members = (Array.isArray(list) ? list : (list?.data ?? []))
+        .map((m) => ({ userId: String(m.user_id), nickname: String(m.nickname || ''), card: String(m.card || '') }))
+        .sort((a, b) => String(a.card || a.nickname).localeCompare(String(b.card || b.nickname), 'zh-CN'));
+      return json(res, 200, { members });
+    } catch (error) {
+      return json(res, 502, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', /^\/api\/chats\/(group|private)_(\d+)\/wake$/, async (req, res, params) => {
+    const chatKey = `${params[1]}:${params[2]}`;
+    const result = orchestrator.requestManualWake(chatKey);
+    return json(res, result.ok ? 202 : 409, result);
+  });
+  router.add('GET', /^\/api\/chats\/(group|private)_(\d+)\/thread$/, async (req, res, params) => {
+    const chatKey = `${params[1]}:${params[2]}`;
+    return json(res, 200, {
+      chatKey,
+      mode: conversationConfigForChat(chatKey).mode,
+      thread: store.getConversationThread(chatKey),
+      checkpoint: store.latestThreadCheckpoint(chatKey)
+    });
+  });
+  router.add('DELETE', /^\/api\/chats\/(group|private)_(\d+)\/thread$/, async (req, res, params) => {
+    const chatKey = `${params[1]}:${params[2]}`;
+    const closed = store.closeConversationThread(chatKey, 'operator');
+    emit('chat-update', chatKey);
+    return json(res, 200, { ok: true, closed });
+  });
+  router.add('POST', /^\/api\/chats\/(group|private)_(\d+)\/test-send$/, async (req, res, params) => {
+    const body = await readBody(req);
+    const text = String(body.text ?? '').trim();
+    if (!text) return json(res, 400, { error: '消息内容为空' });
+    try {
+      const chatKey = `${params[1]}:${params[2]}`;
+      assertCanSend(chatKey);
+      const decision = incidentPilot?.chatDecision(chatKey, store.getChatMeta(chatKey));
+      if (decision && !decision.allowed) {
+        return json(res, 409, { error: decision.reason || '该会话当前被阻塞' });
       }
+      const data = await sender.sendTextBatch(chatKey, [text]);
+      emit('chat-update', chatKey);
+      return json(res, 200, { ok: true, messageId: data.sent[0]?.messageId ?? null });
+    } catch (error) {
+      return json(res, 502, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', /^\/api\/chats\/(group|private)_(\d+)\/mark-read$/, async (req, res, params) => {
+    const chatKey = `${params[1]}:${params[2]}`;
+    const drained = store.drainUnread(chatKey);
+    return json(res, 200, { ok: true, marked: drained.length });
+  });
 
-
-      if (pathname === '/api/auto-update/settings' && method === 'PUT') {
-        const body = await readBody(req);
-        try {
-          autoUpdate.configure({
-            ownerUin: body.ownerUin,
-            intervalHours: body.intervalHours
-          });
-          return json(res, 200, { ok: true, status: autoUpdate.status() });
-        } catch (error) {
-          return json(res, error.httpStatus || 400, {
-            error: String(error?.message ?? error)
-          });
-        }
+  router.add('GET', '/api/assets/overview', async (req, res) => {
+    const overview = assetObserver.overview();
+    const pilotStatus = slangPilotStatus();
+    return json(res, 200, {
+      ...overview,
+      slang: { ...overview.slang, active: pilotStatus.active },
+      slangPilot: pilotStatus
+    });
+  });
+  router.add('GET', '/api/assets/stickers', async (req, res, params, url) => {
+    const result = await assetObserver.listStickers({
+      query: url.searchParams.get('query') || '',
+      offset: url.searchParams.get('offset') || 0,
+      limit: url.searchParams.get('limit') || 100,
+      refresh: url.searchParams.get('refresh') === '1'
+    });
+    // QQ 收藏表情有上限（非会员 500）：满了之后新收藏只能进本地图库（发出去是图片），
+    // 界面据此解释清楚，别让人以为"表情包坏了"
+    try { result.qqFavorites = await stickers.qqFavoritesState(); } catch { /* 拿不到就不显示 */ }
+    return json(res, 200, result);
+  });
+  router.add('POST', '/api/assets/stickers', async (req, res) => {
+    try {
+      const body = await readBody(req, 12 * 1024 * 1024);
+      let imageBuffer;
+      if (body.imageDataUrl) {
+        imageBuffer = decodeImageDataUrl(body.imageDataUrl);
+      } else if (body.imageUrl) {
+        imageBuffer = (await safeFetchBinary(
+          String(body.imageUrl),
+          8 * 1024 * 1024
+        )).buffer;
+      } else {
+        return json(res, 400, { error: '请选择图片文件或填写图片 URL' });
       }
-
-      if (pathname === '/api/auto-update/run' && method === 'POST') {
-        const body = await readBody(req);
-        if (body.confirm !== true) {
-          return json(res, 409, { error: '手动更新需要显式确认' });
-        }
-        try {
-          const status = autoUpdate.requestManual({ version: body.version });
-          return json(res, 202, { ok: true, status });
-        } catch (error) {
-          return json(res, error.httpStatus || 409, {
-            error: String(error?.message ?? error)
-          });
-        }
+      const entry = assetObserver.addSticker({
+        imageBuffer,
+        desc: body.desc,
+        localNote: body.localNote,
+        tags: body.tags,
+        usage: body.usage
+      });
+      emit('asset-update', { kind: 'stickers', action: 'create', id: entry.id });
+      return json(res, 201, { ok: true, entry });
+    } catch (error) {
+      return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('GET', '/api/assets/stickers/image', async (req, res, params, url) => {
+    const id = String(url.searchParams.get('id') || '').trim();
+    if (!id) return json(res, 400, { error: '缺少表情 ID' });
+    let sticker = stickers.peek(id);
+    const localImage = stickers.readImage(id);
+    if (localImage) {
+      res.writeHead(200, {
+        'content-type': localImage.contentType,
+        'content-length': localImage.buffer.length,
+        'cache-control': 'private, max-age=300',
+        'x-content-type-options': 'nosniff'
+      });
+      res.end(localImage.buffer);
+      return;
+    }
+    if (sticker?.source === 'ai') {
+      sticker = await stickers.findForSend(id);
+    }
+    if (!sticker?.url) return json(res, 404, { error: '表情图片不存在' });
+    try {
+      const image = await safeFetchBinary(sticker.url, 8 * 1024 * 1024);
+      const contentType = String(image.contentType || '').split(';')[0].trim().toLowerCase();
+      if (!contentType.startsWith('image/')) {
+        return json(res, 502, { error: '表情资源不是图片' });
       }
+      res.writeHead(200, {
+        'content-type': contentType,
+        'content-length': image.buffer.length,
+        'cache-control': 'private, max-age=60',
+        'x-content-type-options': 'nosniff'
+      });
+      res.end(image.buffer);
+      return;
+    } catch (error) {
+      return json(res, 502, { error: `表情图片读取失败：${String(error?.message ?? error)}` });
+    }
+  });
+  router.add('GET', '/api/assets/slang', async (req, res, params, url) => {
+    return json(res, 200, assetObserver.listSlang({
+      query: url.searchParams.get('query') || '',
+      status: url.searchParams.get('status') || '',
+      offset: url.searchParams.get('offset') || 0,
+      limit: url.searchParams.get('limit') || 200
+    }));
+  });
+  router.add('POST', '/api/assets/slang', async (req, res) => {
+    try {
+      const entry = assetObserver.addSlang(await readBody(req));
+      emit('asset-update', { kind: 'slang', action: 'create', id: entry.id });
+      return json(res, 201, { ok: true, entry });
+    } catch (error) {
+      return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('GET', '/api/assets/identities', async (req, res, params, url) => {
+    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 500));
+    return json(res, 200, assetObserver.identitySnapshot({
+      limit,
+      query: url.searchParams.get('query') || ''
+    }));
+  });
+  router.add('POST', '/api/assets/identities', async (req, res) => {
+    try {
+      const person = assetObserver.upsertIdentity(await readBody(req));
+      emit('asset-update', { kind: 'identities', action: 'create', id: person.userId });
+      emit('identity-pilot-update', identityPilotStatus());
+      return json(res, 201, { ok: true, person });
+    } catch (error) {
+      return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('GET', '/api/assets/memory', async (req, res, params, url) => {
+    return json(res, 200, assetObserver.memorySummary({
+      query: url.searchParams.get('query') || ''
+    }));
+  });
+  router.add('POST', '/api/assets/memory', async (req, res) => {
+    try {
+      const entry = assetObserver.addMemory(await readBody(req));
+      await refreshIdentityAfterAssetMutation();
+      emit('memory-update', { chatKey: String(entry.chatKey || '') });
+      emit('asset-update', { kind: 'memory', action: 'create' });
+      return json(res, 201, { ok: true, entry });
+    } catch (error) {
+      return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('PUT', '/api/assets/memory', async (req, res) => {
+    try {
+      const body = await readBody(req);
+      const member = assetObserver.updateMemory(body);
+      await refreshIdentityAfterAssetMutation();
+      emit('memory-update', { chatKey: String(body.chatKey || '') });
+      emit('asset-update', { kind: 'memory', action: 'update' });
+      return json(res, 200, { ok: true, member });
+    } catch (error) {
+      return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('DELETE', '/api/assets/memory', async (req, res) => {
+    try {
+      const body = await readBody(req);
+      if (body.confirm !== true) return json(res, 409, { error: '删除记忆需要显式确认' });
+      if (!assetObserver.deleteMemory(body)) return json(res, 404, { error: '记忆不存在' });
+      await refreshIdentityAfterAssetMutation();
+      emit('memory-update', { chatKey: String(body.chatKey || '') });
+      emit('asset-update', { kind: 'memory', action: 'delete' });
+      return json(res, 200, { ok: true });
+    } catch (error) {
+      return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+    }
+  });
 
-      if (pathname === '/api/auto-update/resume' && method === 'POST') {
-        const body = await readBody(req);
-        if (body.confirm !== true) {
-          return json(res, 409, { error: '恢复自动更新需要显式确认' });
-        }
-        try {
-          autoUpdate.resume({
-            ownerUin: body.ownerUin,
-            intervalHours: body.intervalHours
-          });
-          return json(res, 200, { ok: true, status: autoUpdate.status() });
-        } catch (error) {
-          return json(res, error.httpStatus || 400, {
-            error: String(error?.message ?? error)
-          });
-        }
+  router.add('PUT', /^\/api\/assets\/stickers\/([^/]+)$/, async (req, res, params) => {
+    try {
+      const id = decodeURIComponent(params[1]);
+      const body = await readBody(req);
+      const entry = assetObserver.updateSticker(id, {
+        desc: body.desc,
+        localNote: body.localNote,
+        tags: body.tags,
+        usage: body.usage
+      });
+      if (!entry) return json(res, 404, { error: '表情不存在' });
+      emit('asset-update', { kind: 'stickers', action: 'update', id });
+      return json(res, 200, { ok: true, entry });
+    } catch (error) {
+      return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('DELETE', /^\/api\/assets\/stickers\/([^/]+)$/, async (req, res, params) => {
+    try {
+      const body = await readBody(req);
+      if (body.confirm !== true) return json(res, 409, { error: '删除表情需要显式确认' });
+      const id = decodeURIComponent(params[1]);
+      const result = assetObserver.deleteSticker(id);
+      if (!result?.removed) return json(res, 404, { error: '表情不存在' });
+      emit('asset-update', { kind: 'stickers', action: 'delete', id });
+      return json(res, 200, { ok: true, ...result });
+    } catch (error) {
+      return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('PUT', /^\/api\/assets\/slang\/([^/]+)$/, async (req, res, params) => {
+    try {
+      const id = decodeURIComponent(params[1]);
+      const entry = assetObserver.updateSlang(id, await readBody(req));
+      if (!entry) return json(res, 404, { error: '黑话词条不存在' });
+      emit('asset-update', { kind: 'slang', action: 'update', id });
+      return json(res, 200, { ok: true, entry });
+    } catch (error) {
+      return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('DELETE', /^\/api\/assets\/slang\/([^/]+)$/, async (req, res, params) => {
+    try {
+      const body = await readBody(req);
+      if (body.confirm !== true) return json(res, 409, { error: '删除黑话需要显式确认' });
+      const id = decodeURIComponent(params[1]);
+      if (!assetObserver.deleteSlang(id)) return json(res, 404, { error: '黑话词条不存在' });
+      emit('asset-update', { kind: 'slang', action: 'delete', id });
+      return json(res, 200, { ok: true });
+    } catch (error) {
+      return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('PUT', /^\/api\/assets\/identities\/(\d+)$/, async (req, res, params) => {
+    try {
+      const person = assetObserver.upsertIdentity({
+        ...(await readBody(req)),
+        userId: params[1]
+      });
+      emit('asset-update', { kind: 'identities', action: 'update', id: person.userId });
+      emit('identity-pilot-update', identityPilotStatus());
+      return json(res, 200, { ok: true, person });
+    } catch (error) {
+      return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('DELETE', /^\/api\/assets\/identities\/(\d+)$/, async (req, res, params) => {
+    try {
+      const body = await readBody(req);
+      if (body.confirm !== true) return json(res, 409, { error: '删除人物需要显式确认' });
+      if (!assetObserver.deleteIdentity(params[1])) {
+        return json(res, 404, { error: '人物不存在' });
       }
+      emit('asset-update', { kind: 'identities', action: 'delete', id: params[1] });
+      emit('identity-pilot-update', identityPilotStatus());
+      return json(res, 200, { ok: true });
+    } catch (error) {
+      return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
+    }
+  });
 
-      if (pathname === '/api/auto-update/pause' && method === 'POST') {
-        const body = await readBody(req);
-        if (body.confirm !== true) {
-          return json(res, 409, { error: '暂停自动更新需要显式确认' });
-        }
-        autoUpdate.pause();
-        return json(res, 200, { ok: true, status: autoUpdate.status() });
-      }
-
-      if (pathname === '/api/auto-update/notify-pending' && method === 'POST') {
-        const status = await autoUpdate.handlePendingFailure();
-        return json(res, 200, { ok: true, status });
-      }
-
-      if (pathname === '/api/auto-update/check' && method === 'GET') {
-        // 「发现新版本」提示：只读检查 + Release 说明，结果缓存 30 分钟。
-        // 点「立即更新」不走这里，仍由 /api/auto-update/run 触发既有部署链路。
-        try {
-          const notice = await checkForUpdate(DATA_DIR, getConfig());
-          const state = readAutoUpdateState(DATA_DIR);
-          return json(res, 200, {
-            ok: true,
-            notice,
-            ignoredVersion: String(state.ignoredVersion || ''),
-            // 已经提交、还没跑完的更新（见 autoUpdatePending）：前端据此不再重复弹同一个版本
-            pending: autoUpdatePending(DATA_DIR)
-          });
-        } catch (error) {
-          return json(res, 500, { error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/auto-update/ignore' && method === 'POST') {
-        const body = await readBody(req);
-        const version = ignoreVersion(DATA_DIR, body.version);
-        if (!version) return json(res, 400, { error: '缺少要忽略的版本号' });
-        return json(res, 200, { ok: true, ignoredVersion: version });
-      }
-
-      if (pathname === '/api/runtime' && method === 'POST') {
-        const body = await readBody(req);
-        if (!['observe', 'active'].includes(body.mode)) return json(res, 400, { error: 'Invalid mode' });
-        if (body.mode === 'active' && body.confirmExclusive !== true) {
-          return json(res, 409, { error: 'Confirm that the old instance is disabled for these chats or use a different QQ account.' });
-        }
-        if (body.mode === 'observe') {
-          for (const controller of orchestrator.controllers.values()) controller.abort(new Error('Run cancelled'));
-          slangPilot?.abortResearch('机器人已切换到观察模式');
-        }
-        if (body.skipBacklog === true) for (const key of store.listChats()) store.markAllRead(key);
-        updateConfig({ runtime: { mode: body.mode } });
-        if (body.mode === 'active') slangPilot?.resumeQueued();
-        emit('status', { mode: body.mode });
-        return json(res, 200, { ok: true, mode: body.mode });
-      }
-
-      const recovery = /^\/api\/chats\/(group|private)_(\d+)\/(retry-failed|resolve-held)$/.exec(pathname);
-      if (recovery && method === 'POST') {
-        const body = await readBody(req);
-        const key = `${recovery[1]}:${recovery[2]}`;
-        if (body.confirm !== true) return json(res, 409, { error: 'Explicit confirmation required' });
-        const count = recovery[3] === 'retry-failed' ? store.retryFailed(key) : store.resolveHeld(key);
-        emit('chat-update', key);
-        return json(res, 200, { ok: true, count });
-      }
-
-      const chatControl = /^\/api\/chats\/(group|private)_(\d+)\/runtime-control$/.exec(pathname);
-      if (chatControl && method === 'GET') {
-        const key = `${chatControl[1]}:${chatControl[2]}`;
-        const meta = store.getChatMeta(key);
-        return json(res, 200, {
-          control: incidentPilot?.getChatControl(key) || {
-            chatKey: key, mode: 'auto', reason: '', version: 0
-          },
-          decision: incidentPilot?.chatDecision(key, meta) || {
-            allowed: meta.held === 0,
-            mode: 'legacy',
-            effectiveState: meta.held > 0 ? 'blocked' : 'normal',
-            reason: meta.held > 0 ? '存在发送结果待确认' : ''
-          },
-          unread: meta.unread,
-          held: meta.held
+  router.add('GET', '/api/memory-files', async (req, res) => {
+    const files = memory.listChats().map((chatKey) => {
+      const members = memory.members(chatKey);
+      const handoff = memory.getHandoff(chatKey);
+      const impressionCount = members.reduce((n, m) => n + m.impressions.length, 0);
+      return {
+        chatKey,
+        impressionCount,
+        memberCount: members.length,
+        hasHandoff: Boolean(handoff),
+        handoffExpiresAt: handoff?.expiresAt || 0,
+        updatedAt: Math.max(
+          Number(handoff?.updatedAt) || 0,
+          0,
+          ...members.map((m) => Number(m.updatedAt) || 0)
+        )
+      };
+    });
+    // 白名单里的群没有记忆也要显示
+    const seen = new Set(files.map((f) => f.chatKey));
+    // 补上白名单里还没有记忆的会话（缺字段也要有默认值，前端统一处理）
+    for (const gid of (getConfig().allow?.groups || [])) {
+      const key = `group:${String(gid)}`;
+      if (!seen.has(key)) {
+        files.push({
+          chatKey: key, impressionCount: 0, memberCount: 0,
+          hasHandoff: false, handoffExpiresAt: 0, updatedAt: 0, consolidating: false
         });
       }
-      if (chatControl && method === 'PUT') {
-        if (!incidentPilot?.active) {
-          return json(res, 409, { error: '异常处理实验当前未启用' });
-        }
-        const key = `${chatControl[1]}:${chatControl[2]}`;
-        const body = await readBody(req);
-        if (!['auto', 'blocked', 'continue'].includes(body.mode)) {
-          return json(res, 400, { error: 'mode 必须是 auto、blocked 或 continue' });
-        }
-        if (body.mode === 'continue' && body.confirm !== true) {
-          return json(res, 409, { error: '继续处理需要显式确认' });
-        }
-        const control = incidentPilot.setChatControl(key, {
-          mode: body.mode,
-          reason: body.reason,
-          expectedVersion: body.expectedVersion,
-          updatedBy: 'console'
-        });
-        const decision = orchestrator.enforceChatControl(key);
-        let backlog = { action: 'keep', marked: 0, kept: store.unreadCount(key) };
-        if (decision.allowed && body.backlogAction === 'discard') {
-          backlog = { action: 'discard', marked: store.markAllRead(key), kept: 0 };
-        } else if (decision.allowed && body.backlogAction === 'recent') {
-          backlog = { action: 'recent', ...store.keepLatestPending(key) };
-          if (backlog.kept > 0) orchestrator.scheduleWake(key, 0);
-        }
-        emit('chat-update', key);
-        return json(res, 200, { ok: true, control, decision, backlog });
-      }
-      const unknownOperations =
-        /^\/api\/chats\/(group|private)_(\d+)\/unknown-operations$/.exec(pathname);
-      if (unknownOperations && method === 'GET') {
-        const key = `${unknownOperations[1]}:${unknownOperations[2]}`;
-        return json(res, 200, { operations: store.listUnknownOperations(key) });
-      }
-      const unknownOperationAction =
-        /^\/api\/chats\/(group|private)_(\d+)\/unknown-operations\/([\w-]+)\/reconcile$/
-          .exec(pathname);
-      if (unknownOperationAction && method === 'POST') {
-        const body = await readBody(req);
-        if (body.confirm !== true || !['sent', 'failed'].includes(body.result)) {
-          return json(res, 409, { error: '核对未知写入需要明确结果和确认' });
-        }
-        const key = `${unknownOperationAction[1]}:${unknownOperationAction[2]}`;
-        try {
-          const result = store.reconcileUnknownOperation(
-            unknownOperationAction[3],
-            body.result
-          );
-          if (!result || result.chatKey !== key) {
-            return json(res, 404, { error: '未知写入不存在或已核对' });
-          }
-          emit('chat-update', key);
-          return json(res, 200, { ok: true, result });
-        } catch (error) {
-          return json(res, 409, { error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/status' && method === 'GET') {
-        const dayKey = todayKey();
-        const sessionUsage = sessions.todayUsage(dayKey);
-        const dailyStats = buildUsageStats({ range: 'today' });
-        const totals = dailyStats.totals;
-        const usage = {
-          dayKey,
-          promptTokens: totals.promptTokens,
-          completionTokens: totals.completionTokens,
-          totalTokens: totals.totalTokens,
-          cachedTokens: totals.cachedTokens,
-          runs: sessionUsage.runs,
-          webSearchCount: dailyStats.searchCount
-        };
-        const cfgNow = getConfig();
-        // 省 Token 模式的"用户值 / 生效值"对照表：控制台设置页直接渲染，避免两边各写一份上限数字
-        const tokenSaver = tokenSaverEffective(cfgNow);
-        const currentVendor = vendorOfConfig(cfgNow) || '';
-        const currentPrice = resolveModelPrice(cfgNow.api?.model, cfgNow, null, { vendor: currentVendor });
-        const currentTier = currentPrice.peak
-          ? priceAt(currentPrice, Date.now())
-          : currentPrice;
-        const cost = {
-          cost: totals.cost,
-          source: currentPrice.source,
-          calculation: 'per-call',
-          breakdown: totals.breakdown,
-          // 口径：实付（用户自己填的价）/ 估算（官方表、兜底）/ 未定价
-          kind: currentPrice.kind || 'estimate',
-          billing: currentPrice.billing || 'token',
-          costMode: costModeOf(cfgNow).mode,
-          costMultiplier: costModeOf(cfgNow).multiplier,
-          costMonthlyFee: costModeOf(cfgNow).monthlyFee,
-          fallbackCalls: totals.fallbackCalls || 0,
-          billingAmount: Number(currentPrice.amount) || 0,
-          billingPeriod: currentPrice.period === 'day' ? 'day' : 'month',
-          actualCost: totals.actualCost || 0,
-          estimateCost: totals.estimateCost || 0,
-          flatCost: (totals.flatItems || []).reduce((sum, item) => (
-            item.period === 'month' ? sum + (Number(item.amount) || 0) : sum
-          ), 0),
-          flatCalls: totals.flatCalls || 0,
-          localCalls: totals.localCalls || 0,
-          prices: {
-            in: currentTier.in,
-            out: currentTier.out,
-            cached: currentTier.cached
-          },
-          matched: currentPrice.matched,
-          // 未定价 = 当前模型没有单价（不是免费）；界面据此提示"含未定价调用"
-          unpriced: currentPrice.unpriced === true,
-          confidence: currentPrice.confidence || '',
-          via: currentPrice.via || '',
-          peak: Boolean(currentTier.peak),
-          hasPeakTiers: totals.hasPeakModel,
-          peakCost: totals.peakCost,
-          offPeakCost: totals.offPeakCost,
-          exactCalls: totals.exactCalls,
-          calls: totals.runs
-        };
-        return json(res, 200, {
-          onebot: {
-            connected: onebot.connected,
-            everConnected: onebot.everConnected,
-            error: onebot.lastConnectError,
-            self: onebot.selfInfo ? { userId: onebot.selfId, nickname: onebot.selfNickname } : null
-          },
-          orchestrator: orchestrator.statusSummary(),
-          incidentPilot: incidentPilotStatus(),
-          usage,
-          cost,
-          cacheHitRate: totals.cacheHitRate,
-          webSearchCount: usage.webSearchCount || 0,
-          // 前端构建戳：轮询时发现它变了 → 前端提示"控制台已更新，点击刷新"
-          uiBuild: UI_BUILD,
-          // 省 Token 模式：模式 + 每项的"用户值 / 生效值"（设置页渲染用）
-          tokenSaver,
-          ...(cfgNow.timeControl?.enabled ? {
-            timeControl: timeControlState(cfgNow.timeControl)
-          } : {}),
-          paused: orchestrator.paused,
-          pauseReason: orchestrator.pauseReason ?? null
+    }
+    for (const uid of (getConfig().allow?.private || [])) {
+      const key = `private:${String(uid)}`;
+      if (!seen.has(key)) {
+        files.push({
+          chatKey: key, impressionCount: 0, memberCount: 0,
+          hasHandoff: false, handoffExpiresAt: 0, updatedAt: 0, consolidating: false
         });
       }
+    }
+    // 带上"正在整理"状态：切页签后前端靠它恢复提示，
+    // 否则用户切走再切回，完全看不出整理是在跑还是已经中断。
+    const busy = orchestrator.consolidating;
+    for (const f of files) f.consolidating = busy.has(f.chatKey);
+    files.sort((a, b) => b.updatedAt - a.updatedAt);
+    return json(res, 200, { files, consolidating: [...busy] });
+  });
+  router.add('POST', '/api/memory-files/consolidate', async (req, res) => {
+    try {
+      const body = await readBody(req).catch(() => ({}));
+      const chatKey = String(body.chatKey || '');
+      if (!/^(group|private):\d+$/.test(chatKey)) return json(res, 400, { ok: false, error: 'chatKey 格式错误' });
 
-      // ── 成本看板：按天 / 按会话 / 按模型统计 ──
-      // range: 'today'=今天0点起 | '24h'=最近24小时 | '3'|'7'|'14'|'30'=最近N天
-      if (pathname === '/api/usage/stats' && method === 'GET') {
-        try {
-          const raw = String(url.searchParams.get('range') || url.searchParams.get('days') || '7');
-          const stats = buildUsageStats({ range: raw });
-          return json(res, 200, { ok: true, range: raw, ...stats });
-        } catch (error) {
-          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
-        }
+      // 可选：只整理指定的群友（QQ 号数组）。不传 = 整理全群。
+      // 传了但记忆里还没有此人时，会从聊天记录里新建印象。
+      let userIds = null;
+      if (body.userIds != null) {
+        const arr = Array.isArray(body.userIds) ? body.userIds : [body.userIds];
+        userIds = arr.map((u) => String(u ?? '').trim()).filter((u) => /^\d{1,15}$/.test(u));
+        if (!userIds.length) return json(res, 400, { ok: false, error: 'userIds 需为 QQ 号数组' });
       }
+      // 手动触发：跳过门槛/冷却检查，且对零印象的人启用"新建印象"模式
+      const force = body.force !== false;
 
-      // 某个维度下的明细（点表格行时弹窗用）
-      // dim: 'chat' | 'model' | 'day'  key: 对应值  by: 'day' | 'model' | 'chat'
-      if (pathname === '/api/usage/breakdown' && method === 'GET') {
-        try {
-          const raw = String(url.searchParams.get('range') || '7');
-          const dim = String(url.searchParams.get('dim') || '');
-          const key = String(url.searchParams.get('key') || '');
-          const by = String(url.searchParams.get('by') || '');
-          const r = buildUsageBreakdown({ range: raw, dim, key, by });
-          return json(res, 200, { ok: true, ...r });
-        } catch (error) {
-          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
+      if (orchestrator.consolidating.has(chatKey)) return json(res, 409, { ok: false, error: '该群已在整理中' });
+      orchestrator.consolidating.add(chatKey);
+      emit('memory-update', { chatKey, phase: 'consolidate-start', userIds });
+      orchestrator.consolidateMemoryForChat(chatKey, { userIds, force })
+        .then((result) => {
+          emit('memory-update', { chatKey, phase: 'consolidate-done', ...(result || {}) });
+        })
+        .catch((error) => {
+          emit('memory-update', { chatKey, phase: 'consolidate-error', error: String(error?.message ?? error) });
+        })
+        .finally(() => orchestrator.consolidating.delete(chatKey));
+      return json(res, 202, { ok: true, started: true });
+    } catch (error) {
+      return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
 
-      // 从渠道自动拉价（探测）：只做预览，不写配置。
-      // 支持 one-api / new-api 家族的 /api/pricing（倍率换算）与自家价目表形状。
-      if (pathname === '/api/model-prices/probe' && method === 'POST') {
-        const body = await readBody(req);
-        const cfgNow = getConfig();
-        const target = String(body.url || cfgNow.api?.baseUrl || '').trim();
-        const probe = await probeChannelPrices({
-          url: target,
-          usdRate: body.usdRate,
-          fetchImpl: undefined,
-          timeoutMs: Math.min(30000, Math.max(3000, Number(body.timeoutMs) || 12000))
-        });
-        return json(res, 200, {
-          ok: probe.ok,
-          kind: probe.kind,
-          sourceUrl: probe.sourceUrl,
-          usdRate: probe.usdRate,
-          group: probe.group,
-          groupRatio: probe.groupRatio,
-          modelCount: probe.modelCount,
-          skipped: probe.skipped,
-          tried: probe.tried,
-          error: probe.error,
-          vendor: vendorOfConfig(cfgNow) || '',
-          prices: capPrices(probe.prices || {})
-        });
-      }
+  router.add('GET', /^\/api\/memory-files\/(group|private)_(\d+)$/, async (req, res, params) => {
+    const chatKey = `${params[1]}:${params[2]}`;
+    return json(res, 200, {
+      ...memory.query(chatKey),
+      members: memory.members(chatKey),
+      handoff: memory.getHandoff(chatKey)
+    });
+  });
+  router.add('PUT', /^\/api\/memory-files\/(group|private)_(\d+)\/handoff$/, async (req, res, params) => {
+    const chatKey = `${params[1]}:${params[2]}`;
+    const body = await readBody(req).catch(() => ({}));
+    try {
+      const handoff = memory.setHandoff(chatKey, body, { sourceSessionId: 'console' });
+      emit('memory-update', { chatKey, phase: handoff ? 'handoff-update' : 'handoff-clear' });
+      return json(res, 200, { ok: true, handoff });
+    } catch (error) {
+      return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+  router.add('DELETE', /^\/api\/memory-files\/(group|private)_(\d+)\/handoff$/, async (req, res, params) => {
+    const chatKey = `${params[1]}:${params[2]}`;
+    memory.clearHandoff(chatKey);
+    emit('memory-update', { chatKey, phase: 'handoff-clear' });
+    return json(res, 200, { ok: true });
+  });
+  router.add('DELETE', /^\/api\/memory-files\/global\/members\/(\d{1,15})$/, async (req, res, params) => {
+    // 破坏性操作统一 confirm 门槛（与全站口径一致）：global 版跨所有会话删除。
+    const body = await readBody(req).catch(() => ({}));
+    if (body?.confirm !== true) return json(res, 409, { ok: false, error: '删除全部人物记忆需要 body.confirm === true' });
+    const removed = memory.removeMember('', params[1]);
+    emit('memory-update', { chatKey: '' });
+    return json(res, 200, { ok: true, removed });
+  });
+  router.add('PUT', /^\/api\/memory-files\/(group|private)_(\d+)\/members\/(\d+)$/, async (req, res, params) => {
+    const chatKey = `${params[1]}:${params[2]}`;
+    const body = await readBody(req).catch(() => ({}));
+    try {
+      const member = memory.editMemberImpression(chatKey, {
+        userId: params[3],
+        name: String(body.name ?? ''),
+        note: body.note ?? '',
+        impressions: body.impressions ?? []
+      });
+      emit('memory-update', { chatKey });
+      return json(res, 200, { ok: true, member });
+    } catch (error) {
+      return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+  router.add('DELETE', /^\/api\/memory-files\/(group|private)_(\d+)\/members\/(\d+)$/, async (req, res, params) => {
+    // 同上：删除成员印象也要 confirm（该路径的快照对 name-only 成员缺位，误删更难恢复）。
+    const body = await readBody(req).catch(() => ({}));
+    if (body?.confirm !== true) return json(res, 409, { ok: false, error: '删除成员印象需要 body.confirm === true' });
+    const chatKey = `${params[1]}:${params[2]}`;
+    memory.removeMember(chatKey, params[3]);
+    emit('memory-update', { chatKey });
+    return json(res, 200, { ok: true });
+  });
 
-      // 渠道价目表（每渠道一份，自动拉取）
-
-      if (pathname === '/api/channel-prices' && method === 'POST') {
-        const body = await readBody(req);
-        const vendor = String(body.vendor || '').trim();
-        const feedUrl = String(body.url || '').trim();
-        if (!vendor) return json(res, 400, { error: '缺少渠道名（vendor）' });
-        if (!/^https?:\/\//i.test(feedUrl)) return json(res, 400, { error: '价目表 URL 必须以 http(s):// 开头' });
-        // 先写配置（意图），再拉一次（结果）
-        const current = getConfig();
-        const feeds = Array.isArray(current.api?.channelPriceFeeds) ? current.api.channelPriceFeeds : [];
-        const next = feeds.filter((f) => String(f?.vendor || '').trim() !== vendor);
-        next.push({ vendor, url: feedUrl });
-        updateConfig({ api: { ...(current.api || {}), channelPriceFeeds: next } });
-        const status = await refreshChannelFeed(vendor, feedUrl);
-        return json(res, 200, { ok: true, feeds: status });
-      }
-
-      if (pathname === '/api/channel-prices/refresh' && method === 'POST') {
-        const body = await readBody(req);
-        const vendor = String(body.vendor || '').trim();
-        const current = getConfig();
-        const feeds = Array.isArray(current.api?.channelPriceFeeds) ? current.api.channelPriceFeeds : [];
-        const hit = feeds.find((f) => String(f?.vendor || '').trim() === vendor);
-        if (!hit) return json(res, 404, { error: `没有这个渠道的价目表：${vendor}` });
-        const status = await refreshChannelFeed(vendor, String(hit.url || '').trim());
-        return json(res, 200, { ok: true, feeds: status });
-      }
-
-      if (pathname === '/api/channel-prices/remove' && method === 'POST') {
-        const body = await readBody(req);
-        const vendor = String(body.vendor || '').trim();
-        if (!vendor) return json(res, 400, { error: '缺少渠道名（vendor）' });
-        const current = getConfig();
-        const feeds = Array.isArray(current.api?.channelPriceFeeds) ? current.api.channelPriceFeeds : [];
-        updateConfig({
-          api: {
-            ...(current.api || {}),
-            channelPriceFeeds: feeds.filter((f) => String(f?.vendor || '').trim() !== vendor)
-          }
-        });
-        const status = removeChannelFeed(vendor);
-        return json(res, 200, { ok: true, feeds: status });
-      }
-
-
-      // 手动触发一次远程价格表拉取（设置页「立即拉取」按钮）
-      // 返回体与 GET 同形（只多一个 ok）：前端拿到后就地替换状态，
-      // 少字段会让价格卡当场显示错价（渠道价/别名/渠道价目表集体丢失）。
-      if (pathname === '/api/model-prices/refresh' && method === 'POST') {
-        const st = await refreshPriceFeed(getConfig().api?.priceRemoteUrl || '');
-        return json(res, 200, { ok: st.ok, ...modelPricesPayload() });
-      }
-
-      // ── 体检/引导相关 ──
-      if (pathname === '/api/onebot/groups' && method === 'GET') {
-        try {
-          const list = await onebot.call('get_group_list');
-          const groups = (Array.isArray(list) ? list : (list?.data ?? []))
-            .map((g) => ({ id: String(g.group_id), name: String(g.group_name ?? g.group_id) }));
-          return json(res, 200, { groups });
-        } catch (error) {
-          return json(res, 502, { error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/onebot/friends' && method === 'GET') {
-        try {
-          const list = await onebot.call('get_friend_list');
-          const friends = (Array.isArray(list) ? list : (list?.data ?? []))
-            .map((f) => ({ id: String(f.user_id), name: String(f.remark || f.nickname || f.user_id) }));
-          return json(res, 200, { friends });
-        } catch (error) {
-          return json(res, 502, { error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/persona-templates' && method === 'GET') {
-        const { PERSONAS } = await import('../personas.js');
-        const builtins = Object.entries(PERSONAS).map(([id, p]) => ({
-          id, name: p.name, text: p.text, behaviorProfile: p.behaviorProfile || 'legacy', builtin: true
-        }));
-        const customs = (getConfig().customPersonas || []).map((p, i) => ({
-          id: `custom_${i}`,
-          name: p.name,
-          text: p.text,
-          customRules: p.customRules || '',
-          behaviorProfile: p.behaviorProfile || 'legacy',
-          builtin: false
-        }));
-        return json(res, 200, { templates: [...builtins, ...customs] });
-      }
-
-      // 用户自定义人设：新增 / 删除
-      if (pathname === '/api/persona-templates' && method === 'POST') {
-        const body = await readBody(req).catch(() => ({}));
-        const name = String(body.name ?? '').trim().slice(0, 50);
-        const text = String(body.text ?? '').trim();
-        if (!name || !text) return json(res, 400, { ok: false, error: '人设名称和角色设定都不能为空' });
-        const { normalizeBehaviorProfile } = await import('../personas.js');
-        let behaviorProfile;
-        try {
-          behaviorProfile = normalizeBehaviorProfile(body.behaviorProfile);
-        } catch (error) {
-          return json(res, 400, { ok: false, error: error.message });
-        }
-        // customRules 允许为空
-        const entry = { name, text, behaviorProfile };
-        if (String(body.customRules ?? '').trim()) entry.customRules = String(body.customRules).trim();
-        const next = [...(getConfig().customPersonas || []), entry];
-        updateConfig({ customPersonas: next });
-        return json(res, 200, { ok: true, templates: next });
-      }
-
-      const personaDeleteMatch = /^\/api\/persona-templates\/(custom_\d+)$/.exec(pathname);
-      if (personaDeleteMatch && method === 'DELETE') {
-        const idx = Number(personaDeleteMatch[1].replace('custom_', ''));
-        const next = (getConfig().customPersonas || []).filter((_, i) => i !== idx);
-        updateConfig({ customPersonas: next });
-        return json(res, 200, { ok: true });
-      }
-
-      // ── 多提供商模型目录 ──
-      if (pathname === '/api/providers' && method === 'GET') {
-        const providers = currentProviders().map((p) => ({
-          id: p.id,
-          displayName: p.displayName,
-          baseURL: p.baseURL,
-          apiKey: '',              // 不把真实 Key 暴露给 UI；有 Key 用 hasKey 表示
-          apiKeyFrom: p.apiKeyFrom || '',
-          needsBaseUrl: p.needsBaseUrl === true,
-          hasKey: !!p.apiKey,
-          anthropicOrigin: p.anthropicOrigin === true,
-          models: p.models,
-          modelNames: p.modelNames || {},
-          preset: p.preset || '',
-          thinkingProbe: p.thinkingProbe || null
-        }));
-        return json(res, 200, { providers });
-      }
-
-      // 显示目录提供商的真实 Key（本地 UI 点击“显示”用）
-      // 明文密钥端点：仅放行本机控制台请求，挡住外部网页冒用（见 keyEndpointAllowed）。
-      if (pathname === '/api/providers/key' && method === 'GET') {
-        if (!keyEndpointAllowed(req)) {
-          return json(res, 403, { error: '请求来源不被信任，已拒绝读取明文密钥。' });
-        }
-        const pid = String(url.searchParams.get('providerId') || '');
-        const p = currentProviders().find((x) => x.id === pid);
-        return json(res, 200, { apiKey: p?.apiKey || '' });
-      }
-
-
-
-      // 语音识别的模型列表：从服务商官网拉（用户要求 —— 写死的预设会过时，
-      // 例如硅基流动上了新的免费模型，列表应该跟着官网走）。
-      // 与 LLM 那边同一套密钥规则：只有地址是配置里已知的，才使用保存的 Key。
-      if (pathname === '/api/asr/models' && method === 'POST') {
-        try {
-          const body = await readBody(req);
-          const cfgNow = getConfig();
-          const baseUrl = String(body.baseUrl || cfgNow.asr?.baseUrl || '').trim();
-          const submitted = String(body.apiKey ?? '').trim();
-          const trimSlash = (value) => String(value || '').trim().replace(/[/]+$/, '').toLowerCase();
-          const knownBase = trimSlash(cfgNow.asr?.baseUrl);
-          const target = trimSlash(baseUrl);
-          const apiKey = (submitted && submitted !== '******')
-            ? submitted
-            : (target && target === knownBase ? asrApiKey(cfgNow) : '');
-          const all = await fetchModelsFrom(baseUrl, apiKey);
-          // 用户要求：只取语音模型。列表里通常混着几百个 LLM，全给出来等于找不到东西。
-          // 正向：转写类（whisper / sensevoice / ASR / speech-to-text / 转写…）。
-          //   ⚠️ 关键词表必然不完备：硅基流动的 XingChenGSR 是语音识别，名字里却没有 asr
-          //   （用户 2026-09-26 反馈"明明有 8 个只给 5 个"）。所以除了补关键词，
-          //   还要把"被排除的 TTS"如实回报给界面 —— 用户能看出少的是哪几个、为什么少。
-          const isAsrModel = (id) => /whisper|sensevoice|teleasr|funaudio|asr|gsr|paraformer|transcri|transcribe|audio.?to.?text|speech.?to.?text|recogni|stt|speech/i.test(id);
-          // 反向：TTS（文字转语音）不是我们要的 —— 把 CosyVoice、tts-1、voice-clone 之类列进来只会误导。
-          const isTtsModel = (id) => /tts|text.?to.?speech|cosyvoice|voice.?clone|voice.?design|speech.?synth|music|sing/i.test(id);
-          const speech = all.filter((id) => isAsrModel(id) && !isTtsModel(id)).sort((a, b) => a.localeCompare(b));
-          const tts = all.filter((id) => isTtsModel(id)).sort((a, b) => a.localeCompare(b));
-          // 一家都没认出来时退回全量（宁可给多，也别让人以为"拉不到"），并如实说明
-          const models = speech.length ? speech : [...all].sort((a, b) => a.localeCompare(b));
-          return json(res, 200, {
-            ok: true,
-            models,
-            speechOnly: speech.length > 0,
-            speechCount: speech.length,
-            // 被排除的语音合成模型：界面据此说明"少的那几个是什么"（只给前 3 个名字，别把提示撑满）
-            ttsCount: tts.length,
-            ttsSample: tts.slice(0, 3),
-            total: all.length
-          });
-        } catch (error) {
-          return json(res, 502, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      // 换人设后"断奶"：清掉所有群的会话交接并关闭进行中的线程。
-      // 只动这两个（不删聊天记录、不删人物印象）—— 换卡后模型会被自己旧发言的口癖锚住，
-      // 清掉交接能让新卡立刻生效（2026-09-27 实测：换卡 26 小时后仍在用旧卡口癖）。
-      if (pathname === '/api/persona/reset-handoffs' && method === 'POST') {
-        if (!keyEndpointAllowed(req)) return json(res, 403, { error: '请求来源不被信任，已拒绝。' });
-        const body = await readBody(req).catch(() => ({}));
-        // 破坏性操作统一 confirm 门槛（与删表情/删记忆那批接口同款）
-        if (body?.confirm !== true) {
-          return json(res, 409, { error: '清空交接是破坏性操作：请带 confirm=true 再调用（控制台按钮已带）' });
-        }
-        // 范围要含"只有交接、还没有聊天记录"的会话（记忆目录里可能有 group_*/private_*）
-        const chats = [...new Set([...store.listChats(), ...(memory.listChats?.() || [])])];
-        let closed = 0;
-        for (const chatKey of chats) {
-          try { memory.clearHandoff(chatKey); } catch { /* 单个会话失败不阻断其余 */ }
-          try { if (store.closeConversationThread(chatKey, 'persona-changed')) closed += 1; } catch { /* 没有线程就跳过 */ }
-        }
-        // 在途运行会在结束时把"它那一轮"的交接写回来（那一轮用的是换卡前的提示词）：
-        // 明确告诉调用方，必要时过一会儿再点一次（2026-09-27 审查 P2）
-        const runs = Number(orchestrator?.activeRuns?.size ?? 0) || 0;   // chatKey -> sessionId
-        log(`[persona] 换了人设：已清空 ${chats.length} 个会话的交接与线程状态`
-          + (runs > 0 ? `（另有 ${runs} 个运行进行中，结束后会写回它们那轮的交接，可稍后再清一次）` : ''));
+  router.add('GET', '/api/providers', async (req, res) => {
+    const providers = currentProviders().map((p) => ({
+      id: p.id,
+      displayName: p.displayName,
+      baseURL: p.baseURL,
+      apiKey: '',              // 不把真实 Key 暴露给 UI；有 Key 用 hasKey 表示
+      apiKeyFrom: p.apiKeyFrom || '',
+      needsBaseUrl: p.needsBaseUrl === true,
+      hasKey: !!p.apiKey,
+      anthropicOrigin: p.anthropicOrigin === true,
+      models: p.models,
+      modelNames: p.modelNames || {},
+      preset: p.preset || '',
+      thinkingProbe: p.thinkingProbe || null
+    }));
+    return json(res, 200, { providers });
+  });
+  router.add('GET', '/api/providers/key', async (req, res, params, url) => {
+    if (!keyEndpointAllowed(req)) {
+      return json(res, 403, { error: '请求来源不被信任，已拒绝读取明文密钥。' });
+    }
+    const pid = String(url.searchParams.get('providerId') || '');
+    const p = currentProviders().find((x) => x.id === pid);
+    return json(res, 200, { apiKey: p?.apiKey || '' });
+  });
+  router.add('POST', '/api/asr/models', async (req, res) => {
+    const cfgNow = getConfig();
+    try {
+      const body = await readBody(req);
+      const baseUrl = String(body.baseUrl || cfgNow.asr?.baseUrl || '').trim();
+      const submitted = String(body.apiKey ?? '').trim();
+      const trimSlash = (value) => String(value || '').trim().replace(/[/]+$/, '').toLowerCase();
+      const knownBase = trimSlash(cfgNow.asr?.baseUrl);
+      const target = trimSlash(baseUrl);
+      const apiKey = (submitted && submitted !== '******')
+        ? submitted
+        : (target && target === knownBase ? asrApiKey(cfgNow) : '');
+      const all = await fetchModelsFrom(baseUrl, apiKey);
+      // 用户要求：只取语音模型。列表里通常混着几百个 LLM，全给出来等于找不到东西。
+      // 正向：转写类（whisper / sensevoice / ASR / speech-to-text / 转写…）。
+      //   ⚠️ 关键词表必然不完备：硅基流动的 XingChenGSR 是语音识别，名字里却没有 asr
+      //   （用户 2026-09-26 反馈"明明有 8 个只给 5 个"）。所以除了补关键词，
+      //   还要把"被排除的 TTS"如实回报给界面 —— 用户能看出少的是哪几个、为什么少。
+      const isAsrModel = (id) => /whisper|sensevoice|teleasr|funaudio|asr|gsr|paraformer|transcri|transcribe|audio.?to.?text|speech.?to.?text|recogni|stt|speech/i.test(id);
+      // 反向：TTS（文字转语音）不是我们要的 —— 把 CosyVoice、tts-1、voice-clone 之类列进来只会误导。
+      const isTtsModel = (id) => /tts|text.?to.?speech|cosyvoice|voice.?clone|voice.?design|speech.?synth|music|sing/i.test(id);
+      const speech = all.filter((id) => isAsrModel(id) && !isTtsModel(id)).sort((a, b) => a.localeCompare(b));
+      const tts = all.filter((id) => isTtsModel(id)).sort((a, b) => a.localeCompare(b));
+      // 一家都没认出来时退回全量（宁可给多，也别让人以为"拉不到"），并如实说明
+      const models = speech.length ? speech : [...all].sort((a, b) => a.localeCompare(b));
+      return json(res, 200, {
+        ok: true,
+        models,
+        speechOnly: speech.length > 0,
+        speechCount: speech.length,
+        // 被排除的语音合成模型：界面据此说明"少的那几个是什么"（只给前 3 个名字，别把提示撑满）
+        ttsCount: tts.length,
+        ttsSample: tts.slice(0, 3),
+        total: all.length
+      });
+    } catch (error) {
+      return json(res, 502, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+  router.add('GET', '/api/asr/install-status', async (req, res) => {
+    if (!keyEndpointAllowed(req)) return json(res, 403, { error: '请求来源不被信任，已拒绝。' });
+    return json(res, 200, asrInstallSnapshot());
+  });
+  router.add('POST', '/api/asr/uninstall', async (req, res) => {
+    if (!keyEndpointAllowed(req)) return json(res, 403, { error: '请求来源不被信任，已拒绝。' });
+    if (asrInstall.running) return json(res, 409, { error: '安装还在进行中，等它跑完再删' });
+    try {
+      const removed = removeLocalAsrFiles();
+      // 破坏性操作留一行日志：以后能查"什么时候、删了哪个目录、放了多少空间"
+      log(`[asr] 已完整卸载本机转写：${removed.managedDir}（释放 ${Math.round((removed.freedBytes || 0) / 1048576)}MB）`);
+      return json(res, 200, { ok: true, ...removed, status: asrInstallSnapshot() });
+    } catch (error) {
+      return json(res, 500, { error: `删除失败：${String(error?.message ?? error)}` });
+    }
+  });
+  router.add('POST', '/api/asr/install', async (req, res) => {
+    if (!keyEndpointAllowed(req)) return json(res, 403, { error: '请求来源不被信任，已拒绝。' });
+    try {
+      return json(res, 202, startAsrInstall());
+    } catch (error) {
+      return json(res, 409, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('GET', '/api/asr-key', async (req, res, params, url) => {
+    if (!keyEndpointAllowed(req)) {
+      return json(res, 403, { error: '请求来源不被信任，已拒绝读取明文密钥。' });
+    }
+    const field = String(url.searchParams.get('field') || 'apiKey');
+    const allowed = { apiKey: 'apiKey', secretId: 'secretId', secretKey: 'secretKey' };
+    if (!allowed[field]) return json(res, 400, { error: `未知字段：${field}` });
+    return json(res, 200, { apiKey: String(getConfig().asr?.[field] || '') });
+  });
+  router.add('POST', '/api/providers/fetch-models', async (req, res) => {
+    const cfgNow = getConfig();
+    try {
+      const body = await readBody(req);
+      const baseUrl = String(body.baseUrl || cfgNow.api.baseUrl || '');
+      const submitted = String(body.apiKey ?? '').trim();
+      // 掩码 / 空 → 用服务端已保存的 Key，但仅限配置里已知的地址（见 storedKeyAllowedFor）。
+      const apiKey = (submitted && submitted !== '******')
+        ? submitted
+        : (storedKeyAllowedFor(cfgNow, baseUrl) ? String(cfgNow.api.apiKey || '') : '');
+      const models = await fetchModelsFrom(baseUrl, apiKey);
+      return json(res, 200, { ok: true, models });
+    } catch (error) {
+      return json(res, 502, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', '/api/providers/test-one', async (req, res) => {
+    try {
+      const body = await readBody(req);
+      const result = await testOneProvider({
+        providerId: String(body.providerId ?? ''),
+        baseUrl: String(body.baseUrl ?? ''),
+        apiKey: String(body.apiKey ?? '')
+      });
+      return json(res, 200, { ok: true, result });
+    } catch (error) {
+      return json(res, 500, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', '/api/providers/test-chat', async (req, res) => {
+    const cfgNow = getConfig();
+    try {
+      const body = await readBody(req);
+      const submitted = String(body.apiKey ?? '').trim();
+      const baseUrl = String(body.baseUrl ?? '');
+      // 掩码 / 空 → 说明客户端没有新 Key，用服务端已保存的；但只发往配置里已知的地址
+      // （见 storedKeyAllowedFor：否则等于把明文 Key 送到调用方指定的任意主机）。
+      const apiKey = (submitted && submitted !== '******')
+        ? submitted
+        : (storedKeyAllowedFor(cfgNow, baseUrl) ? resolveApiKey(cfgNow) : '');
+      const result = await testModelChat({
+        baseUrl,
+        apiKey,
+        model: String(body.model ?? '')
+      });
+      return json(res, 200, { ok: true, result });
+    } catch (error) {
+      return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', '/api/providers/probe-thinking', async (req, res) => {
+    try {
+      const body = await readBody(req);
+      // 支持用"未保存的当前选择"实测：thinking 传字符串或按用途对象；
+      // extraBody 传对象。类型不合法一律忽略（回落到已保存配置）。
+      const thinkingInput = (typeof body.thinking === 'string'
+        || (body.thinking && typeof body.thinking === 'object' && !Array.isArray(body.thinking)))
+        ? body.thinking : undefined;
+      const extraInput = (body.extraBody && typeof body.extraBody === 'object' && !Array.isArray(body.extraBody))
+        ? body.extraBody : undefined;
+      const baseUrlIn = String(body.baseUrl ?? '');
+      const submitted = String(body.apiKey ?? '').trim();
+      // 与「测试连通性」「获取列表」同一条守卫：掩码/空 Key 时只把服务端已存的明文 Key
+      // 发给配置里已知的地址——不能因为调用方随手填个地址就把 Key 送出去（终审发现漏了这条）。
+      const apiKeyResolved = (submitted && submitted !== '******')
+        ? submitted
+        : (storedKeyAllowedFor(getConfig(), baseUrlIn || getConfig().api.baseUrl) ? resolveApiKey(getConfig()) : '');
+      const result = await probeThinking({
+        providerId: String(body.providerId ?? ''),
+        model: String(body.model ?? ''),
+        thinking: thinkingInput,
+        extraBody: extraInput,
+        baseUrl: baseUrlIn,
+        apiKey: apiKeyResolved
+      });
+      return json(res, 200, { ok: true, result });
+    } catch (error) {
+      return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', '/api/providers', async (req, res) => {
+    try {
+      const body = await readBody(req);
+      const r = upsertProvider({
+        baseUrl: String(body.baseUrl ?? ''),
+        apiKey: String(body.apiKey ?? ''),
+        models: body.models || [],
+        preset: String(body.preset ?? '')
+      });
+      return json(res, 200, { ok: true, ...r, provider: sanitizeProvider(r.provider) });
+    } catch (error) {
+      return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', '/api/providers/models', async (req, res) => {
+    try {
+      const body = await readBody(req);
+      const p = addModelsToProvider(String(body.providerId ?? ''), body.models || []);
+      if (!p) return json(res, 404, { ok: false, error: '提供商不存在' });
+      return json(res, 200, { ok: true, provider: sanitizeProvider(p) });
+    } catch (error) {
+      return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+  router.add('DELETE', '/api/providers/models', async (req, res) => {
+    try {
+      const body = await readBody(req);
+      const p = removeModelFromProvider(String(body.providerId ?? ''), String(body.modelId ?? ''));
+      if (!p) return json(res, 404, { ok: false, error: '提供商或模型不存在' });
+      return json(res, 200, { ok: true, provider: sanitizeProvider(p) });
+    } catch (error) {
+      return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', '/api/providers/set-key', async (req, res) => {
+    const body = await readBody(req);
+    const updated = setProviderKey(String(body.providerId ?? ''), String(body.apiKey ?? ''));
+    if (!updated) return json(res, 404, { ok: false, error: '提供商不存在' });
+    return json(res, 200, { ok: true, hasKey: !!updated.apiKey });
+  });
+  router.add('POST', '/api/providers/test-all', async (req, res) => {
+    const results = await testAllProviders(currentProviders());
+    const okCount = Object.values(results).filter((r) => r.ok).length;
+    return json(res, 200, { ok: true, results, okCount, total: Object.keys(results).length });
+  });
+  router.add('POST', '/api/vision/scan', async (req, res) => {
+    if (visionScan.running) return json(res, 409, { ok: false, error: '已有一次扫描正在进行' });
+    const body = await readBody(req).catch(() => ({}));
+    const onlyProviderIds = Array.isArray(body?.providerIds) ? body.providerIds.map(String) : null;
+    visionScan.running = true;
+    emit('vision-scan', { phase: 'start' });
+    scanModelsVision({
+      providers: currentProviders(),
+      emit,
+      onlyProviderIds,
+      timeoutMs: 25000,
+      limit: 3
+    })
+      .then(({ total }) => emit('vision-scan', { phase: 'done', total }))
+      .catch((error) => emit('vision-scan', { phase: 'error', error: String(error?.message ?? error) }))
+      .finally(() => { visionScan.running = false; });
+    return json(res, 202, { ok: true, started: true });
+  });
+  router.add('GET', '/api/tts/key', async (req, res) => {
+    const cfgNow = getConfig();
+    // 显示当前这家的明文 Key（与模型 API 的「显示密钥」同一道守卫：本机控制台或带令牌）
+    if (!keyEndpointAllowed(req)) return json(res, 403, { ok: false, error: '只能在控制台里查看密钥' });
+    const svcId = String(new URL(req.url, 'http://127.0.0.1').searchParams.get('service') || '');
+    const key = ttsKeyFor(cfgNow.tts, svcId);
+    return json(res, 200, { ok: true, apiKey: key });
+  });
+  router.add('POST', '/api/tts/models', async (req, res) => {
+    const cfgNow = getConfig();
+    try {
+      const body = await readBody(req);
+      const provider = String(body.provider || cfgNow.tts?.provider || 'openai').trim().toLowerCase();
+      if (provider !== 'openai') {
+        // 火山（v1/v3）与 MiniMax 没有"列模型"的公开接口：模型名/音色按服务商文档内置。
+        // 这里如实说明该填什么，而不是回空列表让界面显示"共 0 个"（2026-09-28 用户实测反馈）。
+        const svc = ttsServiceOfBaseUrl(body.baseUrl || cfgNow.tts?.baseUrl || '')
+          || TTS_SERVICES.find((s) => s.provider === provider);
         return json(res, 200, {
           ok: true,
-          chats: chats.length,
-          threadsClosed: closed,
-          activeRuns: runs,
-          note: runs > 0 ? '有正在进行的会话：它们结束时会写回换卡前那轮的交接，建议过几分钟再清一次' : ''
+          models: [],
+          ttsOnly: false,
+          unsupported: true,
+          total: 0,
+          note: svc?.note || '这一家没有可拉的模型列表：按服务商文档填模型名与音色。'
         });
       }
+      const baseUrl = String(body.baseUrl || cfgNow.tts?.baseUrl || '').trim();
+      const submitted = String(body.apiKey ?? '').trim();
+      const norm = (v) => String(v || '').trim().replace(/[/]+$/, '').toLowerCase();
+      const apiKey = (submitted && submitted !== '******')
+        ? submitted
+        : (norm(baseUrl) === norm(cfgNow.tts?.baseUrl) ? ttsKeyFor(cfgNow.tts) : '');
+      const all = await fetchModelsFrom(baseUrl, apiKey);
+      const isTtsModel = (id) => {
+        const name = String(id);
+        if (/whisper|sensevoice|asr|recognition|stt|transcri/i.test(name)) return false;   // ASR 不是 TTS
+        return /tts|text.?to.?speech|speech.?synth|cosyvoice|moss|voice/i.test(name);
+      };
+      const models = all.filter(isTtsModel).sort((a, b) => a.localeCompare(b));
+      return json(res, 200, {
+        ok: true,
+        models: models.length ? models : [...all].sort((a, b) => a.localeCompare(b)),
+        ttsOnly: models.length > 0,
+        total: all.length
+      });
+    } catch (error) {
+      return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', '/api/tts/test', async (req, res) => {
+    const cfgNow = getConfig();
+    try {
+      const body = await readBody(req);
+      const text = String(body.text ?? '').trim().slice(0, 120) || '你好呀，我是群里的小鲸鱼，这是一条试听。';
+      if (cfgNow.tts?.enabled !== true) return json(res, 400, { ok: false, error: '语音回复未启用（勾上并保存后再试听）' });
+      const { buffer, format } = await synthesizeSpeech({ cfg: cfgNow.tts, text });
+      return json(res, 200, { ok: true, format, audio: buffer.toString('base64') });
+    } catch (error) {
+      return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
 
-      // 本机语音转写：状态查询与"点一下安装"（只有控制台来源放行；不擅自重启服务）
-      if (pathname === '/api/asr/install-status' && method === 'GET') {
-        if (!keyEndpointAllowed(req)) return json(res, 403, { error: '请求来源不被信任，已拒绝。' });
-        return json(res, 200, asrInstallSnapshot());
+  router.add('POST', '/api/model-prices/probe', async (req, res) => {
+    const cfgNow = getConfig();
+    const body = await readBody(req);
+    const target = String(body.url || cfgNow.api?.baseUrl || '').trim();
+    const probe = await probeChannelPrices({
+      url: target,
+      usdRate: body.usdRate,
+      fetchImpl: undefined,
+      timeoutMs: Math.min(30000, Math.max(3000, Number(body.timeoutMs) || 12000))
+    });
+    return json(res, 200, {
+      ok: probe.ok,
+      kind: probe.kind,
+      sourceUrl: probe.sourceUrl,
+      usdRate: probe.usdRate,
+      group: probe.group,
+      groupRatio: probe.groupRatio,
+      modelCount: probe.modelCount,
+      skipped: probe.skipped,
+      tried: probe.tried,
+      error: probe.error,
+      vendor: vendorOfConfig(cfgNow) || '',
+      prices: capPrices(probe.prices || {})
+    });
+  });
+  router.add('POST', '/api/channel-prices', async (req, res) => {
+    const body = await readBody(req);
+    const vendor = String(body.vendor || '').trim();
+    const feedUrl = String(body.url || '').trim();
+    if (!vendor) return json(res, 400, { error: '缺少渠道名（vendor）' });
+    if (!/^https?:\/\//i.test(feedUrl)) return json(res, 400, { error: '价目表 URL 必须以 http(s):// 开头' });
+    // 先写配置（意图），再拉一次（结果）
+    const current = getConfig();
+    const feeds = Array.isArray(current.api?.channelPriceFeeds) ? current.api.channelPriceFeeds : [];
+    const next = feeds.filter((f) => String(f?.vendor || '').trim() !== vendor);
+    next.push({ vendor, url: feedUrl });
+    updateConfig({ api: { ...(current.api || {}), channelPriceFeeds: next } });
+    const status = await refreshChannelFeed(vendor, feedUrl);
+    return json(res, 200, { ok: true, feeds: status });
+  });
+  router.add('POST', '/api/channel-prices/refresh', async (req, res) => {
+    const body = await readBody(req);
+    const vendor = String(body.vendor || '').trim();
+    const current = getConfig();
+    const feeds = Array.isArray(current.api?.channelPriceFeeds) ? current.api.channelPriceFeeds : [];
+    const hit = feeds.find((f) => String(f?.vendor || '').trim() === vendor);
+    if (!hit) return json(res, 404, { error: `没有这个渠道的价目表：${vendor}` });
+    const status = await refreshChannelFeed(vendor, String(hit.url || '').trim());
+    return json(res, 200, { ok: true, feeds: status });
+  });
+  router.add('POST', '/api/channel-prices/remove', async (req, res) => {
+    const body = await readBody(req);
+    const vendor = String(body.vendor || '').trim();
+    if (!vendor) return json(res, 400, { error: '缺少渠道名（vendor）' });
+    const current = getConfig();
+    const feeds = Array.isArray(current.api?.channelPriceFeeds) ? current.api.channelPriceFeeds : [];
+    updateConfig({
+      api: {
+        ...(current.api || {}),
+        channelPriceFeeds: feeds.filter((f) => String(f?.vendor || '').trim() !== vendor)
       }
-      if (pathname === '/api/asr/uninstall' && method === 'POST') {
-        if (!keyEndpointAllowed(req)) return json(res, 403, { error: '请求来源不被信任，已拒绝。' });
-        if (asrInstall.running) return json(res, 409, { error: '安装还在进行中，等它跑完再删' });
-        try {
-          const removed = removeLocalAsrFiles();
-          // 破坏性操作留一行日志：以后能查"什么时候、删了哪个目录、放了多少空间"
-          log(`[asr] 已完整卸载本机转写：${removed.managedDir}（释放 ${Math.round((removed.freedBytes || 0) / 1048576)}MB）`);
-          return json(res, 200, { ok: true, ...removed, status: asrInstallSnapshot() });
-        } catch (error) {
-          return json(res, 500, { error: `删除失败：${String(error?.message ?? error)}` });
+    });
+    const status = removeChannelFeed(vendor);
+    return json(res, 200, { ok: true, feeds: status });
+  });
+  router.add('POST', '/api/model-prices/refresh', async (req, res) => {
+    const st = await refreshPriceFeed(getConfig().api?.priceRemoteUrl || '');
+    return json(res, 200, { ok: st.ok, ...modelPricesPayload() });
+  });
+  router.add('GET', '/api/onebot/groups', async (req, res) => {
+    try {
+      const list = await onebot.call('get_group_list');
+      const groups = (Array.isArray(list) ? list : (list?.data ?? []))
+        .map((g) => ({ id: String(g.group_id), name: String(g.group_name ?? g.group_id) }));
+      return json(res, 200, { groups });
+    } catch (error) {
+      return json(res, 502, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('GET', '/api/onebot/friends', async (req, res) => {
+    try {
+      const list = await onebot.call('get_friend_list');
+      const friends = (Array.isArray(list) ? list : (list?.data ?? []))
+        .map((f) => ({ id: String(f.user_id), name: String(f.remark || f.nickname || f.user_id) }));
+      return json(res, 200, { friends });
+    } catch (error) {
+      return json(res, 502, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('GET', '/api/persona-templates', async (req, res) => {
+    const { PERSONAS } = await import('../personas.js');
+    const builtins = Object.entries(PERSONAS).map(([id, p]) => ({
+      id, name: p.name, text: p.text, behaviorProfile: p.behaviorProfile || 'legacy', builtin: true
+    }));
+    const customs = (getConfig().customPersonas || []).map((p, i) => ({
+      id: `custom_${i}`,
+      name: p.name,
+      text: p.text,
+      customRules: p.customRules || '',
+      behaviorProfile: p.behaviorProfile || 'legacy',
+      builtin: false
+    }));
+    return json(res, 200, { templates: [...builtins, ...customs] });
+  });
+  router.add('POST', '/api/persona-templates', async (req, res) => {
+    const body = await readBody(req).catch(() => ({}));
+    const name = String(body.name ?? '').trim().slice(0, 50);
+    const text = String(body.text ?? '').trim();
+    if (!name || !text) return json(res, 400, { ok: false, error: '人设名称和角色设定都不能为空' });
+    const { normalizeBehaviorProfile } = await import('../personas.js');
+    let behaviorProfile;
+    try {
+      behaviorProfile = normalizeBehaviorProfile(body.behaviorProfile);
+    } catch (error) {
+      return json(res, 400, { ok: false, error: error.message });
+    }
+    // customRules 允许为空
+    const entry = { name, text, behaviorProfile };
+    if (String(body.customRules ?? '').trim()) entry.customRules = String(body.customRules).trim();
+    const next = [...(getConfig().customPersonas || []), entry];
+    updateConfig({ customPersonas: next });
+    return json(res, 200, { ok: true, templates: next });
+  });
+  router.add('POST', '/api/persona/reset-handoffs', async (req, res) => {
+    if (!keyEndpointAllowed(req)) return json(res, 403, { error: '请求来源不被信任，已拒绝。' });
+    const body = await readBody(req).catch(() => ({}));
+    // 破坏性操作统一 confirm 门槛（与删表情/删记忆那批接口同款）
+    if (body?.confirm !== true) {
+      return json(res, 409, { error: '清空交接是破坏性操作：请带 confirm=true 再调用（控制台按钮已带）' });
+    }
+    // 范围要含"只有交接、还没有聊天记录"的会话（记忆目录里可能有 group_*/private_*）
+    const chats = [...new Set([...store.listChats(), ...(memory.listChats?.() || [])])];
+    let closed = 0;
+    for (const chatKey of chats) {
+      try { memory.clearHandoff(chatKey); } catch { /* 单个会话失败不阻断其余 */ }
+      try { if (store.closeConversationThread(chatKey, 'persona-changed')) closed += 1; } catch { /* 没有线程就跳过 */ }
+    }
+    // 在途运行会在结束时把"它那一轮"的交接写回来（那一轮用的是换卡前的提示词）：
+    // 明确告诉调用方，必要时过一会儿再点一次（2026-09-27 审查 P2）
+    const runs = Number(orchestrator?.activeRuns?.size ?? 0) || 0;   // chatKey -> sessionId
+    log(`[persona] 换了人设：已清空 ${chats.length} 个会话的交接与线程状态`
+      + (runs > 0 ? `（另有 ${runs} 个运行进行中，结束后会写回它们那轮的交接，可稍后再清一次）` : ''));
+    return json(res, 200, {
+      ok: true,
+      chats: chats.length,
+      threadsClosed: closed,
+      activeRuns: runs,
+      note: runs > 0 ? '有正在进行的会话：它们结束时会写回换卡前那轮的交接，建议过几分钟再清一次' : ''
+    });
+  });
+  router.add('GET', '/api/search-providers', async (req, res) => {
+    const list = (getConfig().webSearch?.providers || []).map((p) => ({
+      id: p.id,
+      name: p.name,
+      type: p.type,
+      baseUrl: p.baseUrl,
+      model: p.model,
+      count: p.count,
+      timeoutMs: p.timeoutMs,
+      hasApiKey: Boolean(String(p.apiKey || '').trim())   // 不返回明文
+    }));
+    return json(res, 200, { providers: list });
+  });
+  router.add('POST', '/api/search-providers', async (req, res) => {
+    try {
+      const body = await readBody(req).catch(() => ({}));
+      const baseUrl = String(body.baseUrl ?? '').trim();
+      const type = String(body.type ?? 'openai').trim() === 'bing' ? 'bing' : 'openai';
+      if (!baseUrl) return json(res, 400, { ok: false, error: '接口地址不能为空' });
+      const list = [...(getConfig().webSearch?.providers || [])];
+      const existing = list.find((p) => p.baseUrl === baseUrl && p.type === type);
+      let entry;
+      if (existing) {
+        existing.name = String(body.name ?? existing.name ?? '').trim() || existing.name;
+        existing.baseUrl = baseUrl;
+        existing.type = type;
+        existing.model = String(body.model ?? existing.model ?? '').trim();
+        existing.count = Math.min(20, Math.max(1, Number(body.count) || existing.count || 6));
+        existing.timeoutMs = Math.max(5000, Number(body.timeoutMs) || existing.timeoutMs || 20000);
+        // 掩码/空 = 保持原 Key 不变
+        const submitted = String(body.apiKey ?? '').trim();
+        if (submitted && submitted !== '******') existing.apiKey = submitted;
+        entry = existing;
+      } else {
+        entry = {
+          id: `sp_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+          name: String(body.name ?? '').trim() || baseUrl,
+          type,
+          baseUrl,
+          apiKey: String(body.apiKey ?? '').trim() === '******' ? '' : String(body.apiKey ?? '').trim(),
+          model: String(body.model ?? '').trim(),
+          count: Math.min(20, Math.max(1, Number(body.count) || 6)),
+          timeoutMs: Math.max(5000, Number(body.timeoutMs) || 20000)
+        };
+        list.push(entry);
+      }
+      updateConfig({ webSearch: { providers: list } });
+      return json(res, 200, {
+        ok: true,
+        provider: { ...entry, apiKey: '', hasApiKey: Boolean(String(entry.apiKey || '').trim()) }
+      });
+    } catch (error) {
+      return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+  router.add('DELETE', '/api/search-providers', async (req, res) => {
+    try {
+      const body = await readBody(req).catch(() => ({}));
+      const id = String(body.id ?? '').trim();
+      if (!id) return json(res, 400, { ok: false, error: '缺少 id' });
+      const list = (getConfig().webSearch?.providers || []).filter((p) => String(p.id) !== id);
+      updateConfig({ webSearch: { providers: list } });
+      // 若当前正选中被删的那项，回落 bing，避免搜索直接报错
+      const cur = String(getConfig().webSearch?.provider || '');
+      if (cur === `custom:${id}`) {
+        updateConfig({ webSearch: { provider: 'bing' } });
+      }
+      return json(res, 200, { ok: true });
+    } catch (error) {
+      return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', '/api/search-providers/test', async (req, res) => {
+    const startedAt = Date.now();
+    try {
+      const body = await readBody(req).catch(() => ({}));
+      const provId = String(body.providerId ?? '').trim();
+      const r = await customSearch('qq agent 测试', provId || null);
+      return json(res, 200, {
+        ok: true,
+        result: {
+          ok: true,
+          count: r.results.length,
+          sample: r.results[0]?.title || '',
+          latencyMs: Date.now() - startedAt
         }
-      }
-      if (pathname === '/api/asr/install' && method === 'POST') {
-        if (!keyEndpointAllowed(req)) return json(res, 403, { error: '请求来源不被信任，已拒绝。' });
-        try {
-          return json(res, 202, startAsrInstall());
-        } catch (error) {
-          return json(res, 409, { error: String(error?.message ?? error) });
-        }
-      }
+      });
+    } catch (error) {
+      return json(res, 200, {
+        ok: true,
+        result: { ok: false, note: String(error?.message ?? error), latencyMs: Date.now() - startedAt }
+      });
+    }
+  });
+  router.add('POST', '/api/test/api', async (req, res) => {
+    const startedAt = Date.now();
+    try {
+      const r = await chatCompletion({
+        messages: [{ role: 'user', content: '请只回复两个字符：pong' }],
+        tools: null,
+        temperature: 0
+      });
+      const reply = typeof r.message.content === 'string' ? r.message.content.slice(0, 100) : '';
+      return json(res, 200, { ok: true, model: r.model, reply, latencyMs: Date.now() - startedAt });
+    } catch (error) {
+      return json(res, 200, { ok: false, error: String(error?.message ?? error), latencyMs: Date.now() - startedAt });
+    }
+  });
 
-      // 语音转写的凭据明文回读：与 /api/search-key 同款（只有控制台来源放行）。
-      // field=apiKey|secretId|secretKey，默认 apiKey。
-      if (pathname === '/api/asr-key' && method === 'GET') {
-        if (!keyEndpointAllowed(req)) {
-          return json(res, 403, { error: '请求来源不被信任，已拒绝读取明文密钥。' });
-        }
-        const field = String(url.searchParams.get('field') || 'apiKey');
-        const allowed = { apiKey: 'apiKey', secretId: 'secretId', secretKey: 'secretKey' };
-        if (!allowed[field]) return json(res, 400, { error: `未知字段：${field}` });
-        return json(res, 200, { apiKey: String(getConfig().asr?.[field] || '') });
+  router.add('GET', '/api/status', async (req, res) => {
+    const dayKey = todayKey();
+    const sessionUsage = sessions.todayUsage(dayKey);
+    const dailyStats = buildUsageStats({ range: 'today' });
+    const totals = dailyStats.totals;
+    const usage = {
+      dayKey,
+      promptTokens: totals.promptTokens,
+      completionTokens: totals.completionTokens,
+      totalTokens: totals.totalTokens,
+      cachedTokens: totals.cachedTokens,
+      runs: sessionUsage.runs,
+      webSearchCount: dailyStats.searchCount
+    };
+    const cfgNow = getConfig();
+    // 省 Token 模式的"用户值 / 生效值"对照表：控制台设置页直接渲染，避免两边各写一份上限数字
+    const tokenSaver = tokenSaverEffective(cfgNow);
+    const currentVendor = vendorOfConfig(cfgNow) || '';
+    const currentPrice = resolveModelPrice(cfgNow.api?.model, cfgNow, null, { vendor: currentVendor });
+    const currentTier = currentPrice.peak
+      ? priceAt(currentPrice, Date.now())
+      : currentPrice;
+    const cost = {
+      cost: totals.cost,
+      source: currentPrice.source,
+      calculation: 'per-call',
+      breakdown: totals.breakdown,
+      // 口径：实付（用户自己填的价）/ 估算（官方表、兜底）/ 未定价
+      kind: currentPrice.kind || 'estimate',
+      billing: currentPrice.billing || 'token',
+      costMode: costModeOf(cfgNow).mode,
+      costMultiplier: costModeOf(cfgNow).multiplier,
+      costMonthlyFee: costModeOf(cfgNow).monthlyFee,
+      fallbackCalls: totals.fallbackCalls || 0,
+      billingAmount: Number(currentPrice.amount) || 0,
+      billingPeriod: currentPrice.period === 'day' ? 'day' : 'month',
+      actualCost: totals.actualCost || 0,
+      estimateCost: totals.estimateCost || 0,
+      flatCost: (totals.flatItems || []).reduce((sum, item) => (
+        item.period === 'month' ? sum + (Number(item.amount) || 0) : sum
+      ), 0),
+      flatCalls: totals.flatCalls || 0,
+      localCalls: totals.localCalls || 0,
+      prices: {
+        in: currentTier.in,
+        out: currentTier.out,
+        cached: currentTier.cached
+      },
+      matched: currentPrice.matched,
+      // 未定价 = 当前模型没有单价（不是免费）；界面据此提示"含未定价调用"
+      unpriced: currentPrice.unpriced === true,
+      confidence: currentPrice.confidence || '',
+      via: currentPrice.via || '',
+      peak: Boolean(currentTier.peak),
+      hasPeakTiers: totals.hasPeakModel,
+      peakCost: totals.peakCost,
+      offPeakCost: totals.offPeakCost,
+      exactCalls: totals.exactCalls,
+      calls: totals.runs
+    };
+    return json(res, 200, {
+      onebot: {
+        connected: onebot.connected,
+        everConnected: onebot.everConnected,
+        error: onebot.lastConnectError,
+        self: onebot.selfInfo ? { userId: onebot.selfId, nickname: onebot.selfNickname } : null
+      },
+      orchestrator: orchestrator.statusSummary(),
+      incidentPilot: incidentPilotStatus(),
+      usage,
+      cost,
+      cacheHitRate: totals.cacheHitRate,
+      webSearchCount: usage.webSearchCount || 0,
+      // 前端构建戳：轮询时发现它变了 → 前端提示"控制台已更新，点击刷新"
+      uiBuild: UI_BUILD,
+      // 省 Token 模式：模式 + 每项的"用户值 / 生效值"（设置页渲染用）
+      tokenSaver,
+      ...(cfgNow.timeControl?.enabled ? {
+        timeControl: timeControlState(cfgNow.timeControl)
+      } : {}),
+      paused: orchestrator.paused,
+      pauseReason: orchestrator.pauseReason ?? null
+    });
+  });
+  router.add('GET', '/api/usage/stats', async (req, res, params, url) => {
+    try {
+      const raw = String(url.searchParams.get('range') || url.searchParams.get('days') || '7');
+      const stats = buildUsageStats({ range: raw });
+      return json(res, 200, { ok: true, range: raw, ...stats });
+    } catch (error) {
+      return json(res, 500, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+  router.add('GET', '/api/usage/breakdown', async (req, res, params, url) => {
+    try {
+      const raw = String(url.searchParams.get('range') || '7');
+      const dim = String(url.searchParams.get('dim') || '');
+      const key = String(url.searchParams.get('key') || '');
+      const by = String(url.searchParams.get('by') || '');
+      const r = buildUsageBreakdown({ range: raw, dim, key, by });
+      return json(res, 200, { ok: true, ...r });
+    } catch (error) {
+      return json(res, 500, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+  router.add('GET', '/api/config', async (req, res) => {
+    const cfgNow = getConfig();
+    // 不把任何真实 Key 暴露给前端：递归清空所有密钥类字段，用 hasKey 表示"有密钥"。
+    // 注意：不要用手工逐字段列举——之前漏了 5 个搜索 Key 和 2 个 SnowLuma 令牌，
+    // 加新 provider 时还会继续漏。这里按字段名模式统一处理。
+    const safe = safeConfigWithAsrStatus(cfgNow);
+    return json(res, 200, safe);
+  });
+  router.add('POST', '/api/config', async (req, res) => {
+    const cfgNow = getConfig();
+    const patch = await readBody(req);
+    // 控制台保存总会带上显式的 provider（来自服务预设）：等于用户确认过这一家，
+    // 清掉"升级默认值"的标记，让环境变量 Key 恢复生效（2026-09-26 审查 P2）
+    if (patch?.asr && typeof patch.asr === 'object') delete patch.asr.providerDefaulted;
+    // tts 的 Key 与 asr 同款语义：留空/掩码占位 = 保持原值（掩码回写会把真 Key 冲掉）
+    if (patch?.tts && typeof patch.tts === 'object') {
+      // 服务端派生位（GET 时下发的布尔/归属口径）：不回写配置（2026-09-29 审查 P2，
+      // 之前 keyServices/currentService 会随保存被持久化进 config.json）
+      delete patch.tts.hasApiKey;
+      delete patch.tts.keyServices;
+      delete patch.tts.currentService;
+      // 前端只送"这一家新填的 Key"（apiKeyInput）与当前服务：合并进 keys 映射，
+      // 绝不接受整份 keys 覆盖（那会把别家的 Key 冲掉）。空/掩码 = 保持不变。
+      const keyInput = String(patch.tts.apiKeyInput ?? '').trim();
+      delete patch.tts.apiKeyInput;
+      delete patch.tts.keys;
+      // Key 归属 = UI 选中那家（service），地址反查只作兜底。之前只按地址认：
+      // 「自定义/自建」的地址不在预设表里 → 落到 provider 字符串 'openai'，
+      // 运行时又读不到 keys['openai']（2026-09-29 审查 P0）
+      const uiService = ttsServiceById(String(patch.tts.service || '').trim())?.id || '';
+      delete patch.tts.service;
+      const svc = ttsServiceOfBaseUrl(patch.tts.baseUrl || cfgNow.tts?.baseUrl || '');
+      const targetId = svc?.id || uiService || String(patch.tts.provider || cfgNow.tts?.provider || 'openai');
+      if (keyInput && keyInput !== '******') {
+        patch.tts.keys = { ...(cfgNow.tts?.keys || {}), [targetId]: keyInput };
       }
-
-      // 用当前 api 配置拉取模型列表（前端“获取列表”）
-      if (pathname === '/api/providers/fetch-models' && method === 'POST') {
-        try {
-          const body = await readBody(req);
-          const cfgNow = getConfig();
-          const baseUrl = String(body.baseUrl || cfgNow.api.baseUrl || '');
-          const submitted = String(body.apiKey ?? '').trim();
-          // 掩码 / 空 → 用服务端已保存的 Key，但仅限配置里已知的地址（见 storedKeyAllowedFor）。
-          const apiKey = (submitted && submitted !== '******')
-            ? submitted
-            : (storedKeyAllowedFor(cfgNow, baseUrl) ? String(cfgNow.api.apiKey || '') : '');
-          const models = await fetchModelsFrom(baseUrl, apiKey);
-          return json(res, 200, { ok: true, models });
-        } catch (error) {
-          return json(res, 502, { ok: false, error: String(error?.message ?? error) });
-        }
+      // 老客户端/手写配置不带 provider：按地址反查预设，免得火山/MiniMax 的地址走了 openai 兼容实现
+      if (!patch.tts.provider && patch.tts.baseUrl) {
+        const svc = ttsServiceOfBaseUrl(patch.tts.baseUrl);
+        if (svc?.provider) patch.tts.provider = svc.provider;
       }
-
-      // 测试单个提供商（测试连通性）
-      if (pathname === '/api/providers/test-one' && method === 'POST') {
-        try {
-          const body = await readBody(req);
-          const result = await testOneProvider({
-            providerId: String(body.providerId ?? ''),
-            baseUrl: String(body.baseUrl ?? ''),
-            apiKey: String(body.apiKey ?? '')
-          });
-          return json(res, 200, { ok: true, result });
-        } catch (error) {
-          return json(res, 500, { ok: false, error: String(error?.message ?? error) });
-        }
+      const submittedKey = String(patch.tts.apiKey ?? '').trim();
+      if (!submittedKey || submittedKey === '******') delete patch.tts.apiKey;
+    }
+    // 人设真的改了就打一个时间戳：提示词据此在接下来 24 小时里提醒模型
+    // "历史里的旧口癖/自称不作数"（换卡后它会被自己的旧发言锚住，实测能锚一天以上）
+    if (patch?.persona && typeof patch.persona === 'object') {
+      const before = cfgNow.persona || {};
+      const changed = ['roleText', 'templateId', 'behaviorProfile', 'customRules', 'botName',
+        'selfNickname', 'participation']
+        .some((key) => String(patch.persona[key] ?? before[key] ?? '') !== String(before[key] ?? ''));
+      if (changed) patch.persona.changedAt = Date.now();
+    }
+    const previousProactive = JSON.stringify(cfgNow.proactive || {});
+    const previousDailyMoments = JSON.stringify(cfgNow.dailyMoments || {});
+    const previousQzoneInteractions = JSON.stringify(cfgNow.qzoneInteractions || {});
+    const previousIdentityPilot = JSON.stringify(cfgNow.identityPilot || {});
+    const previousPersona = JSON.stringify(cfgNow.persona || {});
+    const previousSlangPilot = JSON.stringify(cfgNow.slangPilot || {});
+    const previousIncidentPilot = JSON.stringify(cfgNow.incidentPilot || {});
+    const previousIdentitySources = JSON.stringify({
+      allow: cfgNow.allow || {},
+      deny: cfgNow.deny || {},
+      allowAllWhenEmpty: cfgNow.allowAllWhenEmpty === true,
+      blocklist: cfgNow.blocklist || {}
+    });
+    const previousModes = new Map(
+      store.listChats().map((chatKey) => [chatKey, conversationConfigForChat(chatKey).mode])
+    );
+    delete patch.runtime;
+    if (patch.server) {
+      delete patch.server.token;
+      delete patch.server.hasToken;
+    }
+    const next = updateConfig(patch);
+    store.setMaxPerChat(next.store?.maxMessagesPerChat ?? 0);
+    let closedThreads = 0;
+    for (const [chatKey, previousMode] of previousModes) {
+      if (conversationConfigForChat(chatKey).mode !== previousMode) {
+        if (store.closeConversationThread(chatKey, 'mode-changed')) closedThreads += 1;
       }
-
-      // 用 baseUrl + apiKey + model 发送一次最小 chat 测试请求。
-      // apiKey 可省略：省略时由服务端自己解析真实 Key 使用（不外发给客户端），
-      // 这样未配置 server.token 时"测试连通性"依然可用。
-      if (pathname === '/api/providers/test-chat' && method === 'POST') {
-        try {
-          const body = await readBody(req);
-          const submitted = String(body.apiKey ?? '').trim();
-          const baseUrl = String(body.baseUrl ?? '');
-          // 掩码 / 空 → 说明客户端没有新 Key，用服务端已保存的；但只发往配置里已知的地址
-          // （见 storedKeyAllowedFor：否则等于把明文 Key 送到调用方指定的任意主机）。
-          const cfgNow = getConfig();
-          const apiKey = (submitted && submitted !== '******')
-            ? submitted
-            : (storedKeyAllowedFor(cfgNow, baseUrl) ? resolveApiKey(cfgNow) : '');
-          const result = await testModelChat({
-            baseUrl,
-            apiKey,
-            model: String(body.model ?? '')
-          });
-          return json(res, 200, { ok: true, result });
-        } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      // 思考能力探测：用当前渠道真实会发的参数发一条最小请求，实测「关得掉吗/档位认哪些」。
-      if (pathname === '/api/providers/probe-thinking' && method === 'POST') {
-        try {
-          const body = await readBody(req);
-          // 支持用"未保存的当前选择"实测：thinking 传字符串或按用途对象；
-          // extraBody 传对象。类型不合法一律忽略（回落到已保存配置）。
-          const thinkingInput = (typeof body.thinking === 'string'
-            || (body.thinking && typeof body.thinking === 'object' && !Array.isArray(body.thinking)))
-            ? body.thinking : undefined;
-          const extraInput = (body.extraBody && typeof body.extraBody === 'object' && !Array.isArray(body.extraBody))
-            ? body.extraBody : undefined;
-          const baseUrlIn = String(body.baseUrl ?? '');
-          const submitted = String(body.apiKey ?? '').trim();
-          // 与「测试连通性」「获取列表」同一条守卫：掩码/空 Key 时只把服务端已存的明文 Key
-          // 发给配置里已知的地址——不能因为调用方随手填个地址就把 Key 送出去（终审发现漏了这条）。
-          const apiKeyResolved = (submitted && submitted !== '******')
-            ? submitted
-            : (storedKeyAllowedFor(getConfig(), baseUrlIn || getConfig().api.baseUrl) ? resolveApiKey(getConfig()) : '');
-          const result = await probeThinking({
-            providerId: String(body.providerId ?? ''),
-            model: String(body.model ?? ''),
-            thinking: thinkingInput,
-            extraBody: extraInput,
-            baseUrl: baseUrlIn,
-            apiKey: apiKeyResolved
-          });
-          return json(res, 200, { ok: true, result });
-        } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      // 新增提供商（同 baseURL 自动合并）
-      if (pathname === '/api/providers' && method === 'POST') {
-        try {
-          const body = await readBody(req);
-          const r = upsertProvider({
-            baseUrl: String(body.baseUrl ?? ''),
-            apiKey: String(body.apiKey ?? ''),
-            models: body.models || [],
-            preset: String(body.preset ?? '')
-          });
-          return json(res, 200, { ok: true, ...r, provider: sanitizeProvider(r.provider) });
-        } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      // 给已有提供商追加模型
-      if (pathname === '/api/providers/models' && method === 'POST') {
-        try {
-          const body = await readBody(req);
-          const p = addModelsToProvider(String(body.providerId ?? ''), body.models || []);
-          if (!p) return json(res, 404, { ok: false, error: '提供商不存在' });
-          return json(res, 200, { ok: true, provider: sanitizeProvider(p) });
-        } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      // 删除某提供商下的一个模型
-      if (pathname === '/api/providers/models' && method === 'DELETE') {
-        try {
-          const body = await readBody(req);
-          const p = removeModelFromProvider(String(body.providerId ?? ''), String(body.modelId ?? ''));
-          if (!p) return json(res, 404, { ok: false, error: '提供商或模型不存在' });
-          return json(res, 200, { ok: true, provider: sanitizeProvider(p) });
-        } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/providers/set-key' && method === 'POST') {
-        const body = await readBody(req);
-        const updated = setProviderKey(String(body.providerId ?? ''), String(body.apiKey ?? ''));
-        if (!updated) return json(res, 404, { ok: false, error: '提供商不存在' });
-        return json(res, 200, { ok: true, hasKey: !!updated.apiKey });
-      }
-
-      if (pathname === '/api/providers/test-all' && method === 'POST') {
-        const results = await testAllProviders(currentProviders());
-        const okCount = Object.values(results).filter((r) => r.ok).length;
-        return json(res, 200, { ok: true, results, okCount, total: Object.keys(results).length });
-      }
-
-
-      if (pathname === '/api/vision/scan' && method === 'POST') {
-        if (visionScan.running) return json(res, 409, { ok: false, error: '已有一次扫描正在进行' });
-        const body = await readBody(req).catch(() => ({}));
-        const onlyProviderIds = Array.isArray(body?.providerIds) ? body.providerIds.map(String) : null;
-        visionScan.running = true;
-        emit('vision-scan', { phase: 'start' });
-        scanModelsVision({
-          providers: currentProviders(),
-          emit,
-          onlyProviderIds,
-          timeoutMs: 25000,
-          limit: 3
-        })
-          .then(({ total }) => emit('vision-scan', { phase: 'done', total }))
-          .catch((error) => emit('vision-scan', { phase: 'error', error: String(error?.message ?? error) }))
-          .finally(() => { visionScan.running = false; });
-        return json(res, 202, { ok: true, started: true });
-      }
-
-      // ── 自定义搜索提供商（可添加多个，交互沿用模型提供商那套）──
-      if (pathname === '/api/search-providers' && method === 'GET') {
-        const list = (getConfig().webSearch?.providers || []).map((p) => ({
-          id: p.id,
-          name: p.name,
-          type: p.type,
-          baseUrl: p.baseUrl,
-          model: p.model,
-          count: p.count,
-          timeoutMs: p.timeoutMs,
-          hasApiKey: Boolean(String(p.apiKey || '').trim())   // 不返回明文
-        }));
-        return json(res, 200, { providers: list });
-      }
-
-      // 新增/更新：同 baseUrl + type 视为同一项，覆盖其配置
-      if (pathname === '/api/search-providers' && method === 'POST') {
-        try {
-          const body = await readBody(req).catch(() => ({}));
-          const baseUrl = String(body.baseUrl ?? '').trim();
-          const type = String(body.type ?? 'openai').trim() === 'bing' ? 'bing' : 'openai';
-          if (!baseUrl) return json(res, 400, { ok: false, error: '接口地址不能为空' });
-          const list = [...(getConfig().webSearch?.providers || [])];
-          const existing = list.find((p) => p.baseUrl === baseUrl && p.type === type);
-          let entry;
-          if (existing) {
-            existing.name = String(body.name ?? existing.name ?? '').trim() || existing.name;
-            existing.baseUrl = baseUrl;
-            existing.type = type;
-            existing.model = String(body.model ?? existing.model ?? '').trim();
-            existing.count = Math.min(20, Math.max(1, Number(body.count) || existing.count || 6));
-            existing.timeoutMs = Math.max(5000, Number(body.timeoutMs) || existing.timeoutMs || 20000);
-            // 掩码/空 = 保持原 Key 不变
-            const submitted = String(body.apiKey ?? '').trim();
-            if (submitted && submitted !== '******') existing.apiKey = submitted;
-            entry = existing;
-          } else {
-            entry = {
-              id: `sp_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
-              name: String(body.name ?? '').trim() || baseUrl,
-              type,
-              baseUrl,
-              apiKey: String(body.apiKey ?? '').trim() === '******' ? '' : String(body.apiKey ?? '').trim(),
-              model: String(body.model ?? '').trim(),
-              count: Math.min(20, Math.max(1, Number(body.count) || 6)),
-              timeoutMs: Math.max(5000, Number(body.timeoutMs) || 20000)
-            };
-            list.push(entry);
-          }
-          updateConfig({ webSearch: { providers: list } });
-          return json(res, 200, {
-            ok: true,
-            provider: { ...entry, apiKey: '', hasApiKey: Boolean(String(entry.apiKey || '').trim()) }
-          });
-        } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      // 删除一个自定义搜索提供商
-      if (pathname === '/api/search-providers' && method === 'DELETE') {
-        try {
-          const body = await readBody(req).catch(() => ({}));
-          const id = String(body.id ?? '').trim();
-          if (!id) return json(res, 400, { ok: false, error: '缺少 id' });
-          const list = (getConfig().webSearch?.providers || []).filter((p) => String(p.id) !== id);
-          updateConfig({ webSearch: { providers: list } });
-          // 若当前正选中被删的那项，回落 bing，避免搜索直接报错
-          const cur = String(getConfig().webSearch?.provider || '');
-          if (cur === `custom:${id}`) {
-            updateConfig({ webSearch: { provider: 'bing' } });
-          }
-          return json(res, 200, { ok: true });
-        } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      // 测试某个自定义搜索提供商是否可用
-      if (pathname === '/api/search-providers/test' && method === 'POST') {
-        const startedAt = Date.now();
-        try {
-          const body = await readBody(req).catch(() => ({}));
-          const provId = String(body.providerId ?? '').trim();
-          const r = await customSearch('qq agent 测试', provId || null);
-          return json(res, 200, {
-            ok: true,
-            result: {
-              ok: true,
-              count: r.results.length,
-              sample: r.results[0]?.title || '',
-              latencyMs: Date.now() - startedAt
-            }
-          });
-        } catch (error) {
-          return json(res, 200, {
-            ok: true,
-            result: { ok: false, note: String(error?.message ?? error), latencyMs: Date.now() - startedAt }
-          });
-        }
-      }
-
-      if (pathname === '/api/test/api' && method === 'POST') {
-        const startedAt = Date.now();
-        try {
-          const r = await chatCompletion({
-            messages: [{ role: 'user', content: '请只回复两个字符：pong' }],
-            tools: null,
-            temperature: 0
-          });
-          const reply = typeof r.message.content === 'string' ? r.message.content.slice(0, 100) : '';
-          return json(res, 200, { ok: true, model: r.model, reply, latencyMs: Date.now() - startedAt });
-        } catch (error) {
-          return json(res, 200, { ok: false, error: String(error?.message ?? error), latencyMs: Date.now() - startedAt });
-        }
-      }
-
-      if (pathname === '/api/config' && method === 'GET') {
-        // 不把任何真实 Key 暴露给前端：递归清空所有密钥类字段，用 hasKey 表示"有密钥"。
-        // 注意：不要用手工逐字段列举——之前漏了 5 个搜索 Key 和 2 个 SnowLuma 令牌，
-        // 加新 provider 时还会继续漏。这里按字段名模式统一处理。
-        const safe = safeConfigWithAsrStatus(cfgNow);
-        return json(res, 200, safe);
-      }
-
-      if (pathname === '/api/config' && method === 'POST') {
-        const patch = await readBody(req);
-        // 控制台保存总会带上显式的 provider（来自服务预设）：等于用户确认过这一家，
-        // 清掉"升级默认值"的标记，让环境变量 Key 恢复生效（2026-09-26 审查 P2）
-        if (patch?.asr && typeof patch.asr === 'object') delete patch.asr.providerDefaulted;
-        // tts 的 Key 与 asr 同款语义：留空/掩码占位 = 保持原值（掩码回写会把真 Key 冲掉）
-        if (patch?.tts && typeof patch.tts === 'object') {
-          // 服务端派生位（GET 时下发的布尔/归属口径）：不回写配置（2026-09-29 审查 P2，
-          // 之前 keyServices/currentService 会随保存被持久化进 config.json）
-          delete patch.tts.hasApiKey;
-          delete patch.tts.keyServices;
-          delete patch.tts.currentService;
-          // 前端只送"这一家新填的 Key"（apiKeyInput）与当前服务：合并进 keys 映射，
-          // 绝不接受整份 keys 覆盖（那会把别家的 Key 冲掉）。空/掩码 = 保持不变。
-          const keyInput = String(patch.tts.apiKeyInput ?? '').trim();
-          delete patch.tts.apiKeyInput;
-          delete patch.tts.keys;
-          // Key 归属 = UI 选中那家（service），地址反查只作兜底。之前只按地址认：
-          // 「自定义/自建」的地址不在预设表里 → 落到 provider 字符串 'openai'，
-          // 运行时又读不到 keys['openai']（2026-09-29 审查 P0）
-          const uiService = ttsServiceById(String(patch.tts.service || '').trim())?.id || '';
-          delete patch.tts.service;
-          const svc = ttsServiceOfBaseUrl(patch.tts.baseUrl || cfgNow.tts?.baseUrl || '');
-          const targetId = svc?.id || uiService || String(patch.tts.provider || cfgNow.tts?.provider || 'openai');
-          if (keyInput && keyInput !== '******') {
-            patch.tts.keys = { ...(cfgNow.tts?.keys || {}), [targetId]: keyInput };
-          }
-          // 老客户端/手写配置不带 provider：按地址反查预设，免得火山/MiniMax 的地址走了 openai 兼容实现
-          if (!patch.tts.provider && patch.tts.baseUrl) {
-            const svc = ttsServiceOfBaseUrl(patch.tts.baseUrl);
-            if (svc?.provider) patch.tts.provider = svc.provider;
-          }
-          const submittedKey = String(patch.tts.apiKey ?? '').trim();
-          if (!submittedKey || submittedKey === '******') delete patch.tts.apiKey;
-        }
-        // 人设真的改了就打一个时间戳：提示词据此在接下来 24 小时里提醒模型
-        // "历史里的旧口癖/自称不作数"（换卡后它会被自己的旧发言锚住，实测能锚一天以上）
-        if (patch?.persona && typeof patch.persona === 'object') {
-          const before = cfgNow.persona || {};
-          const changed = ['roleText', 'templateId', 'behaviorProfile', 'customRules', 'botName',
-            'selfNickname', 'participation']
-            .some((key) => String(patch.persona[key] ?? before[key] ?? '') !== String(before[key] ?? ''));
-          if (changed) patch.persona.changedAt = Date.now();
-        }
-        const previousProactive = JSON.stringify(cfgNow.proactive || {});
-        const previousDailyMoments = JSON.stringify(cfgNow.dailyMoments || {});
-        const previousQzoneInteractions = JSON.stringify(cfgNow.qzoneInteractions || {});
-        const previousIdentityPilot = JSON.stringify(cfgNow.identityPilot || {});
-        const previousPersona = JSON.stringify(cfgNow.persona || {});
-        const previousSlangPilot = JSON.stringify(cfgNow.slangPilot || {});
-        const previousIncidentPilot = JSON.stringify(cfgNow.incidentPilot || {});
-        const previousIdentitySources = JSON.stringify({
-          allow: cfgNow.allow || {},
-          deny: cfgNow.deny || {},
-          allowAllWhenEmpty: cfgNow.allowAllWhenEmpty === true,
-          blocklist: cfgNow.blocklist || {}
+    }
+    if (closedThreads) emit('chat-update', '*');
+    if (JSON.stringify(next.proactive || {}) !== previousProactive) {
+      if (next.proactive?.enabled) orchestrator.startProactiveLoop();
+      else orchestrator.stopProactiveLoop();
+    }
+    if (JSON.stringify(next.dailyMoments || {}) !== previousDailyMoments) {
+      dailyMoments.reconfigure();
+    }
+    if (JSON.stringify(next.qzoneInteractions || {}) !== previousQzoneInteractions) {
+      qzoneInteractions.reconfigure();
+    }
+    if (JSON.stringify(next.groupDigest || {}) !== JSON.stringify(cfgNow.groupDigest || {})) {
+      groupDigest.reconfigure();
+    }
+    if (JSON.stringify(next.incidentPilot || {}) !== previousIncidentPilot) {
+      try {
+        syncIncidentPilot();
+        for (const chatKey of store.listChats()) orchestrator.enforceChatControl(chatKey);
+      } catch (error) {
+        const reverted = updateConfig({
+          incidentPilot: { ...(next.incidentPilot || {}), enabled: false }
         });
-        const previousModes = new Map(
-          store.listChats().map((chatKey) => [chatKey, conversationConfigForChat(chatKey).mode])
-        );
-        delete patch.runtime;
-        if (patch.server) {
-          delete patch.server.token;
-          delete patch.server.hasToken;
-        }
-        const next = updateConfig(patch);
-        store.setMaxPerChat(next.store?.maxMessagesPerChat ?? 0);
-        let closedThreads = 0;
-        for (const [chatKey, previousMode] of previousModes) {
-          if (conversationConfigForChat(chatKey).mode !== previousMode) {
-            if (store.closeConversationThread(chatKey, 'mode-changed')) closedThreads += 1;
-          }
-        }
-        if (closedThreads) emit('chat-update', '*');
-        if (JSON.stringify(next.proactive || {}) !== previousProactive) {
-          if (next.proactive?.enabled) orchestrator.startProactiveLoop();
-          else orchestrator.stopProactiveLoop();
-        }
-        if (JSON.stringify(next.dailyMoments || {}) !== previousDailyMoments) {
-          dailyMoments.reconfigure();
-        }
-        if (JSON.stringify(next.qzoneInteractions || {}) !== previousQzoneInteractions) {
-          qzoneInteractions.reconfigure();
-        }
-        if (JSON.stringify(next.groupDigest || {}) !== JSON.stringify(cfgNow.groupDigest || {})) {
-          groupDigest.reconfigure();
-        }
-        if (JSON.stringify(next.incidentPilot || {}) !== previousIncidentPilot) {
-          try {
-            syncIncidentPilot();
-            for (const chatKey of store.listChats()) orchestrator.enforceChatControl(chatKey);
-          } catch (error) {
-            const reverted = updateConfig({
-              incidentPilot: { ...(next.incidentPilot || {}), enabled: false }
-            });
-            return json(res, 500, {
-              ok: false,
-              error: `异常处理实验启动失败，开关已恢复为关闭：${String(error?.message ?? error)}`,
-              config: safeConfigWithAsrStatus(reverted)
-            });
-          }
-        }
-        const identityChanged = JSON.stringify(next.identityPilot || {}) !== previousIdentityPilot;
-        const identitySourcesChanged = JSON.stringify({
-          allow: next.allow || {},
-          deny: next.deny || {},
-          allowAllWhenEmpty: next.allowAllWhenEmpty === true,
-          blocklist: next.blocklist || {}
-        }) !== previousIdentitySources;
-        const personaChanged = JSON.stringify(next.persona || {}) !== previousPersona;
-        if (
-          identityChanged
-          || (identityPilotEnabled(next) && (identitySourcesChanged || personaChanged))
-        ) {
-          try {
-            await syncIdentityPilot({
-              reindex: identitySourcesChanged,
-              reconfigure: identityChanged || identitySourcesChanged || personaChanged
-            });
-          } catch (error) {
-            const reverted = updateConfig({
-              identityPilot: { ...(next.identityPilot || {}), enabled: false }
-            });
-            return json(res, 500, {
-              ok: false,
-              error: `统一身份库启动失败，开关已恢复为关闭：${String(error?.message ?? error)}`,
-              config: safeConfigWithAsrStatus(reverted)
-            });
-          }
-        }
-        if (JSON.stringify(next.slangPilot || {}) !== previousSlangPilot) {
-          try {
-            await syncSlangPilot();
-          } catch (error) {
-            const reverted = updateConfig({
-              slangPilot: { ...(next.slangPilot || {}), enabled: false }
-            });
-            return json(res, 500, {
-              ok: false,
-              error: `黑话语料库启动失败，开关已恢复为关闭：${String(error?.message ?? error)}`,
-              config: safeConfigWithAsrStatus(reverted)
-            });
-          }
-        }
-        initPriceFeed(next.api?.priceRemoteUrl || '');   // 远程价格表 URL 可能改了（内部幂等）
-        initChannelPrices(next.api?.channelPriceFeeds || []);   // 渠道价目表同理
-        emit('status', { configUpdated: true });
-        return json(res, 200, { ok: true, config: safeConfigWithAsrStatus(next) });
-      }
-
-
-
-
-      if (pathname === '/api/group-game/stop' && method === 'POST') {
-        // 管理员在控制台结束某一局（局跑歪/要收场时用）：与模型调 group_game stop 走同一入口
-        const body = await readBody(req);
-        const chatKey = String(body?.chatKey || '').trim();
-        if (!/^group:[^:\s]+$/.test(chatKey)) return json(res, 400, { ok: false, error: 'chatKey 要写成 group:<群号>' });
-        const out = await groupGame.stop(chatKey, '管理员在控制台结束');
-        if (!out?.ok) return json(res, 404, { ok: false, error: out?.error || '这个群没有进行中的游戏' });
-        return json(res, 200, { ok: true });
-      }
-
-
-      if (pathname === '/api/group-digest/run' && method === 'POST') {
-        try {
-          const result = await groupDigest.runOnce();
-          return json(res, 200, { ok: true, ...result });
-        } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/tts/key' && method === 'GET') {
-        // 显示当前这家的明文 Key（与模型 API 的「显示密钥」同一道守卫：本机控制台或带令牌）
-        if (!keyEndpointAllowed(req)) return json(res, 403, { ok: false, error: '只能在控制台里查看密钥' });
-        const cfgNow = getConfig();
-        const svcId = String(new URL(req.url, 'http://127.0.0.1').searchParams.get('service') || '');
-        const key = ttsKeyFor(cfgNow.tts, svcId);
-        return json(res, 200, { ok: true, apiKey: key });
-      }
-
-
-      if (pathname === '/api/tts/models' && method === 'POST') {
-        try {
-          const body = await readBody(req);
-          const cfgNow = getConfig();
-          const provider = String(body.provider || cfgNow.tts?.provider || 'openai').trim().toLowerCase();
-          if (provider !== 'openai') {
-            // 火山（v1/v3）与 MiniMax 没有"列模型"的公开接口：模型名/音色按服务商文档内置。
-            // 这里如实说明该填什么，而不是回空列表让界面显示"共 0 个"（2026-09-28 用户实测反馈）。
-            const svc = ttsServiceOfBaseUrl(body.baseUrl || cfgNow.tts?.baseUrl || '')
-              || TTS_SERVICES.find((s) => s.provider === provider);
-            return json(res, 200, {
-              ok: true,
-              models: [],
-              ttsOnly: false,
-              unsupported: true,
-              total: 0,
-              note: svc?.note || '这一家没有可拉的模型列表：按服务商文档填模型名与音色。'
-            });
-          }
-          const baseUrl = String(body.baseUrl || cfgNow.tts?.baseUrl || '').trim();
-          const submitted = String(body.apiKey ?? '').trim();
-          const norm = (v) => String(v || '').trim().replace(/[/]+$/, '').toLowerCase();
-          const apiKey = (submitted && submitted !== '******')
-            ? submitted
-            : (norm(baseUrl) === norm(cfgNow.tts?.baseUrl) ? ttsKeyFor(cfgNow.tts) : '');
-          const all = await fetchModelsFrom(baseUrl, apiKey);
-          const isTtsModel = (id) => {
-            const name = String(id);
-            if (/whisper|sensevoice|asr|recognition|stt|transcri/i.test(name)) return false;   // ASR 不是 TTS
-            return /tts|text.?to.?speech|speech.?synth|cosyvoice|moss|voice/i.test(name);
-          };
-          const models = all.filter(isTtsModel).sort((a, b) => a.localeCompare(b));
-          return json(res, 200, {
-            ok: true,
-            models: models.length ? models : [...all].sort((a, b) => a.localeCompare(b)),
-            ttsOnly: models.length > 0,
-            total: all.length
-          });
-        } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/tts/test' && method === 'POST') {
-        try {
-          const body = await readBody(req);
-          const text = String(body.text ?? '').trim().slice(0, 120) || '你好呀，我是群里的小鲸鱼，这是一条试听。';
-          const cfgNow = getConfig();
-          if (cfgNow.tts?.enabled !== true) return json(res, 400, { ok: false, error: '语音回复未启用（勾上并保存后再试听）' });
-          const { buffer, format } = await synthesizeSpeech({ cfg: cfgNow.tts, text });
-          return json(res, 200, { ok: true, format, audio: buffer.toString('base64') });
-        } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/reminders' && method === 'GET') {
-        // 控制台的提醒管理页：待触发全量 + 最近完成的（fired/canceled/expired）。
-        // 已完成的每个会话只保留最近几条（DONE_KEEP），这里再全局截断一次。
-        if (!reminders) return json(res, 200, { ok: true, enabled: false, pending: [], recent: [] });
-        const enabled = getConfig().reminders?.enabled !== false;
-        const fmt = (it) => ({
-          id: it.id, chatKey: it.chatKey, text: it.text, status: it.status || 'pending',
-          at: it.at, createdAt: it.createdAt, finishedAt: it.finishedAt || null
-        });
-        const pending = reminders.items
-          .filter((it) => it.status === 'pending')
-          .sort((a, b) => a.at - b.at)
-          .map(fmt);
-        const recent = reminders.items
-          .filter((it) => it.status && it.status !== 'pending')
-          .sort((a, b) => (b.finishedAt || b.at) - (a.finishedAt || a.at))
-          .slice(0, 30)
-          .map(fmt);
-        return json(res, 200, { ok: true, enabled, pending, recent });
-      }
-
-      if (pathname === '/api/reminders/cancel' && method === 'POST') {
-        // 管理员在控制台里取消：带 id + chatKey（与聊天里"算了别提醒了"同一存储操作）
-        const body = await readBody(req);
-        if (!reminders) return json(res, 400, { ok: false, error: '提醒功能不可用' });
-        const hit = reminders.cancel({ id: String(body?.id || ''), chatKey: String(body?.chatKey || '') });
-        if (!hit) return json(res, 404, { ok: false, error: '没找到这条待触发的提醒（可能已被触发或取消）' });
-        return json(res, 200, { ok: true, canceled: hit.id });
-      }
-
-
-
-      if (pathname === '/api/incidents' && method === 'GET') {
-        return json(res, 200, {
-          status: incidentPilotStatus(),
-          incidents: incidentPilot?.list({
-            state: url.searchParams.get('state') || '',
-            severity: url.searchParams.get('severity') || '',
-            chatKey: url.searchParams.get('chatKey') || '',
-            limit: url.searchParams.get('limit') || 100
-          }) || []
+        return json(res, 500, {
+          ok: false,
+          error: `异常处理实验启动失败，开关已恢复为关闭：${String(error?.message ?? error)}`,
+          config: safeConfigWithAsrStatus(reverted)
         });
       }
-      const incidentDetail = /^\/api\/incidents\/(inc_[a-f0-9]{16})$/i.exec(pathname);
-      if (incidentDetail && method === 'GET') {
-        const incident = incidentPilot?.get(incidentDetail[1]);
-        return incident
-          ? json(res, 200, { incident })
-          : json(res, 404, { error: '异常日志不存在' });
-      }
-      if (incidentDetail && method === 'DELETE') {
-        const body = await readBody(req);
-        if (body.confirm !== true) {
-          return json(res, 409, { error: '删除异常日志需要显式确认' });
-        }
-        try {
-          return incidentPilot?.delete(incidentDetail[1])
-            ? json(res, 200, { ok: true })
-            : json(res, 404, { error: '异常日志不存在' });
-        } catch (error) {
-          return json(res, error?.httpStatus || 409, { error: String(error?.message ?? error) });
-        }
-      }
-      const incidentAction =
-        /^\/api\/incidents\/(inc_[a-f0-9]{16})\/(acknowledge|resolve)$/i.exec(pathname);
-      if (incidentAction && method === 'POST') {
-        const body = await readBody(req);
-        try {
-          const incident = incidentAction[2] === 'acknowledge'
-            ? incidentPilot?.acknowledge(incidentAction[1])
-            : incidentPilot?.resolve(incidentAction[1], body.resolution);
-          return incident
-            ? json(res, 200, { ok: true, incident })
-            : json(res, 404, { error: '异常日志不存在' });
-        } catch (error) {
-          return json(res, error?.httpStatus || 409, { error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/slang-pilot/discoveries' && method === 'GET') {
-        if (!slangPilot?.active) {
-          return json(res, 409, { error: '黑话语料库试点未启用' });
-        }
-        return json(res, 200, {
-          status: slangPilot.status(),
-          discoveries: slangPilot.list({
-            state: url.searchParams.get('state') || '',
-            query: url.searchParams.get('query') || '',
-            limit: Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100))
-          })
+    }
+    const identityChanged = JSON.stringify(next.identityPilot || {}) !== previousIdentityPilot;
+    const identitySourcesChanged = JSON.stringify({
+      allow: next.allow || {},
+      deny: next.deny || {},
+      allowAllWhenEmpty: next.allowAllWhenEmpty === true,
+      blocklist: next.blocklist || {}
+    }) !== previousIdentitySources;
+    const personaChanged = JSON.stringify(next.persona || {}) !== previousPersona;
+    if (
+      identityChanged
+      || (identityPilotEnabled(next) && (identitySourcesChanged || personaChanged))
+    ) {
+      try {
+        await syncIdentityPilot({
+          reindex: identitySourcesChanged,
+          reconfigure: identityChanged || identitySourcesChanged || personaChanged
+        });
+      } catch (error) {
+        const reverted = updateConfig({
+          identityPilot: { ...(next.identityPilot || {}), enabled: false }
+        });
+        return json(res, 500, {
+          ok: false,
+          error: `统一身份库启动失败，开关已恢复为关闭：${String(error?.message ?? error)}`,
+          config: safeConfigWithAsrStatus(reverted)
         });
       }
-
-      const slangDiscoveryDetail =
-        /^\/api\/slang-pilot\/discoveries\/(sr_[a-f0-9]{12})$/i.exec(pathname);
-      if (slangDiscoveryDetail && method === 'GET') {
-        if (!slangPilot?.active) {
-          return json(res, 409, { error: '黑话语料库试点未启用' });
-        }
-        const discovery = slangPilot.detail(slangDiscoveryDetail[1]);
-        return discovery
-          ? json(res, 200, { discovery })
-          : json(res, 404, { error: '黑话发现不存在' });
-      }
-
-      const slangResearchDecision =
-        /^\/api\/slang-pilot\/discoveries\/(sr_[a-f0-9]{12})\/research-decision$/i
-          .exec(pathname);
-      if (slangResearchDecision && method === 'POST') {
-        if (!slangPilot?.active) {
-          return json(res, 409, { error: '黑话语料库试点未启用' });
-        }
-        const body = await readBody(req);
-        if (!['approve', 'reject'].includes(body.decision)) {
-          return json(res, 400, { error: 'decision 必须是 approve 或 reject' });
-        }
-        try {
-          return json(res, 200, slangPilot?.decideResearch(
-            slangResearchDecision[1],
-            body.decision,
-            { decidedBy: 'console', expectedVersion: body.expectedVersion }
-          ));
-        } catch (error) {
-          return json(res, 409, { error: String(error?.message ?? error) });
-        }
-      }
-
-      const slangAdmissionDecision =
-        /^\/api\/slang-pilot\/discoveries\/(sr_[a-f0-9]{12})\/admission-decision$/i
-          .exec(pathname);
-      if (slangAdmissionDecision && method === 'POST') {
-        if (!slangPilot?.active) {
-          return json(res, 409, { error: '黑话语料库试点未启用' });
-        }
-        const body = await readBody(req);
-        if (!['approve', 'reject'].includes(body.decision)) {
-          return json(res, 400, { error: 'decision 必须是 approve 或 reject' });
-        }
-        try {
-          return json(res, 200, slangPilot?.decideAdmission(
-            slangAdmissionDecision[1],
-            body.decision,
-            {
-              decidedBy: 'console',
-              expectedVersion: body.expectedVersion,
-              edits: body.edits || {}
-            }
-          ));
-        } catch (error) {
-          return json(res, 409, { error: String(error?.message ?? error) });
-        }
-      }
-
-      const slangResearchRetry =
-        /^\/api\/slang-pilot\/discoveries\/(sr_[a-f0-9]{12})\/retry$/i.exec(pathname);
-      if (slangResearchRetry && method === 'POST') {
-        if (!slangPilot?.active) {
-          return json(res, 409, { error: '黑话语料库试点未启用' });
-        }
-        try {
-          return json(res, 200, slangPilot?.retryResearch(
-            slangResearchRetry[1],
-            { decidedBy: 'console' }
-          ));
-        } catch (error) {
-          return json(res, 409, { error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/identity-pilot/people' && method === 'GET') {
-        if (!identityPilot?.active) {
-          return json(res, 409, { error: '统一身份库未启用' });
-        }
-        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100));
-        return json(res, 200, {
-          status: identityPilot.status(),
-          people: identityPilot.listPeople(limit)
+    }
+    if (JSON.stringify(next.slangPilot || {}) !== previousSlangPilot) {
+      try {
+        await syncSlangPilot();
+      } catch (error) {
+        const reverted = updateConfig({
+          slangPilot: { ...(next.slangPilot || {}), enabled: false }
+        });
+        return json(res, 500, {
+          ok: false,
+          error: `黑话语料库启动失败，开关已恢复为关闭：${String(error?.message ?? error)}`,
+          config: safeConfigWithAsrStatus(reverted)
         });
       }
+    }
+    initPriceFeed(next.api?.priceRemoteUrl || '');   // 远程价格表 URL 可能改了（内部幂等）
+    initChannelPrices(next.api?.channelPriceFeeds || []);   // 渠道价目表同理
+    emit('status', { configUpdated: true });
+    return json(res, 200, { ok: true, config: safeConfigWithAsrStatus(next) });
+  });
 
-      if (pathname === '/api/identity-pilot/incoming-friend-requests' && method === 'GET') {
-        if (
-          !identityPilot?.active
-          || getConfig().identityPilot?.incomingFriendRequest?.enabled !== true
-        ) {
-          return json(res, 409, { error: '入站好友请求审批功能未启用' });
-        }
-        return json(res, 200, {
-          status: identityPilot.status(),
-          requests: identityPilot.listIncomingFriendRequests({
-            status: url.searchParams.get('status') || '',
-            limit: Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100))
-          })
-        });
-      }
+  router.add('POST', '/api/group-game/stop', async (req, res) => {
+    // 管理员在控制台结束某一局（局跑歪/要收场时用）：与模型调 group_game stop 走同一入口
+    const body = await readBody(req);
+    const chatKey = String(body?.chatKey || '').trim();
+    if (!/^group:[^:\s]+$/.test(chatKey)) return json(res, 400, { ok: false, error: 'chatKey 要写成 group:<群号>' });
+    const out = await groupGame.stop(chatKey, '管理员在控制台结束');
+    if (!out?.ok) return json(res, 404, { ok: false, error: out?.error || '这个群没有进行中的游戏' });
+    return json(res, 200, { ok: true });
+  });
+  router.add('POST', '/api/group-digest/run', async (req, res) => {
+    try {
+      const result = await groupDigest.runOnce();
+      return json(res, 200, { ok: true, ...result });
+    } catch (error) {
+      return json(res, 400, { ok: false, error: String(error?.message ?? error) });
+    }
+  });
+  router.add('GET', '/api/reminders', async (req, res) => {
+    // 控制台的提醒管理页：待触发全量 + 最近完成的（fired/canceled/expired）。
+    // 已完成的每个会话只保留最近几条（DONE_KEEP），这里再全局截断一次。
+    if (!reminders) return json(res, 200, { ok: true, enabled: false, pending: [], recent: [] });
+    const enabled = getConfig().reminders?.enabled !== false;
+    const fmt = (it) => ({
+      id: it.id, chatKey: it.chatKey, text: it.text, status: it.status || 'pending',
+      at: it.at, createdAt: it.createdAt, finishedAt: it.finishedAt || null
+    });
+    const pending = reminders.items
+      .filter((it) => it.status === 'pending')
+      .sort((a, b) => a.at - b.at)
+      .map(fmt);
+    const recent = reminders.items
+      .filter((it) => it.status && it.status !== 'pending')
+      .sort((a, b) => (b.finishedAt || b.at) - (a.finishedAt || a.at))
+      .slice(0, 30)
+      .map(fmt);
+    return json(res, 200, { ok: true, enabled, pending, recent });
+  });
+  router.add('POST', '/api/reminders/cancel', async (req, res) => {
+    // 管理员在控制台里取消：带 id + chatKey（与聊天里"算了别提醒了"同一存储操作）
+    const body = await readBody(req);
+    if (!reminders) return json(res, 400, { ok: false, error: '提醒功能不可用' });
+    const hit = reminders.cancel({ id: String(body?.id || ''), chatKey: String(body?.chatKey || '') });
+    if (!hit) return json(res, 404, { ok: false, error: '没找到这条待触发的提醒（可能已被触发或取消）' });
+    return json(res, 200, { ok: true, canceled: hit.id });
+  });
+  router.add('GET', '/api/incidents', async (req, res, params, url) => {
+    return json(res, 200, {
+      status: incidentPilotStatus(),
+      incidents: incidentPilot?.list({
+        state: url.searchParams.get('state') || '',
+        severity: url.searchParams.get('severity') || '',
+        chatKey: url.searchParams.get('chatKey') || '',
+        limit: url.searchParams.get('limit') || 100
+      }) || []
+    });
+  });
+  router.add('GET', '/api/slang-pilot/discoveries', async (req, res, params, url) => {
+    if (!slangPilot?.active) {
+      return json(res, 409, { error: '黑话语料库试点未启用' });
+    }
+    return json(res, 200, {
+      status: slangPilot.status(),
+      discoveries: slangPilot.list({
+        state: url.searchParams.get('state') || '',
+        query: url.searchParams.get('query') || '',
+        limit: Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100))
+      })
+    });
+  });
+  router.add('GET', '/api/identity-pilot/people', async (req, res, params, url) => {
+    if (!identityPilot?.active) {
+      return json(res, 409, { error: '统一身份库未启用' });
+    }
+    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100));
+    return json(res, 200, {
+      status: identityPilot.status(),
+      people: identityPilot.listPeople(limit)
+    });
+  });
+  router.add('GET', '/api/identity-pilot/incoming-friend-requests', async (req, res, params, url) => {
+    if (
+      !identityPilot?.active
+      || getConfig().identityPilot?.incomingFriendRequest?.enabled !== true
+    ) {
+      return json(res, 409, { error: '入站好友请求审批功能未启用' });
+    }
+    return json(res, 200, {
+      status: identityPilot.status(),
+      requests: identityPilot.listIncomingFriendRequests({
+        status: url.searchParams.get('status') || '',
+        limit: Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100))
+      })
+    });
+  });
+  router.add('GET', '/api/identity-pilot/friend-proposals', async (req, res, params, url) => {
+    if (!identityPilot?.active || getConfig().identityPilot?.friendProposal?.enabled !== true) {
+      return json(res, 409, { error: '主动好友候选功能未启用' });
+    }
+    return json(res, 200, {
+      status: identityPilot.status(),
+      proposals: identityPilot.listFriendProposals({
+        status: url.searchParams.get('status') || '',
+        limit: Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100))
+      })
+    });
+  });
+  router.add('GET', '/api/identity-pilot/friend-opportunities', async (req, res, params, url) => {
+    if (!identityPilot?.active || getConfig().identityPilot?.friendProposal?.enabled !== true) {
+      return json(res, 409, { error: '主动好友候选功能未启用' });
+    }
+    return json(res, 200, {
+      status: identityPilot.status(),
+      opportunities: identityPilot.listFriendOpportunities({
+        status: url.searchParams.get('status') || '',
+        limit: Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100))
+      })
+    });
+  });
+  router.add('POST', '/api/qzone-interactions/run', async (req, res) => {
+    const body = await readBody(req);
+    if (body.confirm !== true) {
+      return json(res, 409, { error: '手动执行动态互动需要显式确认' });
+    }
+    try {
+      return json(res, 200, await qzoneInteractions.runNow(String(body.kind || 'all')));
+    } catch (error) {
+      return json(
+        res,
+        error.httpStatus || (error.code === 'TIME_CONTROL_INACTIVE' ? 409 : 500),
+        { error: String(error?.message ?? error), code: error.code || '' }
+      );
+    }
+  });
+  router.add('GET', '/api/time-control/status', async (req, res) => {
+    const cfgNow = getConfig();
+    const now = Date.now();
+    const keys = [...new Set([
+      ...store.listChats(),
+      ...(cfgNow.allow?.groups || []).map((id) => `group:${id}`),
+      ...(cfgNow.allow?.private || []).map((id) => `private:${id}`),
+      ...Object.keys(cfgNow.timeControl?.overrides || {})
+    ])];
+    return json(res, 200, {
+      timeZone: TIME_ZONE, now,
+      global: timeControlState(cfgNow.timeControl, '', now),
+      chats: keys.map((chatKey) => ({
+        chatKey, ...timeControlState(cfgNow.timeControl, chatKey, now)
+      }))
+    });
+  });
+  router.add('POST', '/api/daily-moments/run', async (req, res) => {
+    const body = await readBody(req);
+    if (body.publish === true && body.confirm !== true) {
+      return json(res, 409, { error: '发布说说需要显式确认' });
+    }
+    try {
+      const result = await dailyMoments.runNow({
+        ...(body.dayKey ? { dayKey: String(body.dayKey) } : {}),
+        publish: body.publish === true,
+        force: body.force === true,
+        confirmDuplicateRisk: body.confirmDuplicateRisk === true
+      });
+      return json(res, 200, result);
+    } catch (error) {
+      return json(res, error.httpStatus || (error.code === 'TIME_CONTROL_INACTIVE' ? 409 : 500), {
+        error: String(error?.message ?? error), code: error.code || ''
+      });
+    }
+  });
+  router.add('GET', '/api/models', async (req, res) => {
+    try {
+      const models = await listModels();
+      return json(res, 200, { models });
+    } catch (error) {
+      return json(res, 502, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('GET', '/api/sessions', async (req, res, params, url) => {
+    // 上限 2^20（Kondius 钦定 1048576）：约等于不限，但拦得住真正的失控请求。
+    // 前端靠分页（一次渲染 50 条）避免卡顿，后端不截断。
+    const limit = Math.min(1048576, Math.max(1, Number(url.searchParams.get('limit')) || 1048576));
+    const now = Date.now();
+    const threadCache = new Map();
+    return json(res, 200, {
+      sessions: sessions.listSummaries(limit)
+        .map((session) => buildSessionView(session, store, { now, threadCache }))
+    });
+  });
+  router.add('GET', '/api/chats', async (req, res) => {
+    const cfgNow = getConfig();
+    const chats = store.listChats().map((key) => {
+      const meta = store.getChatMeta(key);
+      return {
+        key,
+        ...meta,
+        incidentControl: incidentPilot?.getChatControl(key) || null,
+        incidentDecision: incidentPilot?.chatDecision(key, meta) || null,
+        ...(cfgNow.timeControl?.enabled
+          ? { timeControl: timeControlState(cfgNow.timeControl, key) } : {})
+      };
+    })
+      .sort((a, b) => b.lastTs - a.lastTs);
+    // 附带群名，让 UI 能显示"群名（群号）"。
+    // 群名要调 OneBot 拿，可能慢或失败 —— 用 allSettled 保证绝不影响主流程：
+    // 拿不到的 chatName 为空，UI 自动退回只显示群号。
+    await Promise.allSettled(chats.map(async (c) => {
+      const m = /^group:(\d+)$/.exec(String(c.key || ''));
+      if (!m) { c.chatName = ''; return; }
+      try {
+        c.chatName = await Promise.race([
+          orchestrator.getChatName(m[1]),
+          new Promise((r) => setTimeout(() => r(''), 3000))   // 3s 超时保护
+        ]) || '';
+      } catch { c.chatName = ''; }
+    }));
+    return json(res, 200, { chats });
+  });
+  router.add('POST', '/api/pause', async (req, res) => {
+    const body = await readBody(req);
+    const wasPaused = orchestrator.paused;
+    orchestrator.setPaused(!!body.paused);
+    if (body.paused) slangPilot?.abortResearch('机器人已暂停');
+    else slangPilot?.resumeQueued();
+    if (wasPaused && !orchestrator.paused && !body.skipBacklog) {
+      // 恢复时自动补处理暂停期间积压的未读消息
+      orchestrator.drainBacklogAfterResume();
+    }
+    return json(res, 200, { ok: true, paused: orchestrator.paused });
+  });
+  router.add('DELETE', '/api/pause', async (req, res) => {
+    orchestrator.setPaused(false);
+    slangPilot?.resumeQueued();
+    const marked = {};
+    for (const chatKey of store.listChats()) {
+      const n = store.drainUnread(chatKey).length;
+      if (n > 0) marked[chatKey] = n;
+    }
+    emit('chat-update', '*');
+    return json(res, 200, { ok: true, paused: false, marked });
+  });
 
-      const incomingFriendDecision =
-        /^\/api\/identity-pilot\/incoming-friend-requests\/(fr_[a-f0-9]{12})\/decision$/i
-          .exec(pathname);
-      if (incomingFriendDecision && method === 'POST') {
-        if (
-          !identityPilot?.active
-          || getConfig().identityPilot?.incomingFriendRequest?.enabled !== true
-        ) {
-          return json(res, 409, { error: '入站好友请求审批功能未启用' });
-        }
-        const body = await readBody(req);
-        if (!['approve', 'reject'].includes(body.decision)) {
-          return json(res, 400, { error: 'decision 必须是 approve 或 reject' });
-        }
-        try {
-          const result = await identityPilot.decideIncomingFriendRequest(
-            incomingFriendDecision[1],
-            body.decision,
-            {
-              decidedBy: 'console',
-              remark: String(body.remark || '')
-            }
-          );
-          emit('identity-pilot-update', identityPilot.status());
-          return json(res, 200, result);
-        } catch (error) {
-          return json(res, error?.httpStatus || 409, {
-            error: String(error?.message ?? error)
-          });
-        }
-      }
-
-      if (pathname === '/api/identity-pilot/friend-proposals' && method === 'GET') {
-        if (!identityPilot?.active || getConfig().identityPilot?.friendProposal?.enabled !== true) {
-          return json(res, 409, { error: '主动好友候选功能未启用' });
-        }
-        return json(res, 200, {
-          status: identityPilot.status(),
-          proposals: identityPilot.listFriendProposals({
-            status: url.searchParams.get('status') || '',
-            limit: Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100))
-          })
-        });
-      }
-
-      if (pathname === '/api/identity-pilot/friend-opportunities' && method === 'GET') {
-        if (!identityPilot?.active || getConfig().identityPilot?.friendProposal?.enabled !== true) {
-          return json(res, 409, { error: '主动好友候选功能未启用' });
-        }
-        return json(res, 200, {
-          status: identityPilot.status(),
-          opportunities: identityPilot.listFriendOpportunities({
-            status: url.searchParams.get('status') || '',
-            limit: Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100))
-          })
-        });
-      }
-
-      const friendProposalDecision = /^\/api\/identity-pilot\/friend-proposals\/(fp_[a-f0-9]{12})\/decision$/i.exec(pathname);
-      if (friendProposalDecision && method === 'POST') {
-        if (!identityPilot?.active || getConfig().identityPilot?.friendProposal?.enabled !== true) {
-          return json(res, 409, { error: '主动好友候选功能未启用' });
-        }
-        const body = await readBody(req);
-        if (!['approve', 'reject'].includes(body.decision)) {
-          return json(res, 400, { error: 'decision 必须是 approve 或 reject' });
-        }
-        try {
-          const result = await identityPilot.decideFriendProposal(
-            friendProposalDecision[1],
-            body.decision,
-            { decidedBy: 'console' }
-          );
-          emit('identity-pilot-update', identityPilot.status());
-          return json(res, 200, result);
-        } catch (error) {
-          return json(res, 409, { error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/assets/overview' && method === 'GET') {
-        const overview = assetObserver.overview();
-        const pilotStatus = slangPilotStatus();
-        return json(res, 200, {
-          ...overview,
-          slang: { ...overview.slang, active: pilotStatus.active },
-          slangPilot: pilotStatus
-        });
-      }
-
-      if (pathname === '/api/assets/stickers' && method === 'GET') {
-        const result = await assetObserver.listStickers({
-          query: url.searchParams.get('query') || '',
-          offset: url.searchParams.get('offset') || 0,
-          limit: url.searchParams.get('limit') || 100,
-          refresh: url.searchParams.get('refresh') === '1'
-        });
-        // QQ 收藏表情有上限（非会员 500）：满了之后新收藏只能进本地图库（发出去是图片），
-        // 界面据此解释清楚，别让人以为"表情包坏了"
-        try { result.qqFavorites = await stickers.qqFavoritesState(); } catch { /* 拿不到就不显示 */ }
-        return json(res, 200, result);
-      }
-
-      if (pathname === '/api/assets/stickers' && method === 'POST') {
-        try {
-          const body = await readBody(req, 12 * 1024 * 1024);
-          let imageBuffer;
-          if (body.imageDataUrl) {
-            imageBuffer = decodeImageDataUrl(body.imageDataUrl);
-          } else if (body.imageUrl) {
-            imageBuffer = (await safeFetchBinary(
-              String(body.imageUrl),
-              8 * 1024 * 1024
-            )).buffer;
-          } else {
-            return json(res, 400, { error: '请选择图片文件或填写图片 URL' });
-          }
-          const entry = assetObserver.addSticker({
-            imageBuffer,
-            desc: body.desc,
-            localNote: body.localNote,
-            tags: body.tags,
-            usage: body.usage
-          });
-          emit('asset-update', { kind: 'stickers', action: 'create', id: entry.id });
-          return json(res, 201, { ok: true, entry });
-        } catch (error) {
-          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/assets/stickers/image' && method === 'GET') {
-        const id = String(url.searchParams.get('id') || '').trim();
-        if (!id) return json(res, 400, { error: '缺少表情 ID' });
-        let sticker = stickers.peek(id);
-        const localImage = stickers.readImage(id);
-        if (localImage) {
-          res.writeHead(200, {
-            'content-type': localImage.contentType,
-            'content-length': localImage.buffer.length,
-            'cache-control': 'private, max-age=300',
-            'x-content-type-options': 'nosniff'
-          });
-          res.end(localImage.buffer);
-          return;
-        }
-        if (sticker?.source === 'ai') {
-          sticker = await stickers.findForSend(id);
-        }
-        if (!sticker?.url) return json(res, 404, { error: '表情图片不存在' });
-        try {
-          const image = await safeFetchBinary(sticker.url, 8 * 1024 * 1024);
-          const contentType = String(image.contentType || '').split(';')[0].trim().toLowerCase();
-          if (!contentType.startsWith('image/')) {
-            return json(res, 502, { error: '表情资源不是图片' });
-          }
-          res.writeHead(200, {
-            'content-type': contentType,
-            'content-length': image.buffer.length,
-            'cache-control': 'private, max-age=60',
-            'x-content-type-options': 'nosniff'
-          });
-          res.end(image.buffer);
-          return;
-        } catch (error) {
-          return json(res, 502, { error: `表情图片读取失败：${String(error?.message ?? error)}` });
-        }
-      }
-
-      const stickerAssetMatch = /^\/api\/assets\/stickers\/([^/]+)$/.exec(pathname);
-      if (stickerAssetMatch && method === 'PUT') {
-        try {
-          const id = decodeURIComponent(stickerAssetMatch[1]);
-          const body = await readBody(req);
-          const entry = assetObserver.updateSticker(id, {
-            desc: body.desc,
-            localNote: body.localNote,
-            tags: body.tags,
-            usage: body.usage
-          });
-          if (!entry) return json(res, 404, { error: '表情不存在' });
-          emit('asset-update', { kind: 'stickers', action: 'update', id });
-          return json(res, 200, { ok: true, entry });
-        } catch (error) {
-          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
-        }
-      }
-      if (stickerAssetMatch && method === 'DELETE') {
-        try {
-          const body = await readBody(req);
-          if (body.confirm !== true) return json(res, 409, { error: '删除表情需要显式确认' });
-          const id = decodeURIComponent(stickerAssetMatch[1]);
-          const result = assetObserver.deleteSticker(id);
-          if (!result?.removed) return json(res, 404, { error: '表情不存在' });
-          emit('asset-update', { kind: 'stickers', action: 'delete', id });
-          return json(res, 200, { ok: true, ...result });
-        } catch (error) {
-          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/assets/slang' && method === 'GET') {
-        return json(res, 200, assetObserver.listSlang({
-          query: url.searchParams.get('query') || '',
-          status: url.searchParams.get('status') || '',
-          offset: url.searchParams.get('offset') || 0,
-          limit: url.searchParams.get('limit') || 200
-        }));
-      }
-
-      if (pathname === '/api/assets/slang' && method === 'POST') {
-        try {
-          const entry = assetObserver.addSlang(await readBody(req));
-          emit('asset-update', { kind: 'slang', action: 'create', id: entry.id });
-          return json(res, 201, { ok: true, entry });
-        } catch (error) {
-          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
-        }
-      }
-      const slangAssetMatch = /^\/api\/assets\/slang\/([^/]+)$/.exec(pathname);
-      if (slangAssetMatch && method === 'PUT') {
-        try {
-          const id = decodeURIComponent(slangAssetMatch[1]);
-          const entry = assetObserver.updateSlang(id, await readBody(req));
-          if (!entry) return json(res, 404, { error: '黑话词条不存在' });
-          emit('asset-update', { kind: 'slang', action: 'update', id });
-          return json(res, 200, { ok: true, entry });
-        } catch (error) {
-          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
-        }
-      }
-      if (slangAssetMatch && method === 'DELETE') {
-        try {
-          const body = await readBody(req);
-          if (body.confirm !== true) return json(res, 409, { error: '删除黑话需要显式确认' });
-          const id = decodeURIComponent(slangAssetMatch[1]);
-          if (!assetObserver.deleteSlang(id)) return json(res, 404, { error: '黑话词条不存在' });
-          emit('asset-update', { kind: 'slang', action: 'delete', id });
-          return json(res, 200, { ok: true });
-        } catch (error) {
-          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/assets/identities' && method === 'GET') {
-        const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 500));
-        return json(res, 200, assetObserver.identitySnapshot({
-          limit,
-          query: url.searchParams.get('query') || ''
-        }));
-      }
-
-      if (pathname === '/api/assets/identities' && method === 'POST') {
-        try {
-          const person = assetObserver.upsertIdentity(await readBody(req));
-          emit('asset-update', { kind: 'identities', action: 'create', id: person.userId });
-          emit('identity-pilot-update', identityPilotStatus());
-          return json(res, 201, { ok: true, person });
-        } catch (error) {
-          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
-        }
-      }
-      const identityAssetMatch = /^\/api\/assets\/identities\/(\d+)$/.exec(pathname);
-      if (identityAssetMatch && method === 'PUT') {
-        try {
-          const person = assetObserver.upsertIdentity({
-            ...(await readBody(req)),
-            userId: identityAssetMatch[1]
-          });
-          emit('asset-update', { kind: 'identities', action: 'update', id: person.userId });
-          emit('identity-pilot-update', identityPilotStatus());
-          return json(res, 200, { ok: true, person });
-        } catch (error) {
-          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
-        }
-      }
-      if (identityAssetMatch && method === 'DELETE') {
-        try {
-          const body = await readBody(req);
-          if (body.confirm !== true) return json(res, 409, { error: '删除人物需要显式确认' });
-          if (!assetObserver.deleteIdentity(identityAssetMatch[1])) {
-            return json(res, 404, { error: '人物不存在' });
-          }
-          emit('asset-update', { kind: 'identities', action: 'delete', id: identityAssetMatch[1] });
-          emit('identity-pilot-update', identityPilotStatus());
-          return json(res, 200, { ok: true });
-        } catch (error) {
-          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/assets/memory' && method === 'GET') {
-        return json(res, 200, assetObserver.memorySummary({
-          query: url.searchParams.get('query') || ''
-        }));
-      }
-      if (pathname === '/api/assets/memory' && method === 'POST') {
-        try {
-          const entry = assetObserver.addMemory(await readBody(req));
-          await refreshIdentityAfterAssetMutation();
-          emit('memory-update', { chatKey: String(entry.chatKey || '') });
-          emit('asset-update', { kind: 'memory', action: 'create' });
-          return json(res, 201, { ok: true, entry });
-        } catch (error) {
-          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
-        }
-      }
-      if (pathname === '/api/assets/memory' && method === 'PUT') {
-        try {
-          const body = await readBody(req);
-          const member = assetObserver.updateMemory(body);
-          await refreshIdentityAfterAssetMutation();
-          emit('memory-update', { chatKey: String(body.chatKey || '') });
-          emit('asset-update', { kind: 'memory', action: 'update' });
-          return json(res, 200, { ok: true, member });
-        } catch (error) {
-          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
-        }
-      }
-      if (pathname === '/api/assets/memory' && method === 'DELETE') {
-        try {
-          const body = await readBody(req);
-          if (body.confirm !== true) return json(res, 409, { error: '删除记忆需要显式确认' });
-          if (!assetObserver.deleteMemory(body)) return json(res, 404, { error: '记忆不存在' });
-          await refreshIdentityAfterAssetMutation();
-          emit('memory-update', { chatKey: String(body.chatKey || '') });
-          emit('asset-update', { kind: 'memory', action: 'delete' });
-          return json(res, 200, { ok: true });
-        } catch (error) {
-          return json(res, error?.httpStatus || 400, { error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/qzone-interactions/run' && method === 'POST') {
-        const body = await readBody(req);
-        if (body.confirm !== true) {
-          return json(res, 409, { error: '手动执行动态互动需要显式确认' });
-        }
-        try {
-          return json(res, 200, await qzoneInteractions.runNow(String(body.kind || 'all')));
-        } catch (error) {
-          return json(
-            res,
-            error.httpStatus || (error.code === 'TIME_CONTROL_INACTIVE' ? 409 : 500),
-            { error: String(error?.message ?? error), code: error.code || '' }
-          );
-        }
-      }
-
-      if (pathname === '/api/time-control/status' && method === 'GET') {
-        const now = Date.now();
-        const keys = [...new Set([
-          ...store.listChats(),
-          ...(cfgNow.allow?.groups || []).map((id) => `group:${id}`),
-          ...(cfgNow.allow?.private || []).map((id) => `private:${id}`),
-          ...Object.keys(cfgNow.timeControl?.overrides || {})
-        ])];
-        return json(res, 200, {
-          timeZone: TIME_ZONE, now,
-          global: timeControlState(cfgNow.timeControl, '', now),
-          chats: keys.map((chatKey) => ({
-            chatKey, ...timeControlState(cfgNow.timeControl, chatKey, now)
-          }))
-        });
-      }
-
-      if (pathname === '/api/daily-moments/run' && method === 'POST') {
-        const body = await readBody(req);
-        if (body.publish === true && body.confirm !== true) {
-          return json(res, 409, { error: '发布说说需要显式确认' });
-        }
-        try {
-          const result = await dailyMoments.runNow({
-            ...(body.dayKey ? { dayKey: String(body.dayKey) } : {}),
-            publish: body.publish === true,
+  router.add('DELETE', /^\/api\/persona-templates\/(custom_\d+)$/, async (req, res, params) => {
+    const idx = Number(params[1].replace('custom_', ''));
+    const next = (getConfig().customPersonas || []).filter((_, i) => i !== idx);
+    updateConfig({ customPersonas: next });
+    return json(res, 200, { ok: true });
+  });
+  router.add('GET', /^\/api\/incidents\/(inc_[a-f0-9]{16})$/i, async (req, res, params) => {
+    const incident = incidentPilot?.get(params[1]);
+    return incident
+      ? json(res, 200, { incident })
+      : json(res, 404, { error: '异常日志不存在' });
+  });
+  router.add('DELETE', /^\/api\/incidents\/(inc_[a-f0-9]{16})$/i, async (req, res, params) => {
+    const body = await readBody(req);
+    if (body.confirm !== true) {
+      return json(res, 409, { error: '删除异常日志需要显式确认' });
+    }
+    try {
+      return incidentPilot?.delete(params[1])
+        ? json(res, 200, { ok: true })
+        : json(res, 404, { error: '异常日志不存在' });
+    } catch (error) {
+      return json(res, error?.httpStatus || 409, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', /^\/api\/identity-pilot\/friend-proposals\/(fp_[a-f0-9]{12})\/decision$/i, async (req, res, params) => {
+    if (!identityPilot?.active || getConfig().identityPilot?.friendProposal?.enabled !== true) {
+      return json(res, 409, { error: '主动好友候选功能未启用' });
+    }
+    const body = await readBody(req);
+    if (!['approve', 'reject'].includes(body.decision)) {
+      return json(res, 400, { error: 'decision 必须是 approve 或 reject' });
+    }
+    try {
+      const result = await identityPilot.decideFriendProposal(
+        params[1],
+        body.decision,
+        { decidedBy: 'console' }
+      );
+      emit('identity-pilot-update', identityPilot.status());
+      return json(res, 200, result);
+    } catch (error) {
+      return json(res, 409, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', /^\/api\/daily-moments\/records\/([\w-]+)\/(publish|reconcile|resolve)$/, async (req, res, params) => {
+    const body = await readBody(req);
+    if (params[2] === 'publish' && body.confirm !== true) {
+      return json(res, 409, { error: '发布草稿需要显式确认' });
+    }
+    if (params[2] === 'resolve' && body.confirm !== true) {
+      return json(res, 409, { error: '人工核对结果需要显式确认' });
+    }
+    try {
+      const result = params[2] === 'publish'
+        ? await dailyMoments.publishDraft(params[1], {
             force: body.force === true,
             confirmDuplicateRisk: body.confirmDuplicateRisk === true
-          });
-          return json(res, 200, result);
-        } catch (error) {
-          return json(res, error.httpStatus || (error.code === 'TIME_CONTROL_INACTIVE' ? 409 : 500), {
-            error: String(error?.message ?? error), code: error.code || ''
-          });
-        }
-      }
-
-      const momentAction = /^\/api\/daily-moments\/records\/([\w-]+)\/(publish|reconcile|resolve)$/.exec(pathname);
-      if (momentAction && method === 'POST') {
-        const body = await readBody(req);
-        if (momentAction[2] === 'publish' && body.confirm !== true) {
-          return json(res, 409, { error: '发布草稿需要显式确认' });
-        }
-        if (momentAction[2] === 'resolve' && body.confirm !== true) {
-          return json(res, 409, { error: '人工核对结果需要显式确认' });
-        }
-        try {
-          const result = momentAction[2] === 'publish'
-            ? await dailyMoments.publishDraft(momentAction[1], {
-                force: body.force === true,
-                confirmDuplicateRisk: body.confirmDuplicateRisk === true
-              })
-            : momentAction[2] === 'resolve'
-              ? await dailyMoments.resolveRecord(momentAction[1], { result: body.result })
-              : await dailyMoments.reconcile(momentAction[1]);
-          return json(res, 200, result);
-        } catch (error) {
-          return json(res, error.httpStatus || (error.code === 'TIME_CONTROL_INACTIVE' ? 409 : 500), {
-            error: String(error?.message ?? error), code: error.code || ''
-          });
-        }
-      }
-
-      if (pathname === '/api/models' && method === 'GET') {
-        try {
-          const models = await listModels();
-          return json(res, 200, { models });
-        } catch (error) {
-          return json(res, 502, { error: String(error?.message ?? error) });
-        }
-      }
-
-      if (pathname === '/api/sessions' && method === 'GET') {
-        // 上限 2^20（Kondius 钦定 1048576）：约等于不限，但拦得住真正的失控请求。
-        // 前端靠分页（一次渲染 50 条）避免卡顿，后端不截断。
-        const limit = Math.min(1048576, Math.max(1, Number(url.searchParams.get('limit')) || 1048576));
-        const now = Date.now();
-        const threadCache = new Map();
-        return json(res, 200, {
-          sessions: sessions.listSummaries(limit)
-            .map((session) => buildSessionView(session, store, { now, threadCache }))
-        });
-      }
-
-      const sessionMatch = /^\/api\/sessions\/([\w-]+)$/.exec(pathname);
-      if (sessionMatch && method === 'GET') {
-        const s = sessions.get(sessionMatch[1]);
-        if (!s) return json(res, 404, { error: '会话不存在' });
-        return json(res, 200, buildSessionView(s, store));
-      }
-
-      if (pathname === '/api/chats' && method === 'GET') {
-        const chats = store.listChats().map((key) => {
-          const meta = store.getChatMeta(key);
-          return {
-            key,
-            ...meta,
-            incidentControl: incidentPilot?.getChatControl(key) || null,
-            incidentDecision: incidentPilot?.chatDecision(key, meta) || null,
-            ...(cfgNow.timeControl?.enabled
-              ? { timeControl: timeControlState(cfgNow.timeControl, key) } : {})
-          };
-        })
-          .sort((a, b) => b.lastTs - a.lastTs);
-        // 附带群名，让 UI 能显示"群名（群号）"。
-        // 群名要调 OneBot 拿，可能慢或失败 —— 用 allSettled 保证绝不影响主流程：
-        // 拿不到的 chatName 为空，UI 自动退回只显示群号。
-        await Promise.allSettled(chats.map(async (c) => {
-          const m = /^group:(\d+)$/.exec(String(c.key || ''));
-          if (!m) { c.chatName = ''; return; }
-          try {
-            c.chatName = await Promise.race([
-              orchestrator.getChatName(m[1]),
-              new Promise((r) => setTimeout(() => r(''), 3000))   // 3s 超时保护
-            ]) || '';
-          } catch { c.chatName = ''; }
-        }));
-        return json(res, 200, { chats });
-      }
-
-      // 记忆文件列表（记忆页签）：白名单里的每个群都显示，含无记忆的
-      if (pathname === '/api/memory-files' && method === 'GET') {
-        const files = memory.listChats().map((chatKey) => {
-          const members = memory.members(chatKey);
-          const handoff = memory.getHandoff(chatKey);
-          const impressionCount = members.reduce((n, m) => n + m.impressions.length, 0);
-          return {
-            chatKey,
-            impressionCount,
-            memberCount: members.length,
-            hasHandoff: Boolean(handoff),
-            handoffExpiresAt: handoff?.expiresAt || 0,
-            updatedAt: Math.max(
-              Number(handoff?.updatedAt) || 0,
-              0,
-              ...members.map((m) => Number(m.updatedAt) || 0)
-            )
-          };
-        });
-        // 白名单里的群没有记忆也要显示
-        const seen = new Set(files.map((f) => f.chatKey));
-        // 补上白名单里还没有记忆的会话（缺字段也要有默认值，前端统一处理）
-        for (const gid of (getConfig().allow?.groups || [])) {
-          const key = `group:${String(gid)}`;
-          if (!seen.has(key)) {
-            files.push({
-              chatKey: key, impressionCount: 0, memberCount: 0,
-              hasHandoff: false, handoffExpiresAt: 0, updatedAt: 0, consolidating: false
-            });
-          }
-        }
-        for (const uid of (getConfig().allow?.private || [])) {
-          const key = `private:${String(uid)}`;
-          if (!seen.has(key)) {
-            files.push({
-              chatKey: key, impressionCount: 0, memberCount: 0,
-              hasHandoff: false, handoffExpiresAt: 0, updatedAt: 0, consolidating: false
-            });
-          }
-        }
-        // 带上"正在整理"状态：切页签后前端靠它恢复提示，
-        // 否则用户切走再切回，完全看不出整理是在跑还是已经中断。
-        const busy = orchestrator.consolidating;
-        for (const f of files) f.consolidating = busy.has(f.chatKey);
-        files.sort((a, b) => b.updatedAt - a.updatedAt);
-        return json(res, 200, { files, consolidating: [...busy] });
-      }
-
-      const memoryFileMatch = /^\/api\/memory-files\/(group|private)_(\d+)$/.exec(pathname);
-      if (memoryFileMatch && method === 'GET') {
-        const chatKey = `${memoryFileMatch[1]}:${memoryFileMatch[2]}`;
-        return json(res, 200, {
-          ...memory.query(chatKey),
-          members: memory.members(chatKey),
-          handoff: memory.getHandoff(chatKey)
-        });
-      }
-
-      const memoryHandoffMatch = /^\/api\/memory-files\/(group|private)_(\d+)\/handoff$/.exec(pathname);
-      if (memoryHandoffMatch && method === 'PUT') {
-        const chatKey = `${memoryHandoffMatch[1]}:${memoryHandoffMatch[2]}`;
-        const body = await readBody(req).catch(() => ({}));
-        try {
-          const handoff = memory.setHandoff(chatKey, body, { sourceSessionId: 'console' });
-          emit('memory-update', { chatKey, phase: handoff ? 'handoff-update' : 'handoff-clear' });
-          return json(res, 200, { ok: true, handoff });
-        } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-      if (memoryHandoffMatch && method === 'DELETE') {
-        const chatKey = `${memoryHandoffMatch[1]}:${memoryHandoffMatch[2]}`;
-        memory.clearHandoff(chatKey);
-        emit('memory-update', { chatKey, phase: 'handoff-clear' });
-        return json(res, 200, { ok: true });
-      }
-
-      // 按 QQ 号**全局**删除此人的人物记忆（人物库页「删除全部人物记忆」用）：
-      // 空 chatKey = 该 QQ 在所有会话的印象一起删（删前留快照，可回滚）。
-      // 旧的 /api/memory-files/<chat>/members/<uid> 语义是"只清这个来源"，两者别混用。
-      const memoryMemberGlobalMatch = /^\/api\/memory-files\/global\/members\/(\d{1,15})$/.exec(pathname);
-      if (memoryMemberGlobalMatch && method === 'DELETE') {
-        // 破坏性操作统一 confirm 门槛（与全站口径一致）：global 版跨所有会话删除。
-        const body = await readBody(req).catch(() => ({}));
-        if (body?.confirm !== true) return json(res, 409, { ok: false, error: '删除全部人物记忆需要 body.confirm === true' });
-        const removed = memory.removeMember('', memoryMemberGlobalMatch[1]);
-        emit('memory-update', { chatKey: '' });
-        return json(res, 200, { ok: true, removed });
-      }
-
-      // 手动编辑某个群友的印象（PUT 编辑：QQ号必填，备注可同步保存 / DELETE 删除成员文件）
-      const memoryMemberMatch = /^\/api\/memory-files\/(group|private)_(\d+)\/members\/(\d+)$/.exec(pathname);
-      if (memoryMemberMatch && method === 'PUT') {
-        const chatKey = `${memoryMemberMatch[1]}:${memoryMemberMatch[2]}`;
-        const body = await readBody(req).catch(() => ({}));
-        try {
-          const member = memory.editMemberImpression(chatKey, {
-            userId: memoryMemberMatch[3],
-            name: String(body.name ?? ''),
-            note: body.note ?? '',
-            impressions: body.impressions ?? []
-          });
-          emit('memory-update', { chatKey });
-          return json(res, 200, { ok: true, member });
-        } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-      if (memoryMemberMatch && method === 'DELETE') {
-        // 同上：删除成员印象也要 confirm（该路径的快照对 name-only 成员缺位，误删更难恢复）。
-        const body = await readBody(req).catch(() => ({}));
-        if (body?.confirm !== true) return json(res, 409, { ok: false, error: '删除成员印象需要 body.confirm === true' });
-        const chatKey = `${memoryMemberMatch[1]}:${memoryMemberMatch[2]}`;
-        memory.removeMember(chatKey, memoryMemberMatch[3]);
-        emit('memory-update', { chatKey });
-        return json(res, 200, { ok: true });
-      }
-
-      // 手动整理某个群的记忆：遍历聊天记录中出现的成员，逐人整理直到收敛
-      if (pathname === '/api/memory-files/consolidate' && method === 'POST') {
-        try {
-          const body = await readBody(req).catch(() => ({}));
-          const chatKey = String(body.chatKey || '');
-          if (!/^(group|private):\d+$/.test(chatKey)) return json(res, 400, { ok: false, error: 'chatKey 格式错误' });
-
-          // 可选：只整理指定的群友（QQ 号数组）。不传 = 整理全群。
-          // 传了但记忆里还没有此人时，会从聊天记录里新建印象。
-          let userIds = null;
-          if (body.userIds != null) {
-            const arr = Array.isArray(body.userIds) ? body.userIds : [body.userIds];
-            userIds = arr.map((u) => String(u ?? '').trim()).filter((u) => /^\d{1,15}$/.test(u));
-            if (!userIds.length) return json(res, 400, { ok: false, error: 'userIds 需为 QQ 号数组' });
-          }
-          // 手动触发：跳过门槛/冷却检查，且对零印象的人启用"新建印象"模式
-          const force = body.force !== false;
-
-          if (orchestrator.consolidating.has(chatKey)) return json(res, 409, { ok: false, error: '该群已在整理中' });
-          orchestrator.consolidating.add(chatKey);
-          emit('memory-update', { chatKey, phase: 'consolidate-start', userIds });
-          orchestrator.consolidateMemoryForChat(chatKey, { userIds, force })
-            .then((result) => {
-              emit('memory-update', { chatKey, phase: 'consolidate-done', ...(result || {}) });
-            })
-            .catch((error) => {
-              emit('memory-update', { chatKey, phase: 'consolidate-error', error: String(error?.message ?? error) });
-            })
-            .finally(() => orchestrator.consolidating.delete(chatKey));
-          return json(res, 202, { ok: true, started: true });
-        } catch (error) {
-          return json(res, 400, { ok: false, error: String(error?.message ?? error) });
-        }
-      }
-
-      const chatMsgMatch = /^\/api\/chats\/(group|private)_(\d+)\/messages$/.exec(pathname);
-      if (chatMsgMatch && method === 'GET') {
-        const chatKey = `${chatMsgMatch[1]}:${chatMsgMatch[2]}`;
-        // 单群消息上限 2^20（Kondius 钦定）：约等于不限，存档一口气全给
-        const limit = Math.min(1048576, Math.max(1, Number(url.searchParams.get('limit')) || 1048576));
-        const messages = store.recent(chatKey, { limit }).map((m) => ({
-          id: m.id, mid: m.mid, ts: m.ts, senderId: m.senderId, senderName: m.senderName,
-          // 与提示词同一套渲染：正文缺引用块时补上（回复 + 合并转发卡片那类记录）
-          text: textWithQuote(m), self: m.self, read: m.read, reply: m.reply,
-          media: m.media || []
-        }));
-        return json(res, 200, { chatKey, messages });
-      }
-
-      // 群成员列表（OneBot get_group_member_list），用于备注与记忆页成员展示
-      const groupMembersMatch = /^\/api\/groups\/(\d+)\/members$/.exec(pathname);
-      if (groupMembersMatch && method === 'GET') {
-        try {
-          const list = await onebot.call('get_group_member_list', { group_id: Number(groupMembersMatch[1]) });
-          const members = (Array.isArray(list) ? list : (list?.data ?? []))
-            .map((m) => ({ userId: String(m.user_id), nickname: String(m.nickname || ''), card: String(m.card || '') }))
-            .sort((a, b) => String(a.card || a.nickname).localeCompare(String(b.card || b.nickname), 'zh-CN'));
-          return json(res, 200, { members });
-        } catch (error) {
-          return json(res, 502, { error: String(error?.message ?? error) });
-        }
-      }
-
-      const chatWakeMatch = /^\/api\/chats\/(group|private)_(\d+)\/wake$/.exec(pathname);
-      if (chatWakeMatch && method === 'POST') {
-        const chatKey = `${chatWakeMatch[1]}:${chatWakeMatch[2]}`;
-        const result = orchestrator.requestManualWake(chatKey);
-        return json(res, result.ok ? 202 : 409, result);
-      }
-
-      const chatThreadMatch = /^\/api\/chats\/(group|private)_(\d+)\/thread$/.exec(pathname);
-      if (chatThreadMatch && method === 'GET') {
-        const chatKey = `${chatThreadMatch[1]}:${chatThreadMatch[2]}`;
-        return json(res, 200, {
-          chatKey,
-          mode: conversationConfigForChat(chatKey).mode,
-          thread: store.getConversationThread(chatKey),
-          checkpoint: store.latestThreadCheckpoint(chatKey)
-        });
-      }
-      if (chatThreadMatch && method === 'DELETE') {
-        const chatKey = `${chatThreadMatch[1]}:${chatThreadMatch[2]}`;
-        const closed = store.closeConversationThread(chatKey, 'operator');
-        emit('chat-update', chatKey);
-        return json(res, 200, { ok: true, closed });
-      }
-
-      // 手动发一条测试消息（不走模型，直接经 OneBot 发出，用于配置后验证链路）
-      const chatTestSendMatch = /^\/api\/chats\/(group|private)_(\d+)\/test-send$/.exec(pathname);
-      if (chatTestSendMatch && method === 'POST') {
-        const body = await readBody(req);
-        const text = String(body.text ?? '').trim();
-        if (!text) return json(res, 400, { error: '消息内容为空' });
-        try {
-          const chatKey = `${chatTestSendMatch[1]}:${chatTestSendMatch[2]}`;
-          assertCanSend(chatKey);
-          const decision = incidentPilot?.chatDecision(chatKey, store.getChatMeta(chatKey));
-          if (decision && !decision.allowed) {
-            return json(res, 409, { error: decision.reason || '该会话当前被阻塞' });
-          }
-          const data = await sender.sendTextBatch(chatKey, [text]);
-          emit('chat-update', chatKey);
-          return json(res, 200, { ok: true, messageId: data.sent[0]?.messageId ?? null });
-        } catch (error) {
-          return json(res, 502, { error: String(error?.message ?? error) });
-        }
-      }
-
-      const chatReadMatch = /^\/api\/chats\/(group|private)_(\d+)\/mark-read$/.exec(pathname);
-      if (chatReadMatch && method === 'POST') {
-        const chatKey = `${chatReadMatch[1]}:${chatReadMatch[2]}`;
-        const drained = store.drainUnread(chatKey);
-        return json(res, 200, { ok: true, marked: drained.length });
-      }
-
-      if (pathname === '/api/pause' && method === 'POST') {
-        const body = await readBody(req);
-        const wasPaused = orchestrator.paused;
-        orchestrator.setPaused(!!body.paused);
-        if (body.paused) slangPilot?.abortResearch('机器人已暂停');
-        else slangPilot?.resumeQueued();
-        if (wasPaused && !orchestrator.paused && !body.skipBacklog) {
-          // 恢复时自动补处理暂停期间积压的未读消息
-          orchestrator.drainBacklogAfterResume();
-        }
-        return json(res, 200, { ok: true, paused: orchestrator.paused });
-      }
-
-      // 恢复运行，并把所有会话当前未读一次性标记为已读（用户明确选择丢弃积压）
-      if (pathname === '/api/pause' && method === 'DELETE') {
-        orchestrator.setPaused(false);
-        slangPilot?.resumeQueued();
-        const marked = {};
-        for (const chatKey of store.listChats()) {
-          const n = store.drainUnread(chatKey).length;
-          if (n > 0) marked[chatKey] = n;
-        }
-        emit('chat-update', '*');
-        return json(res, 200, { ok: true, paused: false, marked });
-      }
-
-      return json(res, 404, { error: `未知 API：${method} ${pathname}` });
+          })
+        : params[2] === 'resolve'
+          ? await dailyMoments.resolveRecord(params[1], { result: body.result })
+          : await dailyMoments.reconcile(params[1]);
+      return json(res, 200, result);
+    } catch (error) {
+      return json(res, error.httpStatus || (error.code === 'TIME_CONTROL_INACTIVE' ? 409 : 500), {
+        error: String(error?.message ?? error), code: error.code || ''
+      });
     }
+  });
+  router.add('GET', /^\/api\/sessions\/([\w-]+)$/, async (req, res, params) => {
+    const s = sessions.get(params[1]);
+    if (!s) return json(res, 404, { error: '会话不存在' });
+    return json(res, 200, buildSessionView(s, store));
+  });
+
+  router.add('GET', /^\/api\/chats\/(group|private)_(\d+)\/unknown-operations$/, async (req, res, params) => {
+    const key = `${params[1]}:${params[2]}`;
+    return json(res, 200, { operations: store.listUnknownOperations(key) });
+  });
+  router.add('POST', /^\/api\/chats\/(group|private)_(\d+)\/unknown-operations\/([\w-]+)\/reconcile$/, async (req, res, params) => {
+    const body = await readBody(req);
+    if (body.confirm !== true || !['sent', 'failed'].includes(body.result)) {
+      return json(res, 409, { error: '核对未知写入需要明确结果和确认' });
+    }
+    const key = `${params[1]}:${params[2]}`;
+    try {
+      const result = store.reconcileUnknownOperation(
+        params[3],
+        body.result
+      );
+      if (!result || result.chatKey !== key) {
+        return json(res, 404, { error: '未知写入不存在或已核对' });
+      }
+      emit('chat-update', key);
+      return json(res, 200, { ok: true, result });
+    } catch (error) {
+      return json(res, 409, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', /^\/api\/incidents\/(inc_[a-f0-9]{16})\/(acknowledge|resolve)$/i, async (req, res, params) => {
+    const body = await readBody(req);
+    try {
+      const incident = params[2] === 'acknowledge'
+        ? incidentPilot?.acknowledge(params[1])
+        : incidentPilot?.resolve(params[1], body.resolution);
+      return incident
+        ? json(res, 200, { ok: true, incident })
+        : json(res, 404, { error: '异常日志不存在' });
+    } catch (error) {
+      return json(res, error?.httpStatus || 409, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('GET', /^\/api\/slang-pilot\/discoveries\/(sr_[a-f0-9]{12})$/i, async (req, res, params) => {
+    if (!slangPilot?.active) {
+      return json(res, 409, { error: '黑话语料库试点未启用' });
+    }
+    const discovery = slangPilot.detail(params[1]);
+    return discovery
+      ? json(res, 200, { discovery })
+      : json(res, 404, { error: '黑话发现不存在' });
+  });
+  router.add('POST', /^\/api\/slang-pilot\/discoveries\/(sr_[a-f0-9]{12})\/research-decision$/i, async (req, res, params) => {
+    if (!slangPilot?.active) {
+      return json(res, 409, { error: '黑话语料库试点未启用' });
+    }
+    const body = await readBody(req);
+    if (!['approve', 'reject'].includes(body.decision)) {
+      return json(res, 400, { error: 'decision 必须是 approve 或 reject' });
+    }
+    try {
+      return json(res, 200, slangPilot?.decideResearch(
+        params[1],
+        body.decision,
+        { decidedBy: 'console', expectedVersion: body.expectedVersion }
+      ));
+    } catch (error) {
+      return json(res, 409, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', /^\/api\/slang-pilot\/discoveries\/(sr_[a-f0-9]{12})\/admission-decision$/i, async (req, res, params) => {
+    if (!slangPilot?.active) {
+      return json(res, 409, { error: '黑话语料库试点未启用' });
+    }
+    const body = await readBody(req);
+    if (!['approve', 'reject'].includes(body.decision)) {
+      return json(res, 400, { error: 'decision 必须是 approve 或 reject' });
+    }
+    try {
+      return json(res, 200, slangPilot?.decideAdmission(
+        params[1],
+        body.decision,
+        {
+          decidedBy: 'console',
+          expectedVersion: body.expectedVersion,
+          edits: body.edits || {}
+        }
+      ));
+    } catch (error) {
+      return json(res, 409, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', /^\/api\/identity-pilot\/incoming-friend-requests\/(fr_[a-f0-9]{12})\/decision$/i, async (req, res, params) => {
+    if (
+      !identityPilot?.active
+      || getConfig().identityPilot?.incomingFriendRequest?.enabled !== true
+    ) {
+      return json(res, 409, { error: '入站好友请求审批功能未启用' });
+    }
+    const body = await readBody(req);
+    if (!['approve', 'reject'].includes(body.decision)) {
+      return json(res, 400, { error: 'decision 必须是 approve 或 reject' });
+    }
+    try {
+      const result = await identityPilot.decideIncomingFriendRequest(
+        params[1],
+        body.decision,
+        {
+          decidedBy: 'console',
+          remark: String(body.remark || '')
+        }
+      );
+      emit('identity-pilot-update', identityPilot.status());
+      return json(res, 200, result);
+    } catch (error) {
+      return json(res, error?.httpStatus || 409, {
+        error: String(error?.message ?? error)
+      });
+    }
+  });
+
+  router.add('POST', /^\/api\/slang-pilot\/discoveries\/(sr_[a-f0-9]{12})\/retry$/i, async (req, res, params) => {
+    if (!slangPilot?.active) {
+      return json(res, 409, { error: '黑话语料库试点未启用' });
+    }
+    try {
+      return json(res, 200, slangPilot?.retryResearch(
+        params[1],
+        { decidedBy: 'console' }
+      ));
+    } catch (error) {
+      return json(res, 409, { error: String(error?.message ?? error) });
+    }
+  });
+
+  async function handleHttp(req, res) {
+    // 全部 API 路由都在路由表里；未命中的 /api/ 由表的 fallthrough 回 404（文案与旧一致）
+    if (await router.handle(req, res)) return;
+    const pathname = new URL(req.url, 'http://127.0.0.1').pathname;
 
     // 静态 UI
     if (req.method === 'GET') {
@@ -3817,7 +3628,10 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     stop,
     emit,
     getConfig,
-    updateConfig
+    updateConfig,
+    // 外部模块注册控制台路由的唯一入口（改进方案 #2 / J.1 的例外路由收口）：
+    // 与内部路由共享同一套鉴权（auth 默认 true）、405 与未命中 404 语义。
+    addRoute(method, routePath, handler, opts) { router.add(method, routePath, handler, opts); }
   };
 }
 

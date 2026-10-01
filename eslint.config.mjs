@@ -1,4 +1,4 @@
-// ESLint 9 flat config（改进方案 C1–C3）。
+// ESLint flat config（改进方案 C1–C3；devDependencies 实际版本见 package.json，当前 ^10）。
 // 作用域：src/scripts = node ESM；test = node ESM（node:test 是 import 不是全局）；
 // ui = classic script 的浏览器环境（无 import/export，sourceType 必须是 script）。
 // tools/ 与 data/ 是本地未跟踪目录，不进 lint。
@@ -28,6 +28,9 @@ const nodeScope = {
 // 显式声明“这些是有意共享的全局”，而不是豁免规则 —— 改进方案 §1.3 的 25 符号清单。
 // B 档 ESM 化完成后这批声明应随之删除（改为显式 import）。
 const uiSharedGlobals = {
+  // core/api.js 引用它（app.js 顶层 const，经全局词法环境共享）
+  CONSOLE_MARKER: 'readonly',
+  $$: 'readonly',
   state: 'readonly',
   api: 'readonly',
   esc: 'readonly',
@@ -68,5 +71,15 @@ export default [
       globals: { ...globals.browser, ...uiSharedGlobals },
     },
     rules: baseRules,
+  },
+  {
+    // 共享内核/文案表：定义就是给后续 script 用的，单文件视角必然报"未用"——关掉；
+    // max-lines 在此落实（改进方案 #1 A 档第 3 步）：新文件不得超过 1500 行，
+    // 老的 ui/app.js 由"只约束 core/pages/features/i18n"这一范围设计天然豁免。
+    files: ['ui/core/**/*.js', 'ui/i18n/**/*.js'],
+    rules: {
+      'no-unused-vars': 'off',
+      'max-lines': ['warn', { max: 1500 }],
+    },
   },
 ];

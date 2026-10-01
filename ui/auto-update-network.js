@@ -1,27 +1,10 @@
 (() => {
   'use strict';
 
-  const CONSOLE_MARKER = 'qq-agent-console';
   let enhancing = false;
   let scheduled = false;
 
-  async function api(path, options = {}) {
-    const response = await fetch(path, {
-      headers: {
-        'content-type': 'application/json',
-        'x-console-token': CONSOLE_MARKER,
-        ...(options.headers || {})
-      },
-      ...options
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
-    return body;
-  }
 
-  const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[c]));
 
   function validBranch(branch) {
     return /^[A-Za-z0-9._/-]{1,100}$/.test(branch)

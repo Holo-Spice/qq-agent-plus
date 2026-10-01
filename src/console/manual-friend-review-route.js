@@ -1,34 +1,6 @@
-import crypto from 'node:crypto';
-import { getConfig } from '../core/config.js';
 
 const MANUAL_FRIEND_REVIEW_PATH = '/api/identity-pilot/friend-review/manual';
 const MANUAL_ARGUMENT_NORMALIZER = Symbol('manualFriendReviewArgumentNormalizer');
-
-function sameSecret(leftValue, rightValue) {
-  const left = Buffer.from(String(leftValue ?? ''));
-  const right = Buffer.from(String(rightValue ?? ''));
-  return left.length === right.length && crypto.timingSafeEqual(left, right);
-}
-
-function authorize(req) {
-  const token = String(getConfig().server?.token ?? '');
-  const origin = String(req.headers.origin || '');
-  if (origin && origin !== `http://${req.headers.host}` && origin !== `https://${req.headers.host}`) {
-    return false;
-  }
-  if (!token) {
-    return /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(req.headers.host || '');
-  }
-  const url = new URL(req.url, 'http://127.0.0.1');
-  const cookie = String(req.headers.cookie || '')
-    .split(';')
-    .map((value) => value.trim())
-    .find((value) => value.startsWith('qq_agent_token='));
-  const cookieValue = cookie?.slice('qq_agent_token='.length) || '';
-  return sameSecret(req.headers['x-console-token'], token)
-    || sameSecret(url.searchParams.get('token'), token)
-    || sameSecret(cookieValue, encodeURIComponent(token));
-}
 
 async function readJsonBody(req, maxBytes = 32 * 1024) {
   const chunks = [];
@@ -135,10 +107,6 @@ function ensureManualArgumentNormalizer(manager) {
 }
 
 async function handleManualFriendReview(app, req, res) {
-  if (!authorize(req)) {
-    json(res, 401, { error: '未授权' });
-    return;
-  }
   const manager = app.identityPilot;
   if (!manager?.active || typeof manager.manualFriendReview !== 'function') {
     json(res, 409, { error: '主动好友候选功能未启用' });
@@ -159,33 +127,14 @@ async function handleManualFriendReview(app, req, res) {
 }
 
 /**
- * createApp() owns the main HTTP request handler. To keep the large app.js untouched,
- * replace its single request listener with a tiny dispatcher that intercepts only the
- * manual friend-review endpoint and delegates every other request unchanged.
+ * 例外路由收口（改进方案 #2 / J.1）：2026-09-30 起这是往路由表注册的一条普通路由
+ * （此前靠"摘掉 server 的 request 监听再包一层"实现，见 git 历史）。
+ * 鉴权由路由表的 auth 默认 true 统一执行（本文件内的私有 authorize 副本已删）。
  */
 export function installManualFriendReviewRoute(app) {
-  const server = app?.server;
-  if (!server) throw new Error('manual friend review route requires app.server');
-  const existing = server.listeners('request');
-  if (existing.length !== 1) {
-    throw new Error(`expected one HTTP request listener, got ${existing.length}`);
+  if (typeof app?.addRoute !== 'function') {
+    throw new Error('manual friend review route requires app.addRoute（createApp 的路由入口）');
   }
-  const baseHandler = existing[0];
-  server.removeListener('request', baseHandler);
-  server.on('request', (req, res) => {
-    let pathname = '';
-    try {
-      pathname = new URL(req.url, 'http://127.0.0.1').pathname;
-    } catch {
-      return baseHandler(req, res);
-    }
-    if (req.method === 'POST' && pathname === MANUAL_FRIEND_REVIEW_PATH) {
-      handleManualFriendReview(app, req, res).catch((error) => {
-        json(res, 500, { error: String(error?.message ?? error) });
-      });
-      return;
-    }
-    baseHandler(req, res);
-  });
+  app.addRoute('POST', MANUAL_FRIEND_REVIEW_PATH, (req, res) => handleManualFriendReview(app, req, res));
   return app;
 }

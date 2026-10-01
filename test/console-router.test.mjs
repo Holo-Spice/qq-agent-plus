@@ -26,13 +26,14 @@ const makeJson = (res, code, data) => {
   res.end(JSON.stringify(data));
 };
 
-function setup({ authed = true, keyOk = true, apiFallthrough = true } = {}) {
+function setup({ authed = true, keyOk = true, apiFallthrough } = {}) {
   const calls = [];
   const router = createRouter({
     authorize: () => authed,
     json: makeJson,
     keyEndpointAllowed: () => keyOk,
-    apiFallthrough
+    // 不传＝生产默认（终态 false：未命中 /api/ 回 404）；仅显式 true 时走过渡语义
+    ...(apiFallthrough === true ? { apiFallthrough: true } : {})
   });
   return { router, calls };
 }
@@ -57,14 +58,14 @@ test(':param 段匹配：decode 后以命名对象进 params', async () => {
 });
 
 test(':param 不跨段匹配（段数不同即不命中）', async () => {
-  const { router } = setup();
+  const { router } = setup({ apiFallthrough: true });  // 未命中要能被观测为 false（不吃 404 兜底）
   router.add('GET', '/api/chats/:key/wake', async () => {});
   const res = fakeRes();
   assert.equal(await router.handle(fakeReq('/api/chats/a/b/wake'), res), false);
 });
 
 test('RegExp 路径：约束/交替/大小写标志生效，捕获组以数组进 params', async () => {
-  const { router } = setup();
+  const { router } = setup({ apiFallthrough: true });
   let got = null;
   router.add('GET', /^\/api\/incidents\/(inc_[a-f0-9]{16})$/i, async (req, res, params) => {
     got = params; res.writeHead(200); res.end();
@@ -115,22 +116,24 @@ test('路径命中但方法不匹配 → 405 且 Allow 列出已注册方法', a
   assert.equal(res.headers.allow, 'POST, GET');
 });
 
-test('未命中 → 返回 false（交回 if 链/静态兜底，迁移期关键语义）', async () => {
+test('终态默认：未命中的 /api/ 回 404（文案与旧 if 链逐字一致），非 /api/ 交回静态兜底', async () => {
   const { router } = setup();
   router.add('GET', '/api/one', async () => {});
   const res = fakeRes();
-  assert.equal(await router.handle(fakeReq('/api/two'), res), false);
-  assert.equal(await router.handle(fakeReq('/index.html'), res), false);
-  assert.equal(res.statusCode, 0, '不写响应，交回兜底');
+  assert.equal(await router.handle(fakeReq('/api/two'), res), true);
+  assert.equal(res.statusCode, 404);
+  assert.match(res.body, /未知 API：GET \/api\/two/);
+  const res2 = fakeRes();
+  assert.equal(await router.handle(fakeReq('/index.html'), res2), false);
+  assert.equal(res2.statusCode, 0, '非 /api/ 不写响应，交回兜底');
 });
 
-test('apiFallthrough:false（迁移收尾口径）：未命中的 /api/ 回 404，非 /api/ 仍交回', async () => {
-  const { router } = setup({ apiFallthrough: false });
+test('apiFallthrough:true（测试/过渡用）：未命中返回 false 交回调用方', async () => {
+  const { router } = setup({ apiFallthrough: true });
+  router.add('GET', '/api/one', async () => {});
   const res = fakeRes();
-  assert.equal(await router.handle(fakeReq('/api/nope'), res), true);
-  assert.equal(res.statusCode, 404);
-  const res2 = fakeRes();
-  assert.equal(await router.handle(fakeReq('/app.js'), res2), false);
+  assert.equal(await router.handle(fakeReq('/api/two'), res), false);
+  assert.equal(res.statusCode, 0);
 });
 
 test('同路径多方法注册多条：各自独立命中', async () => {
@@ -141,4 +144,29 @@ test('同路径多方法注册多条：各自独立命中', async () => {
   await router.handle(fakeReq('/api/memory-files/group_1'), fakeRes());
   await router.handle(fakeReq('/api/memory-files/group_1', 'PUT'), fakeRes());
   assert.deepEqual(seen, ['GET:group_1', 'PUT:group_1']);
+});
+
+test('鉴权前置：无 token 时"存在路径的错方法"回 401，不是 405（不再泄露 API 面）', async () => {
+  const { router } = setup({ authed: false });
+  router.add('GET', '/api/config', async () => {});
+  router.add('POST', '/api/config', async () => {});
+  const res = fakeRes();
+  assert.equal(await router.handle(fakeReq('/api/config', 'DELETE'), res), true);
+  assert.equal(res.statusCode, 401, '错方法也必须先鉴权');
+  assert.equal(res.headers?.allow, undefined, '401 不带 Allow 头');
+});
+
+test('鉴权前置：无 token 时未知 /api/ 路径回 401，不是 404', async () => {
+  const { router } = setup({ authed: false });
+  const res = fakeRes();
+  assert.equal(await router.handle(fakeReq('/api/no-such'), res), true);
+  assert.equal(res.statusCode, 401);
+});
+
+test('auth:false 的公开端点：错方法回 405 且无需鉴权（/healthz 形态）', async () => {
+  const { router } = setup({ authed: false });
+  router.add('GET', '/healthz', async () => {}, { auth: false });
+  const res = fakeRes();
+  assert.equal(await router.handle(fakeReq('/healthz', 'PUT'), res), true);
+  assert.equal(res.statusCode, 405);
 });

@@ -3,23 +3,9 @@
 // 工具调度器仍处于实验阶段，不占用独立产品页；只在“设置 → 实验功能”里挂一个开关。
 // 关闭时后端直接走 tools-core.js，前端也不触碰正常会话逻辑。
 (function toolSchedulerPilotSettings() {
-  const MARKER = 'qq-agent-console';
   let rendering = false;
   let timer = null;
 
-  async function api(path, options = {}) {
-    const response = await fetch(path, {
-      headers: {
-        'content-type': 'application/json',
-        'x-console-token': MARKER,
-        ...(options.headers || {})
-      },
-      ...options
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    return data;
-  }
 
   const clampParallel = (value) => Math.min(8, Math.max(2, Number(value) || 4));
 

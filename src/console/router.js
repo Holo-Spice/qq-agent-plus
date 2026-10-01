@@ -9,7 +9,9 @@
 //   - path 支持三种形态：字面量 '/api/x'；带 ':param' 的路径（按段匹配，decode 后进 params）；
 //     **RegExp**（捕获组以数组进 params —— 现有 28 处正则路由靠它安放：约束/交替/大小写标志
 //     是 ':param' 表达不了的）
-//   - opts.auth       默认 true；false 仅限 /healthz、/api/login、/api/events 三处
+//   - opts.auth       默认 true；false 仅限 /healthz 与 /api/login 两处。
+//                    SSE（/api/events）**也用默认 true**（旧实现是分支内手写 authorize）——
+//                    不要给它加 auth:false，那会让事件流免鉴权（2026-09-30 审查 P3 修正文案）
 //   - opts.keyEndpoint true 时经 keyEndpointAllowed（明文密钥回读端点专用）
 //   - opts.audit      #5 完成后填动作名（本批只留挂点）
 // - handle(req, res) → true 已处理；false 交回 if 链 / 静态兜底。
@@ -17,13 +19,15 @@
 //   迁移期「未命中的 /api/ 一律 404 不落静态」暂不启用：那会吃掉 if 链里尚未迁移的路由；
 //   等迁移收尾时用 apiFallthrough:false 打开。
 
+// 迁移已完成（2026-09-30）：apiFallthrough 默认 false —— 未命中的 /api/ 一律 404 JSON
+// （与旧 if 链尾部的文案逐字一致），不落静态服务。deps.apiFallthrough 仅作测试/过渡用。
 export function createRouter(deps = {}) {
   // 显式取别名而不是解构参数：ops.js 的未定义调用扫描器不认识解构参数，
   // 会把 authorize(...) 误报成"可疑未定义调用"（CI 门禁 --strict 会红）。
   const authorize = deps.authorize;
   const json = deps.json;
   const keyEndpointAllowed = deps.keyEndpointAllowed || (() => true);
-  const apiFallthrough = deps.apiFallthrough !== false;
+  const apiFallthrough = deps.apiFallthrough === true;
   const routes = [];
 
   function add(method, path, handler, opts = {}) {
@@ -64,32 +68,44 @@ export function createRouter(deps = {}) {
     const url = new URL(req.url, 'http://127.0.0.1');
     const pathname = url.pathname;
     const method = String(req.method || 'GET').toUpperCase();
-    const allowed = new Set();
+
+    // 先做完整匹配收集：**405/404 也必须先过鉴权**。旧的 /api/ 总闸是"先 authorize
+    // 再看路径"，无 token 时任何 /api/* 都是 401；若让 405/404 绕过鉴权，未授权者就能
+    // 用 404/405/401 三态区分出"路径不存在 / 存在且支持这些方法（Allow 头）/ 存在且方法正确"
+    // —— 等于一份 API 面清单（2026-09-30 外部审查 P2，已核实并修复）。
+    const matched = [];
     for (const route of routes) {
-      const { matched, params } = matchPath(route, pathname);
-      if (!matched) continue;
-      allowed.add(route.method);
-      if (route.method !== method) continue;
-      if (route.auth && !authorize(req)) {
-        json(res, 401, { error: '未授权' });
-        return true;
-      }
-      if (route.keyEndpoint && !keyEndpointAllowed(req)) {
+      const { matched: hit, params } = matchPath(route, pathname);
+      if (hit) matched.push({ route, params });
+    }
+    // 鉴权前置：路径命中且候选里有要求鉴权的路由，或（无命中时）/api/ 前缀本身，都先过 authorize
+    const needsAuth = matched.length
+      ? matched.some(({ route }) => route.auth)
+      : pathname.startsWith('/api/');
+    if (needsAuth && !authorize(req)) {
+      json(res, 401, { error: '未授权' });
+      return true;
+    }
+
+    const hit = matched.find(({ route }) => route.method === method);
+    if (hit) {
+      if (hit.route.keyEndpoint && !keyEndpointAllowed(req)) {
         json(res, 403, { error: '请求来源不被信任，已拒绝读取明文密钥。' });
         return true;
       }
-      await route.handler(req, res, params, url);   // 异常冒泡给 createServer 的统一处理（记 incident + 500）
+      await hit.route.handler(req, res, hit.params, url);   // 异常冒泡给 createServer 的统一处理（记 incident + 500）
       return true;
     }
-    if (allowed.size > 0) {
+    if (matched.length > 0) {
       // 路径命中但方法不匹配：405（附录 J.1 拍板；旧的 if 链形态这里会落空成 404）
-      res.writeHead(405, { 'content-type': 'application/json; charset=utf-8', allow: [...allowed].join(', ') });
+      const allow = [...new Set(matched.map(({ route }) => route.method))].join(', ');
+      res.writeHead(405, { 'content-type': 'application/json; charset=utf-8', allow });
       res.end(JSON.stringify({ error: `方法不允许：${method}` }));
       return true;
     }
     if (!apiFallthrough && pathname.startsWith('/api/')) {
-      // 迁移收尾后才启用：未命中的 /api/ 一律 404 JSON，不落静态服务（防路径探测泄漏文件）
-      json(res, 404, { error: '未找到接口' });
+      // 与旧 if 链尾部逐字一致的文案（前端/脚本按它判"接口不存在"）
+      json(res, 404, { error: `未知 API：${req.method || 'GET'} ${pathname}` });
       return true;
     }
     return false;

@@ -1,8 +1,6 @@
 // QQ Agent 控制台前端：会话式（每次运行 = 一个会话）。
 'use strict';
 
-const $ = (sel, root = document) => root.querySelector(sel);
-const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 // 列表分页：一次渲染多少条 / 滚到底部再追加多少条
 const SESSION_PAGE = 50;      // 会话页：一次渲染多少条
@@ -138,7 +136,6 @@ const USAGE_RANGES = [
   ['all', '全部']
 ];
 
-const CONSOLE_MARKER = 'qq-agent-console';
 
 /* ══════════════════════════════════════════════════════════════
    主题（明/暗/系统）
@@ -192,24 +189,6 @@ function cycleTheme() {
     .catch(() => { /* 后端不可达时静默：localStorage 已经生效 */ });
 }
 
-async function api(path, options = {}) {
-  const res = await fetch(path, {
-    headers: {
-      'content-type': 'application/json',
-      'x-console-token': CONSOLE_MARKER,
-      ...(options.headers || {})
-    },
-    ...options
-  });
-  const data = await res.json().catch(() => ({}));
-  if (res.status === 401) {
-    const dialog = $('#console-login');
-    if (dialog && !dialog.open) dialog.showModal();
-    $('#loading-overlay')?.classList.add('hidden');
-  }
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-  return data;
-}
 
 function askForConfirmation(message) {
   return new Promise((resolve) => {
@@ -266,9 +245,6 @@ function fmtClock(ts) {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-function esc(s) {
-  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
 
 const STATUS_LABEL = { waiting: '等待中', done: '已发言', noreply: '未回复', running: '运行中', error: '出错', aborted: '中止' };
 const CONVERSATION_MODE_LABEL = { legacy: '传统触发', threaded: '参与者续接', lifecycle: '完整生命周期' };

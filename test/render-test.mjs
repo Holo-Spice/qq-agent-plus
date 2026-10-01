@@ -138,6 +138,12 @@ const results = [];
 
 try {
   const ctx = vm.createContext(sandbox);
+  // core 两个共享内核文件必须在 app.js 之前进同一沙箱（改进方案 #1 A 档：$/$$/esc/api
+  // 的单一实现在 ui/core/ 下；app.js 里已删除本地定义，缺了会在运行时 ReferenceError）
+  for (const coreFile of ['ui/core/dom.js', 'ui/core/api.js']) {
+    const coreCode = fs.readFileSync(path.join(ROOT, coreFile), 'utf8');
+    new vm.Script(coreCode, { filename: coreFile }).runInContext(ctx);
+  }
   // 用 Script 执行（app.js 是普通脚本，非 module）
   new vm.Script(code, { filename: SRC }).runInContext(ctx);
 

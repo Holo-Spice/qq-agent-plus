@@ -3,26 +3,12 @@
 // 关系状态 V1：只在“设置 → 实验功能”里出现。V1 永远是 Shadow Mode：
 // 可以评估并记录，但绝不改变主聊天 prompt / 回复策略。
 (function relationshipPilotSettings() {
-  const MARKER = 'qq-agent-console';
   let rendering = false;
   let timer = null;
   let refreshTimer = null;
   let saveQueue = Promise.resolve();
   let saveVersion = 0;
 
-  async function api(path, options = {}) {
-    const response = await fetch(path, {
-      headers: {
-        'content-type': 'application/json',
-        'x-console-token': MARKER,
-        ...(options.headers || {})
-      },
-      ...options
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    return data;
-  }
 
   const clamp = (value, min, max, fallback) => Math.min(
     max,
@@ -35,9 +21,6 @@
     return signed && scaled > 0 ? `+${scaled}` : String(scaled);
   };
 
-  const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[c]));
 
   function settingsOf(config = {}) {
     const raw = config.relationshipPilot || {};

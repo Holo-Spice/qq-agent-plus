@@ -1,14 +1,10 @@
 'use strict';
 
 (function globalPersonMemoryConsole() {
-  const MARKER = 'qq-agent-console';
   let people = [];
   let selectedKey = '';
   let loadSeq = 0;
 
-  const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[c]));
 
   const fmtTime = (ts) => {
     const n = Number(ts) || 0;
@@ -18,19 +14,6 @@
     return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   };
 
-  async function api(path, options = {}) {
-    const response = await fetch(path, {
-      headers: {
-        'content-type': 'application/json',
-        'x-console-token': MARKER,
-        ...(options.headers || {})
-      },
-      ...options
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    return data;
-  }
 
   function ensureStyle() {
     if (document.getElementById('global-memory-style')) return;
