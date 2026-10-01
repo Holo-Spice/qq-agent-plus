@@ -48,7 +48,74 @@
 | 省 Token 模式 | `src/core/token-saver.js`（新增）、`src/core/config-legacy.js`、`src/llm/prompt.js`、`src/core/orchestrator.js`、`src/memory/memory-global.js`、`src/features/daily-moments.js`、`src/features/qzone-interactions.js`、`ui/app.js`、`src/console/app.js` | 「设置 -> 省 Token」三档，只给上下文档位条数、单次运行轮数与预算、交接/印象注入字符数、表情清单条数**夹上限**，不改写用户设置；关掉即恢复原样 | 本仓库新增 |
 | 关闭上游调试探针 | `src/*.js`、`ui/*.js` | 上游作者留在源码里的调试上报（指向其开发机私网地址）全部关掉 | `apply-disable-upstream-debug.sh` |
 
-## 0. 群游戏、语音回复多供应商、定时提醒与群日报（v0.7.5 起）
+## 0. 架构拆分、图片生成与三轮审查修复（v0.7.6 起）
+
+这一版是 v0.7.5 之后的收口：控制台 UI 结构性拆分并全量转 ES module、加入图片生成与完整的密钥控制，
+外加三轮对抗性审查的修复；同时让 WS 客户端兼容不回应 PING 的 NapCat 协议端。
+
+- **图片生成 `generate_image`（Issue #21）**：`src/llm/image-gen.js`、`src/llm/image-gen-presets.js`（新增）、
+  `src/core/image-type.js`（新增）、`src/core/quota.js`、`src/core/config-legacy.js`、`src/tools/tools-core.js`、
+  `src/console/app.js`、`ui/pages/*`、`docs/CONFIG-EXAMPLES.md`。
+  失败模式：原先只会"收图、发图"，不会画。现行做法：`generate_image` 工具（OpenAI 兼容
+  `POST {baseUrl}/images/generations` 与 Pollinations 的 `GET /prompt/<提示词>` 两种请求形状），生成的图落进
+  表情库后用现成的 `send_sticker` 发出。**内置服务预设**（`GET /api/imagegen/presets`）：Pollinations（免 Key）、
+  智谱 CogView-3-Flash、硅基流动、魔搭、自定义 —— 免 Key 那家把 Key 栏置灰、鉴权守卫按预设放行且不发
+  `Authorization`，402/429 翻译成"被限流 + 稍后再试或换一家"。三条硬约束：**Key 归属守卫**（跨域拒绝复用
+  模型 Key，`imageGenKeyHost` 记主机、同域才复用且不回显模型 Key）、**唯一成本闸门** `maxPerHour`（默认 6）、
+  **不发 `response_format`**。画图额度改为**事前原子 `tryConsume` + 失败 `refund`**：并发同毫秒、小时边界、
+  prune 之后退款三条边界都推演过。预览 MIME 不再写死 png，按实际字节（智谱回 JPEG）；生成耗时实测 8~9 秒 /
+  1024×1024（国内厂商按标识办法统一带"AI 生成"水印）。
+- **控制台：密钥控制补齐与两处对齐根因**：`ui/pages/key-toggles.js`（新增）、`ui/pages/settings*.js`、
+  `ui/core/dom-util.js`、`ui/style.css`。
+  失败模式：① 需要按密钥控制的地方没控件（生图 Key 只有单向「显示」、语音回复/语音转文字/OneBot 两个令牌
+  完全没有）→ 统一成 15 个密钥/令牌的「显示/隐藏」，明文只走各自的受守卫端点，OneBot 令牌的"保持不变"是
+  留空（不是 `******`）；「显示」取明文**成功之后**才翻按钮状态，失败保持原样并把原因写进提示，没配提示位的
+  开关也会现挂一个。② 设置页"有些输入框/文字/按钮没对齐"：`.field-row` 的 CSS grid 用 `align-items: end`，
+  同一格里两个字段内容高度不同（单行提示 vs 两行提示）时矮的那格整块被压到底部（实测差 18px，16 个分区
+  36 行里 4 行中招）；`.field label`（0,1,1）压过 `.checkbox-row`（0,1,0）把复选框行压成字段标题样式。
+  两处根因都修掉后 46 个勾选/单选行偏差实测全 0。侧栏品牌行与部署卡片补上版本号显示（`/api/status.version`）。
+- **UI 架构：拆分与 ESM 化**：`ui/app.js`、`ui/core/*`、`ui/pages/*`、`ui/index.html`、`test/render-test.mjs`。
+  `ui/app.js` 13130 → 1019 行（拆出 `core/` 与 `pages/`，`bindSettingsEvents` 按域分四段），`ui/` 全量转
+  ES module（249 条共享全局降到 0），去插件化改为注册表；模块清单在 `ui/index.html` 的
+  `<script type="module">` 里显式列出，由契约用例双向校验（多写、少写都红）。ADR 0001~0005 记录取舍。
+- **静态资源：真 304 + 内容哈希长缓存**（ADR 0001 补记）：`src/console/app.js`、`test/*`。
+  实测证伪了 ADR 原话"静态资源已经解决了缓存问题"——此前只写 ETag、从不判 `If-None-Match`，
+  每开一次控制台都把整套脚本整个重下一遍。现在 `If-None-Match` 命中即 304，下发 `index.html` 时把自家资源
+  改写成 `?v=<内容 sha256 前 12 位>` 并给带令牌的请求长缓存（旧 URL 钉不住旧脚本）。
+- **可观测性与限额（改进方案 #5/#6/#8/#9/#13）**：`src/core/audit-log.js`（新增）、`src/core/logger.js`（新增）、
+  `src/core/budget.js`（新增）、`src/core/quota.js`（新增）、`src/console/app.js`、`ui/pages/*`。
+  审计日志（写盘 0600，每次 append 都 chmod 兜底 btrfs）、结构化日志与 `x-trace-id`、每日预算、配额双闸
+  （内存 + 落盘）、记忆可见性页。
+- **运维与部署加固**：`deploy.sh`、`scripts/auto-update.mjs`、`src/ops.js`、`src/core/health-check.js`。
+  `deploy.sh`：路径嵌套**双向**拒并且判定前用 `realpath -m` 归一化（归一化失败 fail-closed）、临时目录进
+  EXIT trap、抢锁走互斥目录、接管陈旧锁补 5 分钟宽限并在互斥内**再判一次**（顺序：重判 → 删锁 → 重建）、
+  trap 提前到抢锁之前；`auto-update`：空/坏锁宽限、接管原子化、互斥内二次判定、EEXIST 一律算忙碌；
+  巡检两个本机探测加 10 秒超时；审计落盘 0600；备份单元把路径/服务名/保留份数显式带进 `Environment`
+  （值整体加引号）；SSE 事件流加 1MiB 背压上限 + 20 秒共享心跳（`unref` + `stop` 清理）。
+- **三轮对抗性审查的修复**（每条都做了"回退修复即变红"的用例）：
+  - `deploy.sh` 陈旧锁的接管判据整个写反（`-z` 应为 `-n`）：属主已死且确实过期的锁被判成"另一个部署在跑"
+    直接退出（SIGKILL 之后无人值守的自动更新永久卡死），而刚 mkdir 还没写 pid 的并发锁反被抢走；
+  - 每日动态：群聊材料、抓回的网页正文、以及**模型整理的交接字段**（topic/summary/facts/nextStep）
+    全部过 `sanitizeUserText` —— 伪造段头经模型写进交接就能绕过前一处修复直达那条提示词；
+  - 用量页：搜索副行在"有总数、没有工具明细"时不再硬说"只抓了网页"，token 两张卡的主数字与副行补断言；
+  - `ui` 四处：事件流反馈解析加守卫、用量文案去死逻辑、控制中更新检查说明随增量刷新、配置请求走共享 `api()`；
+  - `release.yml` 的**孤儿 step**（只有 `name:`、没有 `run/uses`）会让 GitHub 判整份工作流非法 ——
+    打 tag 时 Release 出不来；已删并新增 `test/workflow-steps.test.mjs` 逐 step 校验；
+  - `ops audit` 的「关键补丁标记」里 `^function normalizeMid` 是 CJS 时代的锚点，对上 ESM 的
+    `export function` 永远不命中（体检常驻一条假 NG）；顺带把整张标记表纳入用例，防标记再随实现漂移。
+- **NapCat 兼容（Issue #22）**：`src/onebot/onebot.js`、`src/core/catchup-policy.js`（新增）。
+  失败模式：NapCat 的 OneBot WS 服务端**不回应 WebSocket PING，而是直接销毁连接**（客户端看到
+  `close code=1006`、全程 0 次 pong）；老实现每 30 秒 ping 一次 → 连接生命周期被压到约 30 秒
+  （每轮 3~4 秒接收盲窗），而 close 回调一行日志都没有，只能靠 catchup 计数反推。
+  现行做法：`onebot.wsHeartbeat: auto|on|off`（默认 auto —— 首次遇到"发 ping 就被断开"的对端后不再发送，
+  改由 close/error 事件发现断线；会回 pong 的对端行为不变）；断开与重连都留日志；
+  补课日志把"只补记录、不回复"的条数写出来，窗口可配（`onebot.catchupReplyWindowMs`，默认 30 分钟，
+  `0` = 一律只补记录）。控制台「设置 → OneBot」有这两个控件。
+- **升级影响**：全部默认值保持 —— 心跳 `auto` 对会回 pong 的协议端与旧行为一致，补课窗口仍是 30 分钟；
+  新增配置键随默认值自动补齐，老配置无需手改；控制台新增「设置 → OneBot」的心跳/补课控件与若干密钥开关。
+  NapCat 用户在默认配置下自愈（进程启动后最多断一次，之后不再发 ping）。
+
+## 1. 群游戏、语音回复多供应商、定时提醒与群日报（v0.7.5 起）
 
 - **群游戏：数字炸弹 / 谁是卧底 / 狼人杀**：`src/features/group-game.js`（新增管理器）、
   `src/features/games/{number-bomb,undercover,werewolf}.js`（新增三个插件）、`src/console/app.js`、
@@ -190,7 +257,7 @@
   窗口内有入站消息且出站超时才失败；窗口内没有入站（或库里根本没有入站记录）记为**静默期**（ok，明细写明各自时间）。
   三处新用例（有入站且超时必红 / 无入站记静默 / 从来没有入站记静默）+ 2 条变异验证（拆掉两个静默期分支，对应用例如期变红）。
 
-## 1. 思考控制与表情匹配（v0.7.4 起）
+## 2. 思考控制与表情匹配（v0.7.4 起）
 
 - **思考控制（按渠道翻译档位、每家独立、可按任务分设）**：`src/core/provider-presets.js`（新增）、
   `src/llm/llm.js`、`src/core/providers.js`、`src/console/app.js`、`ui/app.js`、`src/core/config-legacy.js`。
@@ -230,7 +297,7 @@
   `access_token` / `api_key` 这类带下划线前缀的参数名补进规则（旧规则只认 `?token=` / `?key=`，会漏掉本项目
   OneBot 实际写在查询串上的 `access_token`）。
 
-## 2. 引用、记忆与人设（v0.7.3 起）
+## 3. 引用、记忆与人设（v0.7.3 起）
 
 - **引用块带被引用那条的消息 id**：`src/core/util.js`（`formatQuoteRef` / `quotePrefixFor` / `textWithQuote`）、
   `src/onebot/onebot.js`、`src/llm/prompt.js`、`src/tools/tools-core.js`、`src/console/app.js`。
@@ -267,7 +334,7 @@
   收藏即落盘（`sticker-assets/`），清单标出来源与发送形态（〔QQ收藏表情〕/〔本地图库·发出去是图片〕），
   发送前探活、失效不发并给出可照做的提示；QQ 收藏夹上限 500（非会员）因此本地库保留。
 
-## 3. 语音转写与视频（v0.7.2 起）
+## 4. 语音转写与视频（v0.7.2 起）
 
 - **多供应商语音转写**：`src/llm/asr-openai.js`、`asr-local.js`（本机 whisper.cpp）、`src/llm/seed-asr.js`（火山 Seed-ASR）、
   `asr-dashscope.js`（阿里云百炼）、`asr-baidu.js`、`asr-tencent.js`（TC3 签名）、`asr-iflytek.js`（签名 WSS 分帧）+
@@ -285,14 +352,14 @@
   `src/tools/tools-core.js`（`get_message_images` 按 kind 分流）。失败模式：只采音轨时模型会回"视频只能听声音"
   （用户实测反馈），画面根本没进过模型的眼睛。
 
-## 4. 对话行为
+## 5. 对话行为
 
 - **分条发言（多气泡）**：`src/llm/prompt.js`。失败形态有两种：一是"把想说的全塞进一条长消息"，二是"用空格把两句连成一条"。补丁注释记录，v1 之前实测 90% 的情况只发一条；v2 在尾部加了"别把一轮压成一句点评"，并明确"一轮常见 2-3 条短句、单条多数 ≤30 字、别一口气刷 4 条以上"。配套的 `humanRhythm` / 主体性文本属于上游自带内容，未通过脚本改动。
 - **提示词调优**：`src/llm/prompt.js`、`src/llm/qzone-interaction-prompt.js`。把"被 @ 或直接提问时优先判断是否需要回应"改成"被 @、点名或直接提问时默认要回一句（可以短、可以敷衍、可以怼回去），只有明显与你无关、对方 @ 别人、或纯刷屏误 @ 时才不回"（v0.6.3 起把其中的"可以怼回去"进一步软化为"也可以就回一句不痛不痒的"）；同时统一了"图库可以自己攒"的用法说明。
 - **聊天关思考**：`src/llm/llm.js`、`src/core/orchestrator.js`。聊天主调用传 `purpose:'chat'`，不携带 thinking 字段；判断/写作类调用不传，走 `default:'on'`。配置 `api.thinking = {chat:'off', default:'on'}`；脚本幂等，写配置前才停服务。
 - **看图先读情绪**：`src/llm/prompt.js`、`src/tools/tools-core.js`。模型看表情包/图片时容易去"描述画面"；改成先定性情绪再回话，v2 进一步收紧并给出正反例。顺手修了一个缺失：看库内表情时只给了 `desc`，没给模型自己写的 `localNote`。
 
-## 5. 发送链路健壮性
+## 6. 发送链路健壮性
 
 - **消息 id 归一化**：`src/tools/tools-core.js`、`src/core/store.js`。模型常把提示词里的 `#123` 连 `#` 一起传回来，而 OneBot 只认纯数字 id。关键教训：`tools-core.js` 用到的 `normalizeMid` 必须在同一个文件里定义（`store.js` 里那份是模块私有、没有 export），早先只替换调用点没插 helper，结果每次 `send_message` / `send_sticker` / `send_face` 都抛 `normalizeMid is not defined`，机器人一个字都发不出去。所以脚本把"插 helper"和"替换调用点"绑在一起，并且在最后自检两者必须同时存在。
 - **发送网络级重试**：`src/onebot/sender.js`。协议端重启或连接被掐时会抛 `fetch failed`，原来直接丢消息（用户视角是"它没回我"）；网络层错误重试一次即可救回，限频/参数类错误不重试（重试也没用）。回归用例见 `test/local/test-sender-retry.mjs`。
@@ -300,7 +367,7 @@
 - **启动/重连补课**：`src/console/app.js`。服务重启或协议端断线期间，消息事件会丢——消息根本没进库，也就永远没人回。做法：连上 OneBot（含重连）后从协议端拉一次最近历史，把库里没有的消息按 mid 去重补进来；≤30 分钟的按新消息处理（会触发回应），更早的只补进记录、不吵人。
 - **自检与静态扫描**：`src/ops.js scan`（原为 `ops/check-undefined-calls.sh` + `ops/scan-undefined-calls.py`，现已并入项目代码）。上面那次"整夜发不出一个字"的事故表现像"静默/掉线"，很难查；于是加了一个只记日志、永远 `exit 0`、不阻断启动的自检，挂在服务启动链上，另配 `src/ops.js audit` 的补丁标记检查做部署验收。
 
-## 6. 贴纸（表情包）系统
+## 7. 贴纸（表情包）系统
 
 - **自动收藏**：`src/onebot/sticker-manager.js`、`src/onebot/stickers.js`、`src/console/app.js`、`src/core/config-legacy.js`。让模型看一眼别人发的图，自己判断值不值得收（值得就存并写备注）；入口改成异步判断，不阻塞消息处理。条目保留 `srcKey` 作为去重键。
 - **收藏判断健壮性**：`src/onebot/sticker-manager.js`。两个失败模式：模型有时把决定写成 `<tool_call>` 文本或裸 JSON（判断逻辑只认结构化 `tool_calls` → 决定丢失）；`max_tokens=200` 会被"思考"吃掉（实测思考 80-595 token），截断后一个字段都收不到 → 提到 600。另外内容过滤是概率性的（实测同图 20/20 通过、偶发被挡），把尝试次数 2 提到 3，并把"被服务商内容过滤"和"模型没提交"在日志里分开。
@@ -308,7 +375,7 @@
 - **查找与备注**：`src/onebot/stickers.js`、`src/tools/tools-core.js`、`src/onebot/sticker-manager.js`。线上连续出现 5 次"找不到表情 NNN"，编号其实来自来信里的 `[表情NNN]` 标签，模型却拿去当表情库 id 查。于是：来信把系统表情标成 `[QQ表情N 名字]`；找不到时把有效 id 回给模型；`findSticker` 增加"唯一命中"的模糊兜底，提示改为直接用备注名选图；备注上限 16 → 24 字（真图实测里 16 字会把一句话硬切）。
 - **标签与收录规则**：`src/console/app.js`、`src/llm/prompt.js`、`src/tools/tools-core.js`、`src/onebot/stickers.js`、`src/onebot/sticker-manager.js`。表情包消息显示 `[表情包]`（普通图仍是 `[图片]`）；收藏规则收紧到"只认真正的表情包"，生活照/随手拍/自拍不收；相关文案统一叫"表情包"。
 
-## 7. 主动发言与空间互动
+## 8. 主动发言与空间互动
 
 - **开话题节奏**：`src/core/orchestrator.js`。间隔定为 2.5-3.5 小时；"没有安静的群"这种空转不算消耗本轮（45 分钟后再看）。概率、冷场阈值属于部署方偏好，脚本不强制。
 - **间隔守卫**：`src/core/orchestrator.js`。tick 第一次在启动后 15 秒触发，所以每重启一次就会多一次开话题判定，与"几小时才概率开一次"的设定不符。改为把"上次判定时间"落盘，重启后不足一个间隔直接跳过（补丁标记 `minGapMs`、`writeProactiveLastAttempt`）。
@@ -318,7 +385,7 @@
 - **抓取容错与通知阈值**：`src/features/qzone-interactions.js`、`ui/app.js`。好友动态这条外呼在腾讯侧被限流时会回 `{code:-10001, message:"network busy"}`（协议端原样透传），而它此前是硬失败：一次限流就让整轮——包括评论检查和已积压的未读——全部不跑，还会立刻顶一条"错误"级异常通知。现在抓取失败先等 45 秒重试一次（中止信号可打断等待）；仍失败只记 `run.feedError`，本轮继续跑评论检查与积压，运行记录标为「好友动态未取到」并在控制台显示原因；失败计数与退避照旧（2→4→8→16→30 分钟），连续第 3 次才发异常通知；失败轮不算建立动态基线，免得把上线前的旧动态当成新内容。用例：`test/qzone-interactions.test.mjs`、`test/local/test-qzone-backoff.mjs`、`test/local/test-qzone-intervals.mjs`。
 - **每日说说容错**：`src/features/daily-moments.js`。空间列表读不到时跳过查重，不阻断发布。
 
-## 8. 运维与控制台
+## 9. 运维与控制台
 
 - **控制台端口探测**：`src/console/integrations.js`。上游把 SnowLuma / noVNC 地址写死为旧端口 15099 / 16081，而 Linux 全栈部署实际使用 5099 / 6081，导致"服务与访问控制"页误报"不可达"。改为按实际部署端口探测，并修正改 SnowLuma 密码时的地址兜底端口。
 - **控制台自动登录**：`ui/app.js`（地址栏带 `?token=` 时先自动登录，成功后清掉 URL 里的明文令牌再重载，避免留在浏览历史）、`src/console/app.js`（登录 cookie 加 `Max-Age`，避免关掉浏览器就要重新输令牌）。
