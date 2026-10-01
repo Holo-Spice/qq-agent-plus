@@ -19,6 +19,15 @@ function faceNameOf(id) {
 
 const RECONNECT_MIN_MS = 3000;
 const RECONNECT_MAX_MS = 30000;
+// 心跳默认间隔。心跳的用途是发现"连接已经死了但 close 事件还没到"（半开连接），
+// 不是所有实现都会回 pong —— 见下面 PING_KILL_WINDOW_MS 与 heartbeat 模式。
+const HEARTBEAT_MS = 30000;
+// "对端不吃 ping"的判定窗口：发出 ping 之后这么久内连接就断了、且这条连接从未回过 pong，
+// 认定为对端把 PING 当断连信号（NapCat 4.18.x 的实测行为，Issue #22：发 ping 的同一瞬间
+// close code=1006、全程 0 次 pong）。2 秒足够覆盖"同一次事件循环里就被销毁"的情形，
+// 又不会把正常断线误判 —— 正常对端早就回过 pong 了。
+const PING_KILL_WINDOW_MS = 2000;
+const HEARTBEAT_MODES = new Set(['auto', 'on', 'off']);
 // 发送超时：文本类 15 秒够用；**语音/图片这类要协议端转码或上传的段**很慢 ——
 // 2026-09-29 实测一条 38KB（7 秒）的 mp3 走 send_private_msg 要 16.4 秒，正好卡在 15 秒
 // 超时线上，于是模型发了语音却被记成 unknown（超时≠没发出去，但也确实可能没发出去）。
@@ -44,13 +53,20 @@ export class OneBotActionError extends Error {
 }
 
 export class OneBotClient {
-  constructor({ wsUrl, httpUrl, accessToken, httpToken, onEvent }) {
+  constructor({ wsUrl, httpUrl, accessToken, httpToken, onEvent, heartbeat = 'auto', heartbeatMs = HEARTBEAT_MS }) {
     this.wsUrl = String(wsUrl || 'ws://127.0.0.1:3001');
     this.httpUrl = String(httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
     this.accessToken = String(accessToken || '');
     // SnowLuma 允许给 WS 与 HTTP 配不同令牌；httpToken 缺省沿用 accessToken
     this.httpToken = String(httpToken || accessToken || '');
     this.onEvent = onEvent || (() => {});
+    // auto：第一次遇到"发 ping 就被断开"的对端后不再发 ping（NapCat，Issue #22）；
+    // on：始终发；off：从不发。非法值一律按 auto（与配置里别的枚举字段同一套兜底口径）。
+    this.heartbeatMode = HEARTBEAT_MODES.has(String(heartbeat)) ? String(heartbeat) : 'auto';
+    this.heartbeatMs = Number(heartbeatMs) > 0 ? Number(heartbeatMs) : HEARTBEAT_MS;
+    this.pingUnsupported = false;   // 本进程内"这个对端不吃 ping"的记忆（换协议端/升级后重启即忘）
+    this.pongsSeen = 0;             // 当前连接的 pong 计数（只有一条连接是"当前"，用实例字段即可）
+    this.lastPingAt = 0;
     this.socket = null;
     this.connected = false;
     this.everConnected = false;
@@ -121,16 +137,7 @@ export class OneBotClient {
       if (!isCurrent(socket)) return;
       this.lastConnectError = '';
       this.reconnectAttempt = 0;
-      let alive = true;
-      socket.on('pong', () => { alive = true; });
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = setInterval(() => {
-        if (!isCurrent(socket)) return;
-        if (!alive) { socket.terminate(); return; }
-        alive = false;
-        socket.ping();
-      }, 30000);
-      this.heartbeatTimer.unref?.();
+      this.#startHeartbeat(socket);
       this.#setStatus(true);
       try {
         this.selfInfo = await this.call('get_login_info');
@@ -145,10 +152,25 @@ export class OneBotClient {
       if (!event || typeof event !== 'object') return;
       try { this.onEvent(event); } catch (error) { console.error('[onebot] 事件处理出错:', error); }
     });
-    socket.on('close', () => {
+    socket.on('close', (code, reasonBuffer) => {
       if (!isCurrent(socket)) return; // 旧连接的迟到 close：新连接已在处理
       clearInterval(this.heartbeatTimer);
+      const wasConnected = this.connected;
+      const reason = String(reasonBuffer || '').trim();
+      const killedByPing = this.lastPingAt > 0
+        && Date.now() - this.lastPingAt <= PING_KILL_WINDOW_MS
+        && this.pongsSeen === 0;
+      if (killedByPing && this.heartbeatMode === 'auto' && !this.pingUnsupported) {
+        this.pingUnsupported = true;
+        console.warn('[onebot] 对端在收到 WebSocket PING 后立即断开（NapCat 已知行为，见 Issue #22）：'
+          + '本次运行不再发心跳 ping，改用 close/error 事件发现断线。要强制恢复发送，把 onebot.wsHeartbeat 设为 on');
+      }
       this.#setStatus(false);
+      // 首次连不上时不打日志（沿用"首连失败不刷屏"的约定，控制台状态行里已经有原因）；
+      // "连上过再断"这条正是 Issue #22 里最难查的情形 —— 必须留下痕迹。
+      if (wasConnected) {
+        console.warn(`[onebot] 连接已断开（code=${code}${reason ? `, reason=${reason}` : ''}${killedByPing ? ', 紧随 PING 之后' : ''}）`);
+      }
       if (!this.#closedByUs) this.#scheduleReconnect();
     });
     socket.on('error', (error) => {
@@ -157,8 +179,35 @@ export class OneBotClient {
       if (!this.everConnected) {
         // 首连失败退避得久一点，避免刷屏
         this.#setStatus(false);
+      } else {
+        console.warn(`[onebot] WebSocket 错误：${this.lastConnectError}`);
       }
     });
+  }
+
+  /**
+   * 心跳：默认 30 秒一次 ping，超时未回 pong 就 terminate（发现半开连接）。
+   * auto 模式下，一旦这条连接被判定为"对端不吃 ping"，后续连接直接不发 —— 每次连接都
+   * 重新判断，但"不吃 ping"的记忆在本进程内保留（见 pingUnsupported）。
+   */
+  #startHeartbeat(socket) {
+    const isCurrent = (s) => this.socket === s;
+    if (this.heartbeatMode === 'off' || (this.heartbeatMode === 'auto' && this.pingUnsupported)) {
+      this.lastPingAt = 0;
+      return;
+    }
+    let alive = true;
+    this.pongsSeen = 0;
+    socket.on('pong', () => { alive = true; this.pongsSeen += 1; });
+    clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = setInterval(() => {
+      if (!isCurrent(socket)) return;
+      if (!alive) { socket.terminate(); return; }
+      alive = false;
+      this.lastPingAt = Date.now();
+      socket.ping();
+    }, this.heartbeatMs);
+    this.heartbeatTimer.unref?.();
   }
 
   close() {
@@ -174,6 +223,9 @@ export class OneBotClient {
   #scheduleReconnect() {
     clearTimeout(this.reconnectTimer);
     const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * 2 ** Math.min(this.reconnectAttempt++, 4));
+    // 断线后"多久重连"也写进日志：Issue #22 里用户只能靠 catchup 计数反推断线循环，
+    // 有这两行（断开 + 重连）就能直接从日志看出来。
+    console.warn(`[onebot] ${Math.round(delay / 1000)} 秒后重连`);
     this.reconnectTimer = setTimeout(() => this.#connectLoop(), delay);
     this.reconnectTimer.unref?.();
   }
