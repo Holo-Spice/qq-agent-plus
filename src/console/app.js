@@ -5,6 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createRouter } from './router.js';
 
 import { asrApiKey, asrAvailable, asrConfigured, asrKeyHost, asrKeySource, asrLocalBin, asrLocalModel, asrSecretId, asrSecretKey, conversationConfigForChat, findWhisperBinSync, getConfig, identityPilotEnabled, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, DATA_DIR, ROOT } from '../core/config.js';
 import { tokenSaverEffective } from '../core/token-saver.js';
@@ -1432,87 +1433,118 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     return { ...rest, apiKey: '', hasKey: Boolean(String(apiKey ?? '').trim()) };
   }
 
+  // ── 路由表（改进方案 #2；迁移方式：加壳并行，搬走即删原分支）──
+  // 第一批：三个 auth:false 例外 + SSE（/healthz、/api/login、/api/events）。
+  const router = createRouter({ authorize, json, keyEndpointAllowed });
+
+  router.add('GET', '/healthz', async (req, res) => {
+    // 给拨测/uptime 监控用：无鉴权，但只含版本与连接状态，不带任何配置
+    return json(res, 200, {
+      ok: true,
+      name: PKG.name,
+      version: PKG.version,
+      uptimeSeconds: Math.round(process.uptime()),
+      onebotConnected: Boolean(onebot?.connected),
+      timestamp: Date.now()
+    });
+  }, { auth: false });
+
+  router.add('POST', '/api/login', async (req, res) => {
+    const origin = String(req.headers.origin || '');
+    if (origin && origin !== `http://${req.headers.host}` && origin !== `https://${req.headers.host}`) {
+      return json(res, 403, { error: 'Invalid origin' });
+    }
+    const gate = loginGate(req);
+    if (!gate.ok) return json(res, 429, { error: `尝试过于频繁，请 ${gate.retryAfterSec} 秒后再试` });
+    const body = await readBody(req).catch(() => ({}));
+    const token = getConfig().server.token;
+    // timing-safe 比较：全项目统一 sameSecret 口径（这里原来是唯一的普通 !==，修复遗漏）。
+    if (!token || !sameSecret(String(body?.token ?? ''), token)) {
+      gate.fail();
+      return json(res, 401, { error: 'Token 不正确' });
+    }
+    gate.clear();
+    setConsoleCookie(res, token);
+    return json(res, 200, { ok: true });
+  }, { auth: false });
+
+  router.add('POST', '/api/console-token', async (req, res) => {
+    const body = await readBody(req);
+    const current = String(body.currentToken ?? '');
+    const next = String(body.newToken ?? '').trim();
+    const confirm = String(body.confirmToken ?? '').trim();
+    if (!sameSecret(current, getConfig().server.token)) {
+      return json(res, 403, { error: '当前 Token 不正确' });
+    }
+    if (!/^[A-Za-z0-9._~-]{16,128}$/.test(next)) {
+      return json(res, 400, { error: '新 Token 必须为 16-128 位字母、数字或 . _ ~ -' });
+    }
+    if (next !== confirm) return json(res, 400, { error: '两次输入的新 Token 不一致' });
+    if (sameSecret(next, getConfig().server.token)) return json(res, 400, { error: '新 Token 不能与当前 Token 相同' });
+    updateConfig({ server: { token: next } });
+    let accessFileUpdated = true;
+    try { writeConsoleAccess(next); }
+    catch (error) {
+      accessFileUpdated = false;
+      log('[console] Token 已更新，但 console-access.txt 写入失败:', error?.message ?? error);
+    }
+    setConsoleCookie(res, next);
+    for (const client of sseClients) client.end();
+    sseClients.clear();
+    return json(res, 200, { ok: true, accessFileUpdated });
+  });
+
+  router.add('GET', '/api/api-key', async (req, res) => {
+    return json(res, 200, { apiKey: String(getConfig().api.apiKey || '') });
+  }, { keyEndpoint: true });
+
+  router.add('GET', '/api/search-key', async (req, res, params, url) => {
+    const field = String(url.searchParams.get('field') || '');
+    // 自定义搜索服务的 Key 不走这里（它们存在 webSearch.providers 数组里，
+    // 由 /api/search-providers 管理，且添加时是一次性输入，不提供明文回读）。
+    const allowed = ['deepseek', 'zhipu', 'bocha', 'baidu', 'metaso', 'doubao', 'tavily'];
+    if (!allowed.includes(field)) {
+      return json(res, 400, { error: `未知搜索服务：${field}` });
+    }
+    return json(res, 200, { apiKey: String(getConfig().webSearch?.[field]?.apiKey || '') });
+  }, { keyEndpoint: true });
+
+  router.add('GET', '/api/events', async (req, res) => {
+    // SSE：鉴权由路由表默认 auth:true 统一执行（原实现里手写的 authorize 已删）
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive'
+    });
+    res.write('event: hello\ndata: {}\n\n');
+    sseClients.add(res);
+    req.on('close', () => sseClients.delete(res));
+  });
+
+  router.add('GET', '/api/integrations/status', async (req, res) => json(res, 200, await integrationStatus()));
+  router.add('GET', '/api/auto-update/status', async (req, res) => json(res, 200, autoUpdate.status()));
+  router.add('GET', '/api/channel-prices', async (req, res) => json(res, 200, { ok: true, feeds: channelPriceStatus() }));
+  router.add('GET', '/api/model-prices', async (req, res, params, url) => json(res, 200, modelPricesPayload(url.searchParams.get('model'))));
+  router.add('GET', '/api/vision/results', async (req, res) => json(res, 200, { results: { ...builtinVisionResults(currentProviders()), ...visionResults() }, scanning: visionScan.running }));
+  router.add('GET', '/api/daily-moments/status', async (req, res) => json(res, 200, dailyMoments.status()));
+  router.add('GET', '/api/qzone-interactions/status', async (req, res) => json(res, 200, qzoneInteractions.status()));
+  router.add('GET', '/api/group-game/status', async (req, res) => json(res, 200, groupGame.status()));
+  router.add('GET', '/api/group-digest/status', async (req, res) => json(res, 200, groupDigest.status()));
+  router.add('GET', '/api/tts/presets', async (req, res) => json(res, 200, { ok: true, services: TTS_SERVICES }));
+  router.add('GET', '/api/identity-pilot/status', async (req, res) => json(res, 200, identityPilotStatus()));
+  router.add('GET', '/api/slang-pilot/status', async (req, res) => json(res, 200, slangPilotStatus()));
+  router.add('GET', '/api/incident-pilot/status', async (req, res) => json(res, 200, incidentPilotStatus()));
+
   async function handleHttp(req, res) {
+    if (await router.handle(req, res)) return;   // 已迁移的路由先走表；未迁移的落回下方 if 链
     const url = new URL(req.url, 'http://127.0.0.1');
     const pathname = url.pathname;
-    if (pathname === '/healthz' && req.method === 'GET') {
-      // 给拨测/uptime 监控用：无鉴权，但只含版本与连接状态，不带任何配置
-      return json(res, 200, {
-        ok: true,
-        name: PKG.name,
-        version: PKG.version,
-        uptimeSeconds: Math.round(process.uptime()),
-        onebotConnected: Boolean(onebot?.connected),
-        timestamp: Date.now()
-      });
-    }
-    if (pathname === '/api/login' && req.method === 'POST') {
-      const origin = String(req.headers.origin || '');
-      if (origin && origin !== `http://${req.headers.host}` && origin !== `https://${req.headers.host}`) {
-        return json(res, 403, { error: 'Invalid origin' });
-      }
-      const gate = loginGate(req);
-      if (!gate.ok) return json(res, 429, { error: `尝试过于频繁，请 ${gate.retryAfterSec} 秒后再试` });
-      const body = await readBody(req).catch(() => ({}));
-      const token = getConfig().server.token;
-      // timing-safe 比较：全项目统一 sameSecret 口径（这里原来是唯一的普通 !==，修复遗漏）。
-      if (!token || !sameSecret(String(body?.token ?? ''), token)) {
-        gate.fail();
-        return json(res, 401, { error: 'Token 不正确' });
-      }
-      gate.clear();
-      setConsoleCookie(res, token);
-      return json(res, 200, { ok: true });
-    }
-
-    // SSE
-    if (pathname === '/api/events' && req.method === 'GET') {
-      if (!authorize(req)) return json(res, 401, { error: '未授权' });
-      res.writeHead(200, {
-        'content-type': 'text/event-stream',
-        'cache-control': 'no-cache',
-        connection: 'keep-alive'
-      });
-      res.write(`event: hello\ndata: {}\n\n`);
-      sseClients.add(res);
-      req.on('close', () => sseClients.delete(res));
-      return;
-    }
-
     if (pathname.startsWith('/api/')) {
       if (!authorize(req)) return json(res, 401, { error: '未授权' });
       const method = req.method;
       const cfgNow = getConfig();
 
-      if (pathname === '/api/console-token' && method === 'POST') {
-        const body = await readBody(req);
-        const current = String(body.currentToken ?? '');
-        const next = String(body.newToken ?? '').trim();
-        const confirm = String(body.confirmToken ?? '').trim();
-        if (!sameSecret(current, cfgNow.server.token)) {
-          return json(res, 403, { error: '当前 Token 不正确' });
-        }
-        if (!/^[A-Za-z0-9._~-]{16,128}$/.test(next)) {
-          return json(res, 400, { error: '新 Token 必须为 16-128 位字母、数字或 . _ ~ -' });
-        }
-        if (next !== confirm) return json(res, 400, { error: '两次输入的新 Token 不一致' });
-        if (sameSecret(next, cfgNow.server.token)) return json(res, 400, { error: '新 Token 不能与当前 Token 相同' });
-        updateConfig({ server: { token: next } });
-        let accessFileUpdated = true;
-        try { writeConsoleAccess(next); }
-        catch (error) {
-          accessFileUpdated = false;
-          log('[console] Token 已更新，但 console-access.txt 写入失败:', error?.message ?? error);
-        }
-        setConsoleCookie(res, next);
-        for (const client of sseClients) client.end();
-        sseClients.clear();
-        return json(res, 200, { ok: true, accessFileUpdated });
-      }
 
-      if (pathname === '/api/integrations/status' && method === 'GET') {
-        return json(res, 200, await integrationStatus());
-      }
 
       if (pathname === '/api/integrations/snowluma/password' && method === 'POST') {
         const body = await readBody(req);
@@ -1525,9 +1557,6 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         }
       }
 
-      if (pathname === '/api/auto-update/status' && method === 'GET') {
-        return json(res, 200, autoUpdate.status());
-      }
 
       if (pathname === '/api/auto-update/settings' && method === 'PUT') {
         const body = await readBody(req);
@@ -1861,9 +1890,6 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       }
 
       // 渠道价目表（每渠道一份，自动拉取）
-      if (pathname === '/api/channel-prices' && method === 'GET') {
-        return json(res, 200, { ok: true, feeds: channelPriceStatus() });
-      }
 
       if (pathname === '/api/channel-prices' && method === 'POST') {
         const body = await readBody(req);
@@ -1908,9 +1934,6 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         return json(res, 200, { ok: true, feeds: status });
       }
 
-      if (pathname === '/api/model-prices' && method === 'GET') {
-        return json(res, 200, modelPricesPayload(url.searchParams.get('model')));
-      }
 
       // 手动触发一次远程价格表拉取（设置页「立即拉取」按钮）
       // 返回体与 GET 同形（只多一个 ok）：前端拿到后就地替换状态，
@@ -2018,29 +2041,7 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         return json(res, 200, { apiKey: p?.apiKey || '' });
       }
 
-      // 显示顶层 api.apiKey（手动模式、未选目录提供商时用）
-      if (pathname === '/api/api-key' && method === 'GET') {
-        if (!keyEndpointAllowed(req)) {
-          return json(res, 403, { error: '请求来源不被信任，已拒绝读取明文密钥。' });
-        }
-        return json(res, 200, { apiKey: String(getConfig().api.apiKey || '') });
-      }
 
-      // 显示某个搜索服务的真实 Key（本地 UI 点击“显示”用）。
-      // /api/config 里的搜索 Key 是脱敏的，所以“显示”必须走这里。
-      if (pathname === '/api/search-key' && method === 'GET') {
-        if (!keyEndpointAllowed(req)) {
-          return json(res, 403, { error: '请求来源不被信任，已拒绝读取明文密钥。' });
-        }
-        const field = String(url.searchParams.get('field') || '');
-        // 自定义搜索服务的 Key 不走这里（它们存在 webSearch.providers 数组里，
-        // 由 /api/search-providers 管理，且添加时是一次性输入，不提供明文回读）。
-        const allowed = ['deepseek', 'zhipu', 'bocha', 'baidu', 'metaso', 'doubao', 'tavily'];
-        if (!allowed.includes(field)) {
-          return json(res, 400, { error: `未知搜索服务：${field}` });
-        }
-        return json(res, 200, { apiKey: String(getConfig().webSearch?.[field]?.apiKey || '') });
-      }
 
       // 语音识别的模型列表：从服务商官网拉（用户要求 —— 写死的预设会过时，
       // 例如硅基流动上了新的免费模型，列表应该跟着官网走）。
@@ -2297,9 +2298,6 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         return json(res, 200, { ok: true, results, okCount, total: Object.keys(results).length });
       }
 
-      if (pathname === '/api/vision/results' && method === 'GET') {
-        return json(res, 200, { results: { ...builtinVisionResults(currentProviders()), ...visionResults() }, scanning: visionScan.running });
-      }
 
       if (pathname === '/api/vision/scan' && method === 'POST') {
         if (visionScan.running) return json(res, 409, { ok: false, error: '已有一次扫描正在进行' });
@@ -2595,17 +2593,8 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         return json(res, 200, { ok: true, config: safeConfigWithAsrStatus(next) });
       }
 
-      if (pathname === '/api/daily-moments/status' && method === 'GET') {
-        return json(res, 200, dailyMoments.status());
-      }
 
-      if (pathname === '/api/qzone-interactions/status' && method === 'GET') {
-        return json(res, 200, qzoneInteractions.status());
-      }
 
-      if (pathname === '/api/group-game/status' && method === 'GET') {
-        return json(res, 200, groupGame.status());
-      }
 
       if (pathname === '/api/group-game/stop' && method === 'POST') {
         // 管理员在控制台结束某一局（局跑歪/要收场时用）：与模型调 group_game stop 走同一入口
@@ -2617,9 +2606,6 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         return json(res, 200, { ok: true });
       }
 
-      if (pathname === '/api/group-digest/status' && method === 'GET') {
-        return json(res, 200, groupDigest.status());
-      }
 
       if (pathname === '/api/group-digest/run' && method === 'POST') {
         try {
@@ -2639,9 +2625,6 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         return json(res, 200, { ok: true, apiKey: key });
       }
 
-      if (pathname === '/api/tts/presets' && method === 'GET') {
-        return json(res, 200, { ok: true, services: TTS_SERVICES });
-      }
 
       if (pathname === '/api/tts/models' && method === 'POST') {
         try {
@@ -2729,17 +2712,8 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         return json(res, 200, { ok: true, canceled: hit.id });
       }
 
-      if (pathname === '/api/identity-pilot/status' && method === 'GET') {
-        return json(res, 200, identityPilotStatus());
-      }
 
-      if (pathname === '/api/slang-pilot/status' && method === 'GET') {
-        return json(res, 200, slangPilotStatus());
-      }
 
-      if (pathname === '/api/incident-pilot/status' && method === 'GET') {
-        return json(res, 200, incidentPilotStatus());
-      }
       if (pathname === '/api/incidents' && method === 'GET') {
         return json(res, 200, {
           status: incidentPilotStatus(),

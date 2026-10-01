@@ -4,14 +4,13 @@
 // tools/ 与 data/ 是本地未跟踪目录，不进 lint。
 import globals from 'globals';
 
-// C3 起升 error 的规则。no-unused-vars 有意保持 warn：79 条里既有真死代码也有疑似
-// 漏接线（ui/app.js 的 renderHealthCard/bindModelDdDismiss/renderProviderColumn/
-// renderModelColumn/applyProviderPick 五个零调用函数，要人工判断是删还是补绑定），
-// 不适合随 lint 批机械处理；清单独行推进（见 C3 commit 说明）。
+// 全部规则 error（no-unused-vars 也已在 2026-09-30 的清零批次里清到 0 ——
+// 含删除 ui/app.js 的 5 个上游遗产零调用函数及其配套死代码；此后 no-unused-vars
+// 是硬门禁，新增未用变量会直接红）。
 // caughtErrors:'none'：catch (e) 不用 e 无罪，空 catch 由 no-empty(error) 盯住。
 const baseRules = {
   'no-undef': 'error',
-  'no-unused-vars': ['warn', { args: 'after-used', ignoreRestSiblings: true, caughtErrors: 'none' }],
+  'no-unused-vars': ['error', { args: 'after-used', ignoreRestSiblings: true, caughtErrors: 'none' }],
   // no-empty 自 C2 起为 error：空块必须写明“有意忽略”的原因
   'no-empty': ['error', { allowEmptyCatch: false }],
   'no-dupe-keys': 'error',

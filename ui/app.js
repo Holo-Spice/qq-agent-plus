@@ -686,37 +686,6 @@ function updateOnebotStatusLine() {
 }
 
 // ── 就绪度体检（傻瓜式引导的核心） ──
-function assessReadiness(cfg, status) {
-  const checks = [];
-  if (!cfg) return { ready: false, checks: [{ ok: false, label: '配置加载失败' }] };
-  // 拆成"接口地址"与"模型"两步：合并判断时新手分不清到底缺哪个。
-  // 出厂 baseUrl 为空，第一条会直接指出该填什么。
-  const urlOk = !!String(cfg.api.baseUrl || '').trim();
-  checks.push({
-    ok: urlOk,
-    label: urlOk ? `接口地址：${cfg.api.baseUrl}` : '还没有填接口地址（Base URL，必填）：官方 API 或中转站提供的 OpenAI 兼容地址',
-    fix: urlOk ? null : 'settings-api'
-  });
-  const modelOk = !!String(cfg.api.model || '').trim();
-  checks.push({
-    ok: modelOk,
-    label: modelOk ? `模型已选择：${cfg.api.model}` : '还没有选择模型（填好地址后点「获取列表」或手动添加）',
-    fix: modelOk ? null : 'settings-api'
-  });
-  const allowOk = (cfg.allow?.groups?.length || cfg.allow?.private?.length || cfg.allowAllWhenEmpty);
-  checks.push({ ok: !!allowOk, label: allowOk ? `白名单：${(cfg.allow.groups || []).length} 个群 / ${(cfg.allow.private || []).length} 个好友` : '还没有配置白名单（必填）', fix: allowOk ? null : 'settings-allow' });
-  const obOk = status?.onebot?.connected;
-  const obIssue = onebotIssueText(status?.onebot);
-  checks.push({
-    ok: !!obOk,
-    label: obOk
-      ? `OneBot 已连接${status.onebot.self ? `（${status.onebot.self.nickname}）` : ''}`
-      : `OneBot 未连接 —— ${obIssue || '请检查设置中的 WS/HTTP 地址与令牌'}`,
-    fix: obOk ? null : 'settings-onebot'
-  });
-  return { ready: urlOk && modelOk && allowOk && obOk, checks };
-}
-
 function renderBanner() {
   const banner = $('#banner');
   const s = state.status;
@@ -6263,149 +6232,13 @@ function renderPersonaLibrary(c) {
     <span id="persona-pick-hint" class="muted" style="font-size:12px"></span>`;
 }
 
-function renderHealthCard() {
-  const { ready, checks } = assessReadiness(state.config, state.status);
-  const rows = checks.map((c) => {
-    return `
-    <div class="h-item ${c.ok ? 'ok' : 'bad'}">
-      <span>${c.ok ? '✓' : '✗'}</span>
-      <span class="h-label">${esc(c.label)}</span>
-    </div>`;
-  }).join('');
-  const testRow = `
-    <div class="h-item ${'mute'}">
-      <span>·</span>
-      <span class="h-label">API 连通性：
-        <button class="btn btn-small" id="test-api-btn">测试一下</button>
-        <span id="test-api-result" class="muted"></span>
-      </span>
-    </div>`;
-  return `
-    <div class="health-card ${ready ? 'all-ok' : ''}">
-      <div class="h-title">${ready ? '✅ 一切就绪，机器人运行中' : '🧭 完成下面缺失项就能跑起来'}</div>
-      ${rows}
-      ${testRow}
-    </div>`;
-}
-
 // 人设模板数据：state.personaTemplates（由 loadSettings 从后端填充）
 
 // ── 模型目录（多提供商；面板式选择 + 图片输入能力徽标） ──
-function visionBadge(providerId, model) {
-  const r = (state.visionResults || {})[`${providerId}|||${model}`];
-  const src = r?.source === 'docs' ? '官方资料' : (r?.source === 'probe' ? '在线探测' : '');
-  const show = state.config?.ui?.showVision !== false;
-  const t = (cls, text) => `<span class="vbadge ${cls}" style="${show ? '' : 'display:none'}" title="${esc((src ? `【${src}】` : '') + (r?.note || ''))}">${text}</span>`;
-  if (!r) return t('unk', '未检测');
-  if (r.verdict === 'vision') return t('ok', '支持图片输入');
-  if (r.verdict === 'no-vision') return t('no', '不支持图片输入');
-  return t('unk', '无法判定');
-}
-
 // ── 两栏悬停下拉：左供应商 / 右模型 ──
-function visionVerdictOf(providerId, model) {
-  return (state.visionResults || {})[`${providerId}|||${model}`]?.verdict;
-}
-
 // 目录的"点击外部 / Esc 收起"监听器只在全局注册一次（renderSettings 每次重渲染都会
 // 重建 DOM，若在这里注册会随渲染次数无限叠加、并引用已脱离文档的旧节点）。
 // 事件触发时按 id 现查当前元素，天然跟随最新 DOM。
-let modelDdDismissBound = false;
-function bindModelDdDismiss() {
-  if (modelDdDismissBound) return;
-  modelDdDismissBound = true;
-  document.addEventListener('click', (e) => {
-    const dd = document.getElementById('model-dd');
-    if (!dd || dd.hidden || dd.contains(e.target)) return;
-    const btn = document.getElementById('model-pick-btn');
-    if (btn && btn.contains(e.target)) return;   // 按钮自己负责开合
-    dd.hidden = true;
-  });
-  document.addEventListener('keydown', (e) => {
-    const dd = document.getElementById('model-dd');
-    if (dd && !dd.hidden && e.key === 'Escape') dd.hidden = true;
-  });
-}
-
-function renderProviderColumn(c) {
-  const provs = state.providers || [];
-  // 提供商目录为空时给出可直接操作的指引。
-  if (!provs.length) {
-    return '<div class="muted" style="padding:10px;font-size:12px;line-height:1.7">'
-      + '目录还是空的。先在「模型 API」里选服务预设（或直接填地址和 API Key），'
-      + '点「获取列表」拉取模型，或直接手动填模型 id 后点「确认添加」。'
-      + '不知道去哪弄？DeepSeek、智谱、Kimi、OpenAI 等官网的开放平台都能申请到 Key。'
-      + '</div>';
-  }
-  let html = '<div class="mdd-prov" data-pid="__manual__"><span class="mdd-prov-name">（手动输入模型名）</span></div>';
-  for (const p of provs) {
-    const warn = [!p.hasKey ? '⚠无密钥' : '', p.needsBaseUrl ? '⚠需补地址' : ''].filter(Boolean).join(' ');
-    const visionOk = (p.models || []).filter((m) => visionVerdictOf(p.id, m) === 'vision').length;
-    const meta = warn || `${p.models.length} 模型${visionOk ? ` · ${visionOk} 可看图` : ' · 0 可看图'}`;
-    html += `<div class="mdd-prov" data-pid="${esc(p.id)}">
-      <span class="mdd-prov-name">${esc(p.displayName || p.id)}</span>
-      <span class="mdd-prov-meta">${esc(meta)}</span>
-    </div>`;
-  }
-  return html;
-}
-
-function renderModelColumn(pid, c) {
-  if (pid === '__manual__') {
-    return '<div class="muted" style="padding:12px;font-size:12px">选此项后直接在下方"模型"输入框填任意模型名，并手动填 Base URL / Key。</div>';
-  }
-  const p = (state.providers || []).find((x) => x.id === pid);
-  if (!p) return '';
-  const current = `${c.api.provider || ''}|||${c.api.model || ''}`;
-  return `<div class="mp-provider"><span>${esc(p.displayName || p.id)}${p.anthropicOrigin ? ' · Anthropic 协议' : ''}</span><span class="mp-url">${esc(p.baseURL || '无端点')}</span></div>
-    ${p.models.map((m) => {
-      const v = `${p.id}|||${m}`;
-      return `<div class="mp-row${v === current ? ' current' : ''}" data-v="${esc(v)}"><span class="mp-name">${esc(m)}</span>${visionBadge(p.id, m)}</div>`;
-    }).join('')}`;
-}
-
-function applyProviderPick(value, { silent = false } = {}) {
-  const hint = $('#provider-hint');
-  const store = $('#cfg-provider');
-  if (!value || value === '__manual__') {
-    store.value = '';
-    if (!silent) hint.textContent = '手动模式：直接在下面填 Base URL / Key / 模型名。';
-    return;
-  }
-  const [pid, model] = value.split('|||');
-  const p = (state.providers || []).find((x) => x.id === pid);
-  if (!p) { hint.textContent = '未找到该提供商，请重新添加。'; return; }
-  store.value = pid;
-  $('#cfg-model').value = model;
-  // 价格卡片直接读界面控件的值，这里只需要通知它刷新
-  refreshModelPriceCard();
-  const notes = [];
-  if (p.baseURL) {
-    $('#cfg-baseurl').value = p.baseURL;
-    notes.push(`端点 ${p.baseURL}`);
-  } else {
-    notes.push('⚠ 该提供商地址未知，请手动填 Base URL');
-  }
-  if (p.hasKey) {
-    $('#cfg-apikey').value = '******';
-    $('#cfg-apikey').type = 'password';
-    const toggleBtn = $('#cfg-apikey-toggle');
-    if (toggleBtn) toggleBtn.textContent = '显示';
-    notes.push('该提供商已保存密钥（显示为 ******，点「显示」查看明文，输入新 Key 可替换）');
-  } else {
-    $('#cfg-apikey').value = '';
-    $('#cfg-apikey').type = 'password';
-    const toggleBtn = $('#cfg-apikey-toggle');
-    if (toggleBtn) toggleBtn.textContent = '显示';
-    notes.push('⚠ 该提供商没有可用密钥，请手动粘贴 API Key');
-  }
-  const vr = (state.visionResults || {})[`${pid}|||${model}`];
-  if (vr && (vr.verdict === 'vision' || vr.verdict === 'no-vision')) {
-    notes.push(vr.verdict === 'vision' ? '✅ 该模型支持图片输入' : '🚫 该模型不支持图片输入');
-  }
-  hint.textContent = `已选 ${p.displayName || p.id} · ${model}：${notes.join('；')}`;
-}
-
 function renderSettingsSidebar() {
   const s = state.status;
   const sidebar = $('#settings-sidebar');
@@ -11149,11 +10982,6 @@ function bindSettingsEvents(c) {
 
   const testProviderBtn = $('#test-provider-btn');
   if (testProviderBtn) testProviderBtn.addEventListener('click', () => runConnectivityTest(testProviderBtn, $('#provider-test-result'), '测试连通性'));
-
-  // 健康卡片上的「测试一下」：此前 renderHealthCard 渲染后从未绑定事件
-  // （绑的是 test-provider-btn，id 不匹配），按钮点了完全没反应。
-  const testApiBtn = $('#test-api-btn');
-  if (testApiBtn) testApiBtn.addEventListener('click', () => runConnectivityTest(testApiBtn, $('#test-api-result'), '测试一下'));
 
   // 当前 Base URL 右侧的“获取列表”
   const fetchCurrentBtn = $('#fetch-current-models-btn');

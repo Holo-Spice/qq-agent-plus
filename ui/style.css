@@ -1646,22 +1646,11 @@ html.boot-show .loading-overlay { opacity: 1; }
 .banner.hidden { display: none; }
 
 /* ── 体检卡 ── */
-.health-card {
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg-2);
-  padding: 14px 18px;
-  margin-bottom: 20px;
-}
-.health-card.all-ok { border-color: rgba(63, 206, 122, .5); }
-.health-card .h-title { font-weight: 600; margin-bottom: 10px; }
-.health-card.all-ok .h-title { color: var(--green); }
 .h-item { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; font-size: 13px; }
 .h-item.ok { color: var(--green); }
 .h-item.bad { color: var(--orange); }
 .h-item.mute { color: var(--muted); }
 .h-label { flex: 1; }
-.health-card .btn-small { margin-left: 4px; }
 
 /* ── 白名单选择弹窗 ── */
 .modal-overlay {
@@ -2802,14 +2791,10 @@ input::placeholder, textarea::placeholder { color: var(--faint); }
 
 /* ── 面板、列表与卡片 ── */
 .list-pane, .detail-pane, .settings-sidebar, .settings-pane, .tool-card, .asset-pane,
-.control-pane, .usage-card, .health-card, .price-card, .context-inspector, .conversation-mode-shell {
+.control-pane, .usage-card, .price-card, .context-inspector, .conversation-mode-shell {
   border-radius: 14px;
 }
-.chat-item, .session-item, .pick-item, .settings-menu-item, .tool-card, .health-card {
-  border-radius: 12px;
-  transition: background .15s, border-color .15s, box-shadow .15s, transform .06s;
-}
-.chat-item:hover, .session-item:hover, .pick-item:hover, .settings-menu-item:hover {
+.chat-item, .session-item, .pick-item, .settings-menu-item, .tool-card, .chat-item:hover, .session-item:hover, .pick-item:hover, .settings-menu-item:hover {
   background: var(--hover); box-shadow: var(--shadow-sm);
 }
 .chat-item.selected, .session-item.selected, .settings-menu-item.active {
@@ -3079,7 +3064,7 @@ input[type=checkbox], input[type=radio] {
    0.2s 过渡。状态条右对齐：文字从"模型：-"变成完整信息时会变长，右对齐让增长向左
    展开，位置更稳。 */
 body, #sidebar, #topbar, #tabs, .view, .list-pane, .detail-pane, .chat-item, .session-item,
-.btn, .icon-btn, input, select, textarea, .control-section, .health-card, .usage-card,
+.btn, .icon-btn, input, select, textarea, .control-section, .usage-card,
 .tool-card, .price-card, .modal, .banner, .empty-hint, .tab, table, th, td {
   transition: background-color .2s ease, color .2s ease, border-color .2s ease, box-shadow .2s ease;
 }

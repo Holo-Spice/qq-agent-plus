@@ -149,7 +149,7 @@ try {
     'renderQzoneInteractionSection', 'renderTimeControlSection',
     'renderPersonaSection', 'renderAllowSection',
     'renderChatSection', 'renderDesktopSection', 'renderOnebotSection',
-    'renderPersonaLibrary', 'renderPersonaGrid', 'renderHealthCard', 'renderTokenSaverSection',
+    'renderPersonaLibrary', 'renderPersonaGrid', 'renderTokenSaverSection',
     'renderAssetSummary', 'renderStickerAssets', 'renderSlangAssets',
     'renderSlangResearch', 'renderIdentityAssets', 'renderMemoryAssets'
   ];
