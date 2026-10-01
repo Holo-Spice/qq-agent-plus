@@ -104,7 +104,7 @@ it('persists mode, starts headless and exits cleanly on SIGTERM', async (t) => {
   const until = Date.now() + 5000;
   let ready = false;
   while (Date.now() < until) {
-    try { ready = (await fetch(`http://127.0.0.1:${port}/healthz`)).ok; } catch {}
+    try { ready = (await fetch(`http://127.0.0.1:${port}/healthz`)).ok; } catch { /* 未就绪，继续轮询 */ }
     if (ready) break;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }

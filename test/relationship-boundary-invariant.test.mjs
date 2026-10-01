@@ -37,8 +37,8 @@ const manager = new IdentityPilotManager({
 manager.identityStore = {};
 
 after(() => {
-  try { manager.stop(); } catch {}
-  try { chatStore.close(); } catch {}
+  try { manager.stop(); } catch { /* 清理尽力而为 */ }
+  try { chatStore.close(); } catch { /* 清理尽力而为 */ }
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 

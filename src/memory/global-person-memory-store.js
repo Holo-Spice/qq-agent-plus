@@ -338,7 +338,7 @@ export class GlobalPersonMemoryStore {
       // 落盘一旦失败（磁盘满/权限），已删掉的旧印象就静默消失且无快照可回滚。
       this.#persist(member);
       try { backupPersonBeforeConsolidation(candidate, { sourceChatKey: '', at: Date.now(), reason: 'merge-absorb' }); } catch { /* 备份失败不阻断 */ }
-      try { fs.rmSync(globalMemberFile(candidate.userId, candidate.name), { force: true }); } catch {}
+      try { fs.rmSync(globalMemberFile(candidate.userId, candidate.name), { force: true }); } catch { /* 有意忽略：删残留文件失败仅造成文件残留，数据已先留快照可回滚 */ }
       map.delete(key);
     }
     this.#persist(member); map.set(uid, member);
@@ -350,7 +350,7 @@ export class GlobalPersonMemoryStore {
     if (!member) return false;
     // 破坏性删除前留一份快照（与整理前快照同一套目录，可回滚）
     try { backupPersonBeforeConsolidation(member, { sourceChatKey: '', at: Date.now(), reason: 'manual-delete' }); } catch { /* 备份失败不阻断 */ }
-    map.delete(uid); try { fs.rmSync(globalMemberFile(member.userId, member.name), { force: true }); } catch {}
+    map.delete(uid); try { fs.rmSync(globalMemberFile(member.userId, member.name), { force: true }); } catch { /* 有意忽略：删残留文件失败仅造成文件残留，数据已先留快照可回滚 */ }
     return true;
   }
   remove({ userId = '', target = '', content = '', sourceChatKey = '' } = {}) {
@@ -384,7 +384,7 @@ export class GlobalPersonMemoryStore {
       // before 是动手前的克隆；它本来就是空列表时，备份函数自己会返回 null 不落盘。
       if (removed) { try { backupPersonBeforeConsolidation(before, { sourceChatKey: scope, at: Date.now(), reason: 'manual-delete' }); } catch { /* 备份失败不阻断 */ } }
       if (!member.impressions.length) {
-        map.delete(key); try { fs.rmSync(globalMemberFile(member.userId, member.name), { force: true }); } catch {}
+        map.delete(key); try { fs.rmSync(globalMemberFile(member.userId, member.name), { force: true }); } catch { /* 有意忽略：删残留文件失败仅造成文件残留，数据已先留快照可回滚 */ }
       } else { member.updatedAt = Date.now(); this.#persist(member); }
       if (uid || name) break;
     }
@@ -409,7 +409,7 @@ export class GlobalPersonMemoryStore {
       // 同上：这个人还有别的来源时也要留快照 —— 被摘掉的那几条一样回不来
       if (touched) { try { backupPersonBeforeConsolidation(before, { sourceChatKey: source, at: Date.now(), reason: 'manual-delete' }); } catch { /* 备份失败不阻断 */ } }
       if (!member.impressions.length) {
-        map.delete(key); try { fs.rmSync(globalMemberFile(member.userId, member.name), { force: true }); } catch {}
+        map.delete(key); try { fs.rmSync(globalMemberFile(member.userId, member.name), { force: true }); } catch { /* 有意忽略：删残留文件失败仅造成文件残留，数据已先留快照可回滚 */ }
       } else this.#persist(member);
     }
   }
@@ -435,7 +435,7 @@ export class GlobalPersonMemoryStore {
     if (touched) { try { backupPersonBeforeConsolidation(before, { sourceChatKey: source, at: Date.now(), reason: 'manual-delete' }); } catch { /* 备份失败不阻断 */ } }
     if (!member.impressions.length) {
       map.delete(uid);
-      try { fs.rmSync(globalMemberFile(member.userId, member.name), { force: true }); } catch {}
+      try { fs.rmSync(globalMemberFile(member.userId, member.name), { force: true }); } catch { /* 有意忽略：删残留文件失败仅造成文件残留，数据已先留快照可回滚 */ }
     } else this.#persist(member);
     return touched;
   }

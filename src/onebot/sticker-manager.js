@@ -3,7 +3,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { OneBotClient, extractMediaFromSegments } from './onebot.js';
+import { extractMediaFromSegments } from './onebot.js';
 import { DATA_DIR, getConfig } from '../core/config.js';
 import { resolveSelfName } from '../core/util.js';
 import {

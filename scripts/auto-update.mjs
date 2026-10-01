@@ -850,6 +850,9 @@ async function run() {
   };
   command(npm, [
     'ci',
+    // devDeps（eslint/globals）只服务本仓开发与 CI；更新器临时目录装运行时依赖即可，
+    // 否则每次自动更新都多拉几十 MB（改进方案 D6）。测试需要 devDeps 的用例必须自带缺件跳过。
+    '--omit=dev',
     '--ignore-scripts',
     '--prefer-offline',
     '--no-audit',

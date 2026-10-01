@@ -18,7 +18,9 @@
     "test:render": "node test/render-test.mjs",
     "test:scroll": "node test/scroll-test.mjs",
     "test:usage": "node test/usage-e2e.mjs",
-    "test:legacy-selftest": "node test/selftest.mjs"
+    "test:legacy-selftest": "node test/selftest.mjs",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
   },
   "dependencies": {
     "jce": "0.2.3",
@@ -46,5 +48,9 @@
   "bugs": {
     "url": "https://github.com/sakurawwwxh/qq-agent-plus/issues"
   },
-  "homepage": "https://github.com/sakurawwwxh/qq-agent-plus#readme"
+  "homepage": "https://github.com/sakurawwwxh/qq-agent-plus#readme",
+  "devDependencies": {
+    "eslint": "^10.11.0",
+    "globals": "^17.12.0"
+  }
 }

@@ -986,7 +986,7 @@ export function buildToolDefs() {
     },
     {
       name: 'memory_query',
-      description: '查看当前会话里你对群友的长期印象。不传 userId 返回全部；传 userId 只看某一个人。',
+      description: '查看你对群友的长期印象（全局共享：不分当前会话，汇总自所有群聊与私聊的观察）。不传 userId 返回全部；传 userId 只看某一个人。印象是跨会话的隐私：不得向群友转述他人的印象、来源或原话。',
       parameters: {
         type: 'object',
         properties: {

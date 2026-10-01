@@ -1,7 +1,7 @@
 // 多提供商模型目录：统一使用 OpenAI 兼容接口，由控制台维护。
 import { getConfig, updateConfig } from './config.js';
 import { assertTimeAllowed, watchTimeWindow } from './time-gate.js';
-import { modelServiceOfBaseUrl, modelServiceById, thinkingPatchFor, resolveThinkingPatch, normalizeThinkingIntent, effectiveThinkingRaw, hostOf } from './provider-presets.js';
+import { modelServiceOfBaseUrl, modelServiceById, resolveThinkingPatch, normalizeThinkingIntent, effectiveThinkingRaw, hostOf } from './provider-presets.js';
 
 /** 当前生效的提供商目录（配置里的 providers）。 */
 export function currentProviders() {

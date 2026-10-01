@@ -34,7 +34,6 @@ function context(patch = {}) {
       kind: 'group',
       chatId: '1',
       chatKey: 'group:1',
-      store,
       session: { id: 'session', leaseId: 'lease', sent: [], feedbacks: [] },
       sender: {
         sendTextBatch: async (...args) => {

@@ -5,13 +5,10 @@
 // production invariants: promoted capabilities are not user-switchable,
 // automated slang research is retired, and admin.ownerUin is the sole
 // administrator configuration source.
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import * as legacy from './config-legacy.js';
 import {
   ASR_DEFAULT_PROVIDER, ASR_PROVIDERS,
-  asrLocalBin, asrLocalModel, findWhisperBinSync
+  asrLocalModel, findWhisperBinSync
 } from './config-legacy.js';
 import {
   applyStableFeaturePolicy,

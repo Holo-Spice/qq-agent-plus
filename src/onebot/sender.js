@@ -4,7 +4,7 @@
 // - Markdown → 纯文本、QQ 硬长度切分、CQ 转义
 // - 发出的每一条记进 ChatStore（self=true，供下一次运行当"自己的发言"）
 import { getConfig, DEFAULT_CONFIG } from '../core/config.js';
-import { sleep, randInt, createSendChain, escapeCqText, formatClockTime } from '../core/util.js';
+import { sleep, randInt, createSendChain, formatClockTime } from '../core/util.js';
 import { mdToPlain, splitForQQ } from '../llm/md-to-plain.js';
 import { assertCanSend } from '../core/access.js';
 

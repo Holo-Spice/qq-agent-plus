@@ -58,14 +58,14 @@ export class MemoryStore {
         const full = path.join(MEMORY_DIR, name); if (!fs.statSync(full).isDirectory()) continue;
         const m = /^(group|private)_(\d+)$/.exec(name); if (m) out.add(`${m[1]}:${m[2]}`);
       }
-    } catch {}
+    } catch { /* 有意忽略：成员目录读不了＝视为无交接来源，不阻断列表返回 */ }
     return [...out];
   }
   getHandoff(chatKey) {
     this.people.listSourceChats();
     const raw = readJson(handoffFile(chatKey)); if (!raw) return null;
     const expiresAt = Number(raw.expiresAt) || 0;
-    if (expiresAt && expiresAt <= Date.now()) { try { fs.rmSync(handoffFile(chatKey), { force: true }); } catch {} return null; }
+    if (expiresAt && expiresAt <= Date.now()) { try { fs.rmSync(handoffFile(chatKey), { force: true }); } catch { /* 有意忽略：过期交接删失败＝文件残留，下次读取时重试 */ } return null; }
     return {
       version: 1, topic: clean(raw.topic, 200), summary: clean(raw.summary, 1200), hypotheses: list(raw.hypotheses, 6, 300), evidence: list(raw.evidence, 8, 300),
       facts: list(raw.facts, 8), decisions: list(raw.decisions, 6), rejectedDirections: list(raw.rejectedDirections, 6), openQuestions: list(raw.openQuestions, 6),
@@ -89,7 +89,7 @@ export class MemoryStore {
     if (!meaningful) return prev.version ? prev : null;
     writeJson(handoffFile(chatKey), handoff); return handoff;
   }
-  clearHandoff(chatKey) { try { fs.rmSync(handoffFile(chatKey), { force: true }); } catch {} }
+  clearHandoff(chatKey) { try { fs.rmSync(handoffFile(chatKey), { force: true }); } catch { /* 有意忽略：删失败＝文件残留，下次同 chatKey 写入时覆盖 */ } }
   formatHandoffForPrompt(chatKey) {
     if (getConfig().memory?.handoffEnabled === false) return '';
     const h = this.getHandoff(chatKey); if (!h) return '';

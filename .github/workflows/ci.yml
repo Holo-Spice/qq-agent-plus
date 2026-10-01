@@ -70,3 +70,23 @@ jobs:
           node test/render-test.mjs
           node test/scroll-test.mjs
           node test/usage-e2e.mjs
+
+  # ESLint 门禁（改进方案 C4）：与本地 `npm run lint` 同口径 —— 0 error 才能进 main。
+  # 与 test 分开成 job：lint 失败时一眼看到是风格/静态问题，不用翻几百行测试输出。
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci --no-audit --no-fund
+
+      - name: ESLint（0 error）
+        run: npm run lint

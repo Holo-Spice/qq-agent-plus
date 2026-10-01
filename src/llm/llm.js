@@ -2,8 +2,8 @@
 // 支持工具调用、usage 统计和可选模型。
 import { getConfig } from '../core/config.js';
 import { stripLoneSurrogates } from '../core/util.js';
-import { normalizeThinkingIntent, thinkingPatchFor, resolveThinkingPatch, modelServiceById, modelServiceOfBaseUrl, effectiveThinkingRaw, hostOf } from '../core/provider-presets.js';
-import { resolveOfficialPrice, resolveModelPrice, priceAt } from '../pricing/model-prices.js';
+import { normalizeThinkingIntent, resolveThinkingPatch, modelServiceById, modelServiceOfBaseUrl, effectiveThinkingRaw, hostOf } from '../core/provider-presets.js';
+import { resolveModelPrice, priceAt } from '../pricing/model-prices.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertTimeAllowed, watchTimeWindow } from '../core/time-gate.js';
 

@@ -354,14 +354,6 @@ export const MODEL_DOCS = {
     verdict: 'no-vision',
     note: 'DeepSeek-V4-Flash-0731 为纯文本模型。来源：docs.cloudbase.net'
   },
-  'deepseek-ai/deepseek-v4-pro-0813': {
-    verdict: 'no-vision',
-    note: 'DeepSeek V4 Pro 正式版（0813）官方能力清单未包含图片输入；V4 系列视觉模型是独立的 deepseek-v4-flash-vision-exp。来源：api-docs.deepseek.com'
-  },
-  'deepseek-ai/deepseek-v4-flash-0731': {
-    verdict: 'no-vision',
-    note: 'DeepSeek-V4-Flash-0731 为纯文本模型。来源：docs.cloudbase.net'
-  }
 };
 
 /**

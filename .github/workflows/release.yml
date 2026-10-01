@@ -30,6 +30,8 @@ jobs:
 
       # 发布前再跑一遍与 CI 相同的检查，任何一步失败都不会出 Release
       - run: npm ci
+      # 与 ci.yml 的 lint job 同口径（改进方案 C4）：发布闸门也卡 0 error
+      - run: npm run lint
       # 与 ci.yml 同步：runner 没有 ffmpeg，缺了会让 GIF 帧条与语音转码的用例静默跳过
       - name: 安装 ffmpeg（GIF 帧条 / 音频转码用例依赖）
         run: |
