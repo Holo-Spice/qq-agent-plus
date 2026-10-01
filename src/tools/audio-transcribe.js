@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { safeFetchBinary } from '../llm/safe-fetch.js';
 import { seedAsrTranscribe } from '../llm/seed-asr.js';
 import {
-  asrApiKey, asrConfigured, asrLocalBin, asrLocalModel, asrMaxPerHour, asrProvider, getConfig
+  asrApiKey, asrConfigured, asrLocalBin, asrLocalModel, asrMaxPerHour, asrMaxPerHourPerChat, asrProvider, getConfig
 } from '../core/config.js';
 import { openAiCompatibleTranscribe, openAiProviderOptions, pcmToWav } from '../llm/asr-openai.js';
 import { localWhisperTranscribe, resolveWhisperBin } from '../llm/asr-local.js';
@@ -20,26 +20,23 @@ import { baiduOptions, baiduTranscribe } from '../llm/asr-baidu.js';
 import { tencentOptions, tencentTranscribe } from '../llm/asr-tencent.js';
 import { iflytekOptions, iflytekTranscribe } from '../llm/asr-iflytek.js';
 import { hasSilkMagic, looksLikeSilk, silkToPcm } from '../llm/silk.js';
+import { createQuota } from '../core/quota.js';
 
 const AUDIO_MAX_BYTES = 200 * 1024 * 1024; // 200MB：QQ 文件上限内
 // PCM 全量进内存：16kHz 单声道 s16 = 32KB/s，15 分钟约 28.8MB（上限按这个算）。
 // 更要防的是"群友连发长语音刷账单"，所以再加一道每小时次数闸门（asr.maxPerHour）。
 const ASR_MAX_PCM_SECONDS = 60 * 15;
 
-// 跨会话共享的小时窗口计数器（进程内）。restart 归零对"按量计费"这个目的够用：
-// 它防的是同一个群里连着刷，不是精确计费对账。
-const asrQuota = { hour: -1, used: 0 };
-/** 取一次转写配额；额度用尽返回 false。导出仅供测试。 */
-export function consumeAsrQuota(now = Date.now(), cfg = getConfig()) {
-  const hour = Math.floor(now / 3600000);
-  if (asrQuota.hour !== hour) { asrQuota.hour = hour; asrQuota.used = 0; }
-  const limit = asrMaxPerHour(cfg);
-  if (asrQuota.used >= limit) return false;
-  asrQuota.used += 1;
-  return true;
+// 小时窗口配额（#9 双闸：每会话 + 全局）。restart 归零对"按量计费"这个目的够用：
+// 它防的是连着刷，不是精确计费对账（上限来自配置，调用时同步）。
+const asrQuota = createQuota({ windowMs: 3600_000 });
+/** 取一次转写配额；返回 { ok, scope:'chat'|'global'|'', retryAfterMs }。导出仅供测试。 */
+export function consumeAsrQuota(now = Date.now(), cfg = getConfig(), chatKey = '') {
+  asrQuota.configure({ globalMax: asrMaxPerHour(cfg), perChatMax: asrMaxPerHourPerChat(cfg) });
+  return asrQuota.tryConsume(chatKey, now);
 }
 /** 测试用：重置窗口。 */
-export function resetAsrQuota() { asrQuota.hour = -1; asrQuota.used = 0; }
+export function resetAsrQuota() { asrQuota.reset(); }
 
 /** ffmpeg 转 16k mono s16le PCM（文件路径输入，导出仅供测试）。 */
 export function ffmpegToPcm(inputPath, { timeoutMs = 10 * 60 * 1000, signal } = {}) {
@@ -424,8 +421,14 @@ export async function transcribeMessageAudio(ctx, entry) {
     }
     // 配额在"确定要下载+转码"这一步才扣：调错消息（没有音频/拿不到地址）不该消耗额度，
     // 但下载与转码本身就占资源，所以在下载前扣。按量计费的服务，这道闸门是真金白银。
-    if (!consumeAsrQuota()) {
-      return { ok: false, error: `本小时的语音转写次数已用完（上限 ${asrMaxPerHour(getConfig())} 次/小时，可在控制台「语音转文字」里调整），稍后再试` };
+    const quota = consumeAsrQuota(Date.now(), getConfig(), ctx.chatKey);
+    if (!quota.ok) {
+      return {
+        ok: false,
+        error: quota.scope === 'chat'
+          ? `本会话本小时的语音转写次数已用完（每会话上限 ${asrMaxPerHourPerChat(getConfig())} 次/小时，可在控制台「语音转文字」里调整），稍后再试`
+          : `本小时全局的语音转写次数已用完（上限 ${asrMaxPerHour(getConfig())} 次/小时，可在控制台「语音转文字」里调整），稍后再试`
+      };
     }
     let buffer;
     try {

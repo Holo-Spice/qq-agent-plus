@@ -245,10 +245,16 @@ export function asrAvailable(cfg = getConfig()) {
   return cfg?.asr?.enabled !== false && asrConfigured(cfg);
 }
 
-/** 每小时最多转写几次（按量计费服务的硬闸门）。 */
+/** 每小时最多转写几次（按量计费服务的硬闸门，全局。#9 双闸的全局侧）。 */
 export function asrMaxPerHour(cfg = getConfig()) {
   const n = Number(cfg?.asr?.maxPerHour);
   return Number.isFinite(n) && n > 0 ? Math.min(200, Math.round(n)) : 12;
+}
+
+/** 每会话每小时最多转写几次（#9 双闸的会话侧）。 */
+export function asrMaxPerHourPerChat(cfg = getConfig()) {
+  const n = Number(cfg?.asr?.maxPerHourPerChat);
+  return Number.isFinite(n) && n > 0 ? Math.min(200, Math.round(n)) : 4;
 }
 
 export function updateConfig(patch) {

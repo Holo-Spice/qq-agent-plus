@@ -108,6 +108,8 @@ import { safeSlice } from './util.js';
 import { canRun } from './access.js';
 import { assertTimeAllowed, isTimeActive, TimeControlError, watchTimeWindow, withTimeScope } from './time-gate.js';
 import { vendorOfConfig } from '../pricing/model-prices.js';
+import { budgetStatus } from './budget.js';
+import { readOwnerUin } from './notify-owner.js';
 import { ZONE_OFFSET_MS, minuteOfDayInZone, randInt, createEventBus, todayKey } from './util.js';
 import { buildSystemPrompt, buildUserPrompt, resolveContextTier } from '../llm/prompt.js';
 import { chatCompletion, chatCompletionWithRetry, addUsage, isRetryableError } from '../llm/llm.js';
@@ -117,6 +119,9 @@ import { visionEnabled } from '../llm/vision-scan.js';
 import { currentProviders } from './providers.js';
 import { buildSlangContextForChat } from '../console/asset-observer.js';
 import { parseInlineToolCalls } from '../tools/inline-tools.js';
+import { createLogger, newTraceId, withTrace } from './logger.js';
+
+const log = createLogger('orchestrator');
 
 function handoffParticipantIds(triggerEntries) {
   return [...new Set((triggerEntries || [])
@@ -462,7 +467,7 @@ export class Orchestrator {
             && this.store.unreadCount(key) > 0) this.scheduleWake(key);
         }
       } catch (error) {
-        console.error('[recovery] 兜底回收这一轮出错（不影响下一轮）:', error?.message ?? error);
+        log.error('[recovery] 兜底回收这一轮出错（不影响下一轮）:', error?.message ?? error);
       }
     }, 5000);
     this.retryTimer.unref?.();
@@ -489,7 +494,7 @@ export class Orchestrator {
         followUpEnabled: cfgNow.proactive?.followUpEnabled !== false
       });
       if (!plan.schedule) {
-        if (plan.reason === '补话开关已关闭') console.log(`[follow-up] ${chatKey} 跳过：补话开关已关闭`);
+        if (plan.reason === '补话开关已关闭') log.info(`[follow-up] ${chatKey} 跳过：补话开关已关闭`);
         return;
       }
       if (!this.followUpAt) this.followUpAt = new Map();
@@ -497,7 +502,7 @@ export class Orchestrator {
       this.scheduleInitiativeWake(chatKey, plan.minutes * 60 * 1000,
         '【系统提醒】你刚才发过言，到现在没人接话。想补就补一句很短的（“？”/“人呢”/“算了”）——只有这一次机会，不补就到此为止；也可以判断没必要，直接安静结束。',
         { kind: 'followUp' });
-      console.log(`[follow-up] ${chatKey} 发言后没人接话，${plan.minutes} 分钟后给它一次补话机会`);
+      log.info(`[follow-up] ${chatKey} 发言后没人接话，${plan.minutes} 分钟后给它一次补话机会`);
     } catch { /* 安排不上也不影响正常回复 */ }
   }
 
@@ -801,7 +806,7 @@ export class Orchestrator {
         return;
       }
       const task = this.wake(chatKey, { waitingSessionId: waitingId ?? null })
-        .catch((error) => console.error(`[orchestrator] wake ${chatKey} 出错:`, error))
+        .catch((error) => log.error(`[orchestrator] wake ${chatKey} 出错:`, error))
         .finally(() => this.runTasks.delete(task));
       this.runTasks.add(task);
     }, ms);
@@ -815,6 +820,26 @@ export class Orchestrator {
    * 而不是一条等了半天最后标着"中止"的条目（那会让人以为机器人坏了）。
    * 只有真正运行过（消耗了 token）的会话才走 #finishWaiting 留痕。
    */
+  #budgetNotifiedDay = '';
+
+  /**
+   * 超限当天私聊管理员一次（改进方案 #8/J.3：去重键 = dayKey，内存态即可 —— 重启最多重发一条，
+   * 不值得为此落盘）。发送走主进程 sender（WS 通道）；失败静默，不影响拦截逻辑。
+   */
+  #maybeNotifyBudgetExceeded(budget) {
+    const day = todayKey();
+    if (this.#budgetNotifiedDay === day) return;
+    this.#budgetNotifiedDay = day;
+    const owner = readOwnerUin(getConfig());
+    if (!/^\d{5,15}$/.test(owner)) return;
+    const unpriced = budget.unpricedRuns > 0 ? `（另有 ${budget.unpricedRuns} 次运行未计价，未计入金额）` : '';
+    const text = `每日花费已达上限：估算已用 ¥${budget.spentYuan.toFixed(2)} / ¥${budget.limitYuan}${unpriced}。`
+      + (budget.onExceed === 'block'
+        ? '超限策略＝停止：新消息将不处理，明天自动恢复。'
+        : '超限策略＝降级：群里只回应 @，私聊不受限，明天自动恢复。');
+    Promise.resolve(this.sender?.sendTextBatch?.(`private:${owner}`, [text], {})).catch(() => { /* 通知失败静默 */ });
+  }
+
   #discardWaiting(sessionId) {
     if (!sessionId) return;
     const s = this.sessions.current.get(sessionId);
@@ -872,14 +897,16 @@ export class Orchestrator {
     this.pendingSessions.delete(chatKey);
     const mode = this.store.unreadCount(chatKey) > 0 ? 'unread' : 'context';
     this.wake(chatKey, { manual: true, waitingSessionId }).catch((error) =>
-      console.error(`[orchestrator] manual wake ${chatKey} 出错:`, error));
+      log.error(`[orchestrator] manual wake ${chatKey} 出错:`, error));
     return { ok: true, mode };
   }
 
   // ── 核心循环 ───────────────────────────────────────────────────────────
 
   wake(chatKey, options = {}) {
-    const task = withTimeScope(chatKey, () => this.#wake(chatKey, options));
+    // #6：每次运行一个 trace id —— 运行期日志自动带 [id] 前缀，/api/status 的 lastTraceId
+    // 记录"最近一次运行"（拿它去 journalctl / 日志文件捞整条链路）
+    const task = withTrace(newTraceId(), () => withTimeScope(chatKey, () => this.#wake(chatKey, options)));
     this.runTasks.add(task);
     task.then(() => this.runTasks.delete(task), () => this.runTasks.delete(task));
     return task;
@@ -920,6 +947,31 @@ export class Orchestrator {
       const pendingRoll = this.pendingRolls.get(chatKey);
       this.pendingRolls.delete(chatKey);
       const roll = pendingRoll && Date.now() - pendingRoll.at < 120000 ? pendingRoll.roll : undefined;
+      // ── 每日预算拦截（改进方案 #8/J.3）──
+      // block：本次运行不进行（active 模式下回一句固定文案）；degrade：只回应 @ ——
+      // 群聊里非 @ 触发直接跳过、消息保留未读（等被 @ 或明天）。两者都只影响**新**运行，
+      // 不打断进行中的会话；私聊、手动唤醒与主动唤醒不受 degrade 限制。
+      const budget = budgetStatus(getConfig(), this.sessions?.todayUsage?.(todayKey()) || {});
+      if (budget.enabled && budget.exceeded && budget.notify) this.#maybeNotifyBudgetExceeded(budget);
+      if (budget.enabled && budget.exceeded) {
+        const activeMode = String(getConfig().runtime?.mode || 'active') !== 'observe';
+        if (budget.onExceed === 'block' && !manual) {
+          if (activeMode) {
+            try { await this.sender.sendTextBatch(chatKey, ['今天的额度用完了，明天再聊'], {}); }
+            catch { /* 发送失败不阻断 */ }
+          }
+          if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted', '本轮额度已用完');
+          return;
+        }
+        if (budget.onExceed === 'degrade' && !manual && !proactive && String(chatKey).startsWith('group:')) {
+          const mentioned = pendingEntries.some((entry) => entry?.mentionsSelf === true);
+          if (!mentioned) {
+            if (waitingSessionId) this.#discardWaiting(waitingSessionId);
+            return;   // 保留未读：被 @ 时（或跨日重置后）自然会再进这里
+          }
+        }
+      }
+
       const predicted = this.#predictTier(chatKey, roll === undefined ? {} : { roll });
       const manualContextCount = cappedByTokenSaver(Math.min(500, Math.max(
         1,
@@ -966,7 +1018,7 @@ export class Orchestrator {
         if (waitingSessionId) this.#discardWaiting(waitingSessionId);
         this.emit('chat-update', chatKey);
         if (marked) {
-          console.log(`[orchestrator] ${chatKey} ${marked} 条未命中触发条件（概率 ${storeConfigForChat(chatKey).randomPercent}%，${tierResult0.reason || '未触发'}），已标记已读、不响应`);
+          log.info(`[orchestrator] ${chatKey} ${marked} 条未命中触发条件（概率 ${storeConfigForChat(chatKey).randomPercent}%，${tierResult0.reason || '未触发'}），已标记已读、不响应`);
         }
         if (this.store.unreadCount(chatKey) > 0) this.scheduleWake(chatKey);
         return;
@@ -1095,7 +1147,7 @@ export class Orchestrator {
           triggerReason: tierResult?.reason || '',
           repliedThisRun: session.sent.length > 0
         }).catch((error) => {
-          console.warn(`[identity-pilot] ${chatKey} 消息触发评估失败：${error?.message ?? error}`);
+          log.warn(`[identity-pilot] ${chatKey} 消息触发评估失败：${error?.message ?? error}`);
         });
       }
     } catch (error) {
@@ -1196,7 +1248,7 @@ export class Orchestrator {
       return handoff;
     } catch (error) {
       session.handoffError = String(error?.message ?? error);
-      console.warn(`[memory] ${chatKey} 保存会话交接失败:`, session.handoffError);
+      log.warn(`[memory] ${chatKey} 保存会话交接失败:`, session.handoffError);
       return null;
     }
   }
@@ -1316,7 +1368,7 @@ export class Orchestrator {
       }
     } catch (error) {
       session.threadError = String(error?.message ?? error);
-      console.warn(`[thread] ${chatKey} 保存线程状态失败:`, session.threadError);
+      log.warn(`[thread] ${chatKey} 保存线程状态失败:`, session.threadError);
     }
   }
 
@@ -1725,7 +1777,7 @@ export class Orchestrator {
           // 工具报错也写一行 journal（Issue #17 反馈：只进控制台异常面板、journal 里查不到，
           // 排查时容易漏）。同一判定口径：reportIncident:false 的工具照旧不刷。
           // 脱敏走 incident-pilot 同款规则——错误串里可能带上 URL 查询串里的 access_token。
-          console.warn(`[tool] ${name} 出错：${redactText(String(result.content || '工具执行失败').replace(/\s+/g, ' '), 160)}`);
+          log.warn(`[tool] ${name} 出错：${redactText(String(result.content || '工具执行失败').replace(/\s+/g, ' '), 160)}`);
           this.getIncidentPilot()?.capture(new Error(String(result.content || '工具执行失败')), {
             source: `tool:${name}`,
             category: 'tool',
@@ -1864,7 +1916,7 @@ export class Orchestrator {
       this.scheduledWakes.delete(chatKey);
       if (item.timer) clearTimeout(item.timer);
       if (blocked) {
-        console.log(`[wake] ${chatKey} 跳过：${kind === 'followUp' ? '补话' : '自安排唤醒'}开关已关闭，这次安排作废`);
+        log.info(`[wake] ${chatKey} 跳过：${kind === 'followUp' ? '补话' : '自安排唤醒'}开关已关闭，这次安排作废`);
         continue;
       }
       // 系统提醒的补话：等待期间有人说话了（正常流程已经在处理），这次就不必再唤一次
@@ -1891,7 +1943,7 @@ export class Orchestrator {
       this.wake(chatKey, item.paced
         ? { manual: true, paced: true, wakeNote: item.note }
         : { proactive: true, wakeNote: item.note })
-        .catch((error) => console.error('[orchestrator] 自主唤醒出错:', error));
+        .catch((error) => log.error('[orchestrator] 自主唤醒出错:', error));
     }
   }
 
@@ -1928,7 +1980,7 @@ export class Orchestrator {
   startReminderLoop() {
     if (this.reminderTimer) return;
     const tick = () => {
-      try { this.fireDueReminders(); } catch (error) { console.error('[reminder] 派发出错（不影响下一轮）:', error?.message ?? error); }
+      try { this.fireDueReminders(); } catch (error) { log.error('[reminder] 派发出错（不影响下一轮）:', error?.message ?? error); }
     };
     tick();
     this.reminderTimer = setInterval(tick, 30000);
@@ -1948,7 +2000,7 @@ export class Orchestrator {
     // 离线太久（迟到 >12 小时）的直接作废：不补发一串"迟到的提醒"
     for (const item of this.reminders.expired(now)) {
       this.reminders.markExpired(item.id, now);
-      console.log(`[reminder] 过期作废（迟到超过 12 小时）：${item.chatKey} ${String(item.text).slice(0, 30)}`);
+      log.info(`[reminder] 过期作废（迟到超过 12 小时）：${item.chatKey} ${String(item.text).slice(0, 30)}`);
     }
     // 同一会话多条同时到期：**合并成一条 note 只排一次唤醒** —— scheduledWakes 每会话单槽，
     // 逐条排会互相覆盖：先排的被顶掉，却已经标记 fired，内容就永久丢了（2026-09-28 审查 P2）。
@@ -1995,10 +2047,10 @@ export class Orchestrator {
         && !this.store.hasLeasedRun(chatKey);
       if (!dispatchable) continue;
       this.wake(chatKey, { manual: true, paced: true, wakeNote: note })
-        .catch((error) => console.error('[reminder] 唤醒出错:', error?.message ?? error));
+        .catch((error) => log.error('[reminder] 唤醒出错:', error?.message ?? error));
       for (const it of chosen) this.reminders.markFired(it.id, now);
       const deferred = items.length - chosen.length;
-      console.log(`[reminder] 到点派发 ${chosen.length} 条：${chatKey} ${chosen.map((x) => String(x.text).slice(0, 20)).join(' / ')}`
+      log.info(`[reminder] 到点派发 ${chosen.length} 条：${chatKey} ${chosen.map((x) => String(x.text).slice(0, 20)).join(' / ')}`
         + (deferred > 0 ? `（另有 ${deferred} 条本轮装不进提示词，30 秒后继续派发）` : ''));
     }
   }
@@ -2022,19 +2074,19 @@ export class Orchestrator {
       // 距上次判定不足一个间隔（例如刚重启过）就跳过：重启不额外换来一次开话题的机会
       const minGapMs = Math.max(60000, Number(cfg.proactive?.checkIntervalMinMs) || 1800000);
       if (nowTick - readProactiveLastAttempt() < minGapMs * 0.8) {
-        console.log('[proactive] 跳过：距上次判定不足一个间隔');
+        log.info('[proactive] 跳过：距上次判定不足一个间隔');
         return;
       }
       if (this.proactiveSuppressions.size > 0) {
-        console.log('[proactive] 跳过：有后台任务在跑');
+        log.info('[proactive] 跳过：有后台任务在跑');
         return;
       }
       if (this.runningChats.size >= Math.max(1, Number(cfg.maxConcurrentRuns) || 2)) {
-        console.log('[proactive] 跳过：并发任务已满');
+        log.info('[proactive] 跳过：并发任务已满');
         return;
       }
       if (Math.random() > (Number(cfg.proactive?.probability) || 0.25)) {
-        console.log('[proactive] 跳过：这次摇到了不发言');
+        log.info('[proactive] 跳过：这次摇到了不发言');
         // 摇了不发言也算把这一轮用掉
         writeProactiveLastAttempt(nowTick);
         return;
@@ -2043,7 +2095,7 @@ export class Orchestrator {
       const candidates = this.#proactiveCandidates(cfg);
       if (!candidates.length) {
         // 群里正热闹、或都在忙：这不算消耗，45 分钟后再看，别白瞎一个间隔
-        console.log('[proactive] 跳过：没有安静下来的群，45 分钟后再看');
+        log.info('[proactive] 跳过：没有安静下来的群，45 分钟后再看');
         clearTimeout(this.proactiveTimer);
         this.proactiveTimer = setTimeout(() => { tick().catch(() => {}); }, 45 * 60 * 1000);
         return;
@@ -2051,8 +2103,8 @@ export class Orchestrator {
       // 真要开口了，才把这一轮用掉（本间隔内不再判定）
       writeProactiveLastAttempt(nowTick);
       const chatKey = candidates[Math.floor(Math.random() * candidates.length)];
-      console.log('[proactive] 主动开话题 → ' + chatKey);
-      this.wake(chatKey, { proactive: true }).catch((error) => console.error('[orchestrator] proactive 出错:', error));
+      log.info('[proactive] 主动开话题 → ' + chatKey);
+      this.wake(chatKey, { proactive: true }).catch((error) => log.error('[orchestrator] proactive 出错:', error));
     };
     this.proactiveTimer = setTimeout(() => { tick().catch(() => {}); }, 15000);
   }
@@ -2118,7 +2170,7 @@ export class Orchestrator {
       if (Date.now() - (st.lastConsolidatedAt || 0) < minInterval) return;
       this.consolidating.add(chatKey);
       this.consolidateMemoryForChat(chatKey)
-        .catch((error) => console.error(`[memory] 整理 ${chatKey} 失败:`, error?.message ?? error))
+        .catch((error) => log.error(`[memory] 整理 ${chatKey} 失败:`, error?.message ?? error))
         .finally(() => this.consolidating.delete(chatKey));
     } catch { /* 整理是锦上添花，绝不影响聊天主流程 */ }
   }
@@ -2393,7 +2445,7 @@ export class Orchestrator {
     try {
       this.memory.markConsolidated(chatKey, now, userIds);
     } catch (error) {
-      console.warn('[memory] 记录整理时间失败:', error?.message ?? error);
+      log.warn('[memory] 记录整理时间失败:', error?.message ?? error);
     }
   }
 
@@ -2423,9 +2475,9 @@ export class Orchestrator {
 
     const parsed = extractJsonObject(String(res?.message?.content ?? ''));
     if (!parsed) {
-      console.warn(`[memory] ${isNew ? '新建' : '整理'} ${chatKey}/${mem.userId || mem.name} 结果无法解析为 JSON，本轮放弃`);
+      log.warn(`[memory] ${isNew ? '新建' : '整理'} ${chatKey}/${mem.userId || mem.name} 结果无法解析为 JSON，本轮放弃`);
       if (process.env.QQ_AGENT_DEBUG_MEMORY) {
-        console.warn('[memory][debug] 原始返回 =', JSON.stringify(String(res?.message?.content ?? '')).slice(0, 1500));
+        log.warn('[memory][debug] 原始返回 =', JSON.stringify(String(res?.message?.content ?? '')).slice(0, 1500));
       }
       return null;
     }
@@ -2436,7 +2488,7 @@ export class Orchestrator {
 
     const rejection = consolidationRejectionReason({ isNew, existing, next: parsedImpressions });
     if (rejection) {
-      console.warn(`[memory] 整理 ${chatKey}/${mem.userId} 放弃：${rejection}`);
+      log.warn(`[memory] 整理 ${chatKey}/${mem.userId} 放弃：${rejection}`);
       return null;
     }
 

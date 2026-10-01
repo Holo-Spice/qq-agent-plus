@@ -15,6 +15,10 @@ export function redactText(value, max = 1000) {
     .replace(/("[a-z0-9_-]*(?:access_token|api_key|apikey|client_id|client_secret|secret_key|api_token|auth_token|auth_key|session_key|token|secret|password|authorization|credential|key)"\s*:\s*)"[^"]*"/gi, '$1"[redacted]"')
     // Cookie 头整值脱敏（一对对抠不现实，整个值都是凭据）。
     .replace(/\b(cookie)\s*:\s*\S+/gi, '$1: [redacted]')
+    // 裸的供应商密钥前缀（sk-/pk-/rk-，OpenAI/Stripe 风格；连字符与下划线两种分隔都认，
+    // Stripe 是 sk_live_… 形态）：错误文本与粘贴的配置里常以裸串出现，前面几种形态
+    // （查询串 / JSON / 头）都拦不住它。命中面同"宁多脱勿漏"，至少 8 位才算（2026-09-30 #6 补）。
+    .replace(/\b(sk|pk|rk)[-_][A-Za-z0-9_-]{8,}/gi, '$1-[redacted]')
     .replace(/\0/g, '')
     .trim()
     .slice(0, max);

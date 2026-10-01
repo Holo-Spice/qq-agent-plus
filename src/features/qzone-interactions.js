@@ -26,6 +26,7 @@ import {
 } from '../llm/qzone-interaction-prompt.js';
 import { resolveToolCalls } from '../tools/inline-tools.js';
 import { minuteOfDayInZone, sanitizeUserText } from '../core/util.js';
+import { newTraceId, withTrace } from '../core/logger.js';
 
 const STATE_FILE = path.join(DATA_DIR, 'qzone-interactions.json');
 const HOUR_MS = 60 * 60 * 1000;
@@ -450,7 +451,7 @@ export class QzoneInteractionManager {
     if (this.stopped) return;
     this.nextRunAt = this.now() + Math.max(1000, Number(delay) || 1000);
     this.timer = setTimeout(() => {
-      this.#tick().catch((error) => {
+      withTrace(newTraceId(), () => this.#tick()).catch((error) => {
         this.log('[qzone-interactions] scheduler error:', error?.message ?? error);
         // 这一轮炸了也要把下一次排上：否则 enabled:true 但永远不再跑，只有重启能恢复
         try { this.#schedule(60000); } catch { /* 已停用 */ }

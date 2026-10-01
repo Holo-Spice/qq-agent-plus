@@ -88,3 +88,25 @@ test('ReminderStore：新增/查询/取消/到期/过期与限额', () => {
   assert.equal(canceled.id, b.id, '不带 id 取消的应该是最近立的那条');
   assert.equal(s3.list('group:21').some((x) => x.id === a.id && x.status === 'pending'), true, '早先那条不受影响');
 
+
+test('提醒容量（#9）：先清「过期未处理」的占位项再判上限；全局满时给"全局提醒位已满"', () => {
+  const store = new ReminderStore(path.join(dataDir, 'reminders-capacity.json'));
+  const now = Date.now();
+  const at = (n) => now + n * 60000;
+  for (let c = 0; c < 5; c += 1) {
+    for (let i = 0; i < 10; i += 1) store.add({ chatKey: `group:cap${c}`, at: at(i + 1), text: `t${i}` });
+  }
+  // 全局 50 条都还在未来 → 本会话新增被拒，文案点名"全局提醒位已满"
+  assert.throws(() => store.add({ chatKey: 'group:me', at: at(1), text: 'x' }), /全局提醒位已满/);
+  // 把其中 40 条改成"13 小时前该发没发"（模拟服务停机很久）：它们应是可回收的占位项
+  let stale = 0;
+  for (const it of store.items) {
+    if (it.status === 'pending' && stale < 40) { it.at = now - 13 * 3600 * 1000; stale += 1; }
+  }
+  const added = store.add({ chatKey: 'group:me', at: at(1), text: '不占过期名额' });
+  assert.ok(added.id, '过期项被清掉后应有名额');
+  assert.ok(store.items.filter((it) => it.status === 'expired').length > 0, '过期未发的被标 expired');
+  const leftPending = store.items.filter((it) => it.status === 'pending');
+  assert.ok(leftPending.every((it) => it.at > now - 12 * 3600 * 1000), '不再有过期未处理的占位项');
+  assert.equal(store.list('group:me').length, 1);
+});

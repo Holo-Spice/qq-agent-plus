@@ -24,6 +24,14 @@ export const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 export const DEFAULT_CONFIG = {
   // OpenAI 兼容 API（必填才能跑）
   api: {
+    // 每日花费上限（改进方案 #8，默认关闭＝升级不改变任何行为）。按**估算价**累计当日用量，
+    // 不产生任何实际扣费动作；金额由运营者按自己的渠道价格填（方案 D5）。
+    budget: {
+      enabled: false,
+      dailyYuan: 20,
+      onExceed: 'degrade',   // degrade=只回应 @；block=不运行
+      notify: true
+    },
     // 出厂留空：这是作者本机的网关地址，对其他人毫无意义，
     // 留空能让「就绪度体检」正确提示"还没填 Base URL"。
     baseUrl: '',                             // 例如 https://api.deepseek.com/v1 或自建网关
@@ -174,7 +182,8 @@ export const DEFAULT_CONFIG = {
     // 粘一个 Key、从官网拉一次模型列表就能用；不想注册账号可以切到 local（本机 whisper.cpp，
     // 控制台里一键装/卸，约 466MB 模型）。地址预置只是默认值，服务预设里一键换别家。
     provider: 'openai',
-    maxPerHour: 12,           // 按量计费服务的硬闸门：每小时最多转写几次（跨会话共享）
+    maxPerHour: 12,           // 按量计费服务的硬闸门：每小时最多转写几次（全局，#9 双闸的全局侧）
+    maxPerHourPerChat: 4,     // 每会话每小时上限（#9 双闸：防单个群刷爆全局额度）
     apiKey: '',               // volc / openai / 百度(API Key) / 讯飞(APIKey) 用；留空回退环境变量 ASR_API_KEY
     apiKeyProvider: '',       // 上面这个 Key 是给哪家存的：换供应商后不再拿它发请求（避免把旧 Key 发给新服务）
     apiKeyHost: '',           // 再细一层：OpenAI 兼容里"哪家的地址"（主机名）。硅基流动/Groq/OpenAI 都是 openai 一家，只看 provider 分不出来
@@ -464,6 +473,7 @@ export const DEFAULT_CONFIG = {
     // 别人发来的表情包自动进库（同图只存一次，受 maxCollectPerHour 限频）
     autoCollect: true,
     maxCollectPerHour: 10,
+    maxCollectPerHourPerChat: 3,   // 每会话每小时收藏上限（#9 双闸；上一行是全局）
     // 发表情包的积极程度（0=不鼓励 1=偶尔 2=较积极 3=很积极）。
     // 这是在提示词层面引导模型"更愿意用表情回应"，不是强制每次都发 ——
     // 强制会显得机械，引导才能让它在合适的时候自然用上。
@@ -510,7 +520,9 @@ export const DEFAULT_CONFIG = {
     handoffMaxChars: 4000,
     useChatModel: true,                   // true = 整理模型跟随聊天模型；false = 使用下方专用模型
     provider: '',                         // 专用模型所属提供商 id（useChatModel=false 时生效）
-    model: ''                             // 专用模型 id（useChatModel=false 时生效）
+    model: '',                            // 专用模型 id（useChatModel=false 时生效）
+    // 记忆可见性（#13）：默认与历史行为逐字一致（global + 不隐藏），切换必须显式操作
+    visibility: { mode: 'global', hidePrivateInGroup: false }
   },
   // 省 Token 模式：只给"可控项"夹上限（上下文档位条数、单次运行轮数与预算、
   // 交接/印象注入字符数、提示词里的表情清单条数），不改写上面那些用户填的值。

@@ -50,6 +50,7 @@ node src/ops.js install-timers --confirm   # 写入并启用 backup / process-gu
 | --- | --- | --- | --- |
 | `audit` | `ops/audit-server.sh` | 服务、代码与数据体检：systemd user 服务/定时器、启动补丁链可执行性、全量 js 语法、未定义调用扫描、关键补丁标记、config.json 关键项（密钥只报告有/无）、sqlite 完整性、控制台与协议端运行态、最近日志、主机资源 | 部署后验收；出现问题时用于定位 |
 | `audit-host` | `ops/audit-host.sh` | 主机只读体检：失败单元、内存/磁盘/journald、Docker 容器与重启次数、监听端口、SSH 安全、防火墙、定时任务、可升级包、TLS 证书到期、备份现状 | 接手机器后的检查、例行巡检 |
+| `audit-prune` | —（改进方案 #5 新增） | 删除 `data/audit-log/` 下超过保留月数的 `audit-YYYYMM.jsonl`（控制台写操作的审计留痕）；默认保留 6 个月，先 `--dry-run` 预演 | 每月定时执行（`qq-agent-audit-prune.timer`）；磁盘吃紧时手动执行 |
 | `backup` | `ops/backup-qq-agent-data.sh` | 停止服务数秒 → tar.gz 打包数据目录 → 启动服务 → 仅保留最近 N 份；任何失败路径都会重新启动服务 | 每周定时执行（配合 `.timer`）；重大变更前手动执行 |
 | `scan` | `ops/scan-undefined-calls.py` + `ops/check-undefined-calls.sh` | 将注释/字符串/正则/模板串抹白后，查找「已调用但本文件既未定义也未 import」的函数名；只记录、不阻断（退出码恒为 0） | 修改 `src/*.js` 后；也可挂载到服务 `ExecStartPost` |
 | `watch-send` | `ops/watch-send.py` | 监视 outbox 表的 rowid 水位线：基线之后新增 failed 行报 SEND_FAIL，新增成功行报 SEND_OK；同时检查是否再次出现未定义函数事故 | 修复发送链路后的线上验证 |
@@ -58,7 +59,7 @@ node src/ops.js install-timers --confirm   # 写入并启用 backup / process-gu
 | `face-names` | `ops/export-face-names.sh` | 合并 SnowLuma 目录 / QQ 客户端配置 / 手工补充表，导出 `data/face-names.json` | QQ 新增表情、表情名不匹配时 |
 | `deploy` | `ops/deploy_qq_agent.sh` | 非交互部署：设置模型凭据后调用源码目录的 `deploy-all.sh -y` | 新机器初始化、CI 或远程 SSH 环境中的部署 |
 | `console` | `ops/qq-console.bat` | 使用系统 `ssh` 建立控制台 / WebUI / 远程桌面三个端口的隧道，就绪后提示或打开控制台（Windows/macOS/Linux 通用） | 日常打开控制台 |
-| `install-timers` | `ops/systemd/` | 生成并安装两个 systemd user 定时器：备份（每周日 04:10）、进程看门狗（每 10 分钟） | 安装定时任务 |
+| `install-timers` | `ops/systemd/` | 生成并安装四个 systemd user 定时器：备份（每周日 04:10）、进程看门狗（每 10 分钟）、健康巡检（每 5 分钟）、审计日志清理（每月 1 日 04:20） | 安装定时任务 |
 
 ## 常用示例
 
@@ -78,6 +79,10 @@ node src/ops.js scan --log="$HOME/qq-agent-undefined-calls.log"   # 有可疑调
 # 备份（先预演，再执行；N 默认取 QQ_AGENT_KEEP=4）
 node src/ops.js backup --dry-run
 node src/ops.js backup --confirm --keep=4
+
+# 审计日志清理（控制台写操作留痕，按自然月切文件；默认保留 6 个月）
+node src/ops.js audit-prune --dry-run
+node src/ops.js audit-prune --confirm --keep-months=6
 
 # 线上验证
 node src/ops.js watch-send --minutes=240
@@ -123,6 +128,8 @@ node src/ops.js install-timers --confirm
 | `QQ_AGENT_USER` | 当前登录用户 | 进程/定时任务检查的目标用户 |
 | `QQ_AGENT_NODE` | 自动查找 `$APP_DIR/.runtime/node-*/bin/node` | 执行 `--check` 使用的 node |
 | `QQ_AGENT_LOG` | `$HOME/qq-agent-undefined-calls.log` | 启动自检报告文件（`scan --log=` 可显式覆盖） |
+| `QQ_AGENT_LOG_LEVEL` | `info` | 应用日志级别（`error`/`warn`/`info`/`debug`，改进方案 #6） |
+| `QQ_AGENT_LOG_FORMAT` | `text` | 应用日志格式（`text` 保持原观感 / `json` 单行供 journald 过滤） |
 | `QQ_AGENT_CONSOLE_PORT` | `3210` | 控制台端口 |
 | `QQ_AGENT_ONEBOT_HTTP_PORT` | `3390` | 协议端 HTTP 端口 |
 | `QQ_AGENT_CONSOLE_TOKEN` | 无（未设置时回退到 `config.json` 的 `server.token`；两者均无则跳过相关检查） | 控制台 API token |
@@ -151,6 +158,24 @@ node src/ops.js install-timers --confirm
 
 安全约定：token / 口令仅从环境变量或部署生成的配置文件读取，不得写入脚本或提交到仓库。
 
+## 日志（级别 / 格式 / trace id）
+
+应用日志（改进方案 #6）默认输出与升级前逐字相同：`text` 格式直通 stdout/stderr，只多了一层
+脱敏（Bearer / 查询串 / JSON 体 / Cookie / 裸 `sk-`-`pk-`-`rk-` 开头的密钥），并且**一次运行内的
+日志会自动带 `[<traceId>]` 前缀**。
+
+- `QQ_AGENT_LOG_LEVEL=debug`：打开调试级（默认 `info`；也可设 `warn` / `error` 更严）；
+- `QQ_AGENT_LOG_FORMAT=json`：每条一行 JSON（`{ts,level,scope,traceId,msg}`），方便 journald 过滤，
+  例如 `journalctl --user -u qq-agent-linux.service -o cat | grep '"level":"error"'`；
+- **traceId**：每次运行（消息唤醒、以及群日报 / 空间互动 / 每日动态的定时轮次）分配一个 8 位 id，
+  这段运行里的日志都带同一个 id；控制台 HTTP 的响应头 `x-trace-id` 是那次请求的 id。
+  排查"这一轮到底发生了什么"：
+  ```bash
+  journalctl --user -u qq-agent-linux.service -o cat | grep '<traceId>'
+  # 或看接口：GET /api/status 的 lastTraceId 字段 = 最近一次运行的 id（控制台界面暂未展示）
+  ```
+- 注意：`node src/ops.js …` 这条链路的输出不走应用日志（仍是直接打印）。
+
 ## 退出码
 
 | 子命令 | 退出码 |
@@ -158,18 +183,22 @@ node src/ops.js install-timers --confirm
 | `scan` | 恒为 0（只记录、不阻断） |
 | `watch-send` | 0 = 工具层成功发出消息；1 = 发送失败或再次出现未定义函数；2 = 超时 |
 | `watch-login` | 0 = 已登录；1 = 超时或缺少令牌 |
-| `backup` / `deploy` / `install-timers` | 0 = 成功；1 = 参数或执行失败（缺少 `--confirm` 亦返回 1） |
+| `backup` / `deploy` / `install-timers` / `audit-prune` | 0 = 成功；1 = 参数或执行失败（缺少 `--confirm` 亦返回 1） |
 | `audit` / `audit-host` / `guard` | 恒为 0（问题仅体现在 NG / [注意] 行数） |
 
 ## 定时任务
 
-`install-timers` 生成两个 unit。`--print` 仅打印内容，`--confirm` 写入
+`install-timers` 生成四个 unit。`--print` 仅打印内容，`--confirm` 写入
 `~/.config/systemd/user/` 并执行 `systemctl --user daemon-reload && enable --now`：
 
 - `qq-agent-backup.timer`：`OnCalendar=Sun *-*-* 04:10:00`、`Persistent=true`，
   调用 `node src/ops.js backup --confirm`；
 - `process-guard.timer`：`OnBootSec=3min`、`OnUnitActiveSec=10min`，
-  调用 `node src/ops.js guard --confirm`。
+  调用 `node src/ops.js guard --confirm`；
+- `qq-agent-health.timer`：`OnBootSec=5min`、`OnUnitActiveSec=5min`，
+  调用 `node src/ops.js health-check --confirm`；
+- `qq-agent-audit-prune.timer`：`OnCalendar=*-*-01 04:20:00`、`Persistent=true`，
+  调用 `node src/ops.js audit-prune --confirm`（控制台写操作审计留痕的月度清理）。
 
 生成的 ExecStart 使用当前 node 与 `src/ops.js` 的绝对路径。更换机器或部署目录后，重新执行
 `install-timers --confirm` 即可，也可直接修改 unit 中的路径。

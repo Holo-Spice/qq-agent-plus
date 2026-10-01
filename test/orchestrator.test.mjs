@@ -17,6 +17,8 @@ const { ChatStore } = await import('../src/core/store.js');
 const { SessionRegistry } = await import('../src/core/sessions.js');
 const { setRuntimeConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
 const { ReminderStore } = await import('../src/core/reminders.js');
+const { todayKey } = await import('../src/core/util.js');
+const { currentTraceId, lastTraceId } = await import('../src/core/logger.js');
 
 describe('Orchestrator', () => {
   it('draws the debounce delay inside the configured range', () => {
@@ -1490,6 +1492,56 @@ it('换卡后 24 小时内，历史与交接口径会说明"旧口癖不作数"'
     assert.ok(kept.at > Date.now(), '重排到将来');
     setRuntimeConfig(cfg);
   });
+  it('每日预算 block：不跑模型、回固定文案、消息保留未读（改进方案 #8）', async (t) => {
+    const sentTo = [];
+    let traceAtSend = '';
+    const { runner, store, cfg, append } = fixture(t, {
+      sender: {
+        sendTextBatch: async (chatKey, messages) => {
+          traceAtSend = currentTraceId();   // #6：运行期异步上下文里必须带着 trace
+          sentTo.push({ chatKey, messages });
+          return { sent: messages.map((text, i) => ({ text, at: Date.now(), messageId: i + 1 })), failed: [] };
+        }
+      }
+    });
+    cfg.api.budget = { enabled: true, dailyYuan: 1, onExceed: 'block', notify: false };
+    setRuntimeConfig(cfg);
+    fs.writeFileSync(path.join(root, 'usage-today.json'), JSON.stringify({ dayKey: todayKey(), estimatedYuan: 2 }));
+    let modelCalls = 0;
+    globalThis.fetch = async () => {
+      modelCalls += 1;
+      return Response.json({ choices: [{ message: { content: 'x' } }] });
+    };
+    append(1);
+    await runner.wake('group:1');
+    assert.equal(modelCalls, 0, 'block 不应调用模型');
+    assert.ok(sentTo.some((s) => s.messages.join('').includes('今天的额度用完了')), '应回复固定文案');
+    assert.equal(store.findByMid('group:1', 1).read, false, '消息保留未读');
+    // #6：wake 开 trace —— 运行期上下文带 id，lastTraceId 记录的就是这一次
+    assert.match(traceAtSend, /^[0-9a-f]{8}$/, 'wake 运行期必须处于 trace 上下文');
+    assert.equal(lastTraceId(), traceAtSend, 'lastTraceId 必须是最近一次运行的 id');
+  });
+
+  it('每日预算 degrade：群里非 @ 跳过（保留未读）；有 @ 的同批照常运行（改进方案 #8）', async (t) => {
+    const { runner, store, cfg, append } = fixture(t);
+    cfg.api.budget = { enabled: true, dailyYuan: 1, onExceed: 'degrade', notify: false };
+    setRuntimeConfig(cfg);
+    fs.writeFileSync(path.join(root, 'usage-today.json'), JSON.stringify({ dayKey: todayKey(), estimatedYuan: 2 }));
+    let modelCalls = 0;
+    globalThis.fetch = async () => {
+      modelCalls += 1;
+      return Response.json({ choices: [{ message: { content: 'No reply needed' } }], usage: { total_tokens: 5 } });
+    };
+    append(1, '随便聊聊');
+    await runner.wake('group:1');
+    assert.equal(modelCalls, 0, '非 @ 不跑模型');
+    assert.equal(store.findByMid('group:1', 1).read, false, '保留未读');
+    // 同批里出现 @ 本 bot 的消息 → 整批照常处理（降级只跳过"纯非 @"的触发）
+    store.appendIncoming('group:1', { mid: 2, text: '@bot 在吗', senderId: '42', senderName: 'm', mentionsSelf: true });
+    await runner.wake('group:1');
+    assert.ok(modelCalls >= 1, '有 @ 时应运行');
+  });
+
 });
 
 process.on('exit', () => fs.rmSync(root, { recursive: true, force: true }));

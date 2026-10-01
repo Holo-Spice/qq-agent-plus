@@ -6,6 +6,9 @@ import { installManualFriendReviewRoute } from './console/manual-friend-review-r
 import { installExperimentalMultimodalContextPilot } from './pilots/experimental-multimodal-context.js';
 import { DATA_DIR } from './core/config.js';
 import { assertSqliteAvailable } from './core/sqlite.js';
+import { createLogger } from './core/logger.js';
+
+const log = createLogger('server');
 
 let app = null;
 process.on('unhandledRejection', (error) => {
@@ -15,7 +18,7 @@ process.on('unhandledRejection', (error) => {
     severity: 'critical',
     code: 'UNHANDLED_REJECTION'
   });
-  console.error('[未处理异常]', error);
+  log.error('[未处理异常]', error);
 });
 process.on('uncaughtException', (error) => {
   app?.captureIncident(error, {
@@ -24,7 +27,7 @@ process.on('uncaughtException', (error) => {
     severity: 'critical',
     code: 'UNCAUGHT_EXCEPTION'
   });
-  console.error('[未捕获异常]', error);
+  log.error('[未捕获异常]', error);
   process.exit(1);
 });
 
@@ -64,7 +67,7 @@ function reportInterruptedDeploy() {
       ? new Date(startedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
       : '时间未知';
     const snapshot = String(info?.snapshot || '').trim() || '（标记里没记快照，看 data/deploy-backups/ 里最新的一份）';
-    console.warn('[部署] 检测到上次部署被中断（开始于 ' + when + '）：代码可能处于半更新状态，服务可能被停过。\n'
+    log.warn('[部署] 检测到上次部署被中断（开始于 ' + when + '）：代码可能处于半更新状态，服务可能被停过。\n'
       + '  回滚快照：' + snapshot + '\n'
       + '  恢复步骤见 docs/LINUX.md「部署被中断后怎么恢复」；确认无误后删掉标记：' + marker);
     app?.captureIncident(new Error('上次部署被中断，代码可能处于半更新状态（详见服务日志）'), {
@@ -74,7 +77,7 @@ function reportInterruptedDeploy() {
       code: 'DEPLOY_INTERRUPTED'
     });
   } catch (error) {
-    console.warn('[部署] 中断标记检查失败（不影响启动）:', error?.message ?? error);
+    log.warn('[部署] 中断标记检查失败（不影响启动）:', error?.message ?? error);
   }
 }
 
@@ -88,7 +91,7 @@ installExperimentalMultimodalContextPilot();
 app = createApp();
 installManualFriendReviewRoute(app);
 app.start().then(reportInterruptedDeploy).catch((error) => {
-  console.error('[启动失败]', error);
+  log.error('[启动失败]', error);
   process.exit(1);
 });
 
@@ -99,7 +102,7 @@ async function shutdown() {
   const deadline = setTimeout(() => process.exit(1), 25000);
   deadline.unref();
   try { await app.stop(); process.exit(0); }
-  catch (error) { console.error(error); process.exit(1); }
+  catch (error) { log.error(error); process.exit(1); }
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

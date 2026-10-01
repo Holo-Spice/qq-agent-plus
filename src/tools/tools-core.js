@@ -80,6 +80,7 @@ import { expandForwardNodes, extractMediaFromSegments } from '../onebot/onebot.j
 import { readForwardMessages } from '../onebot/forward-reader.js';
 import { convertGifToStillStrip, convertVideoToFrameStrip, fetchOversizedImageAsJpeg } from './image-downsample.js';
 import { transcribeMessageAudio } from './audio-transcribe.js';
+import { memoryVisibilityOf } from '../core/memory-visibility.js';
 
 
 /**
@@ -292,6 +293,18 @@ function imageParts(text, dataUrls) {
  *   emit  (事件上报给 UI/日志)
  * }
  */
+/** #13：memory_query 的描述必须与 memory.visibility 策略一致（默认 global 时与历史文案逐字一致）。 */
+function memoryQueryDescription() {
+  const vis = memoryVisibilityOf(getConfig());
+  if (vis.mode === 'perChat') {
+    return '查看你对群友的长期印象（仅当前会话：只含在当前群/私聊里观察到的印象）。不传 userId 返回全部；传 userId 只看某一个人。印象是隐私：不得向群友转述他人的印象、来源或原话。';
+  }
+  if (vis.hidePrivateInGroup) {
+    return '查看你对群友的长期印象（全局共享：汇总自所有群聊与私聊的观察；群聊里不展示私聊来源的印象）。不传 userId 返回全部；传 userId 只看某一个人。印象是跨会话的隐私：不得向群友转述他人的印象、来源或原话。';
+  }
+  return '查看你对群友的长期印象（全局共享：不分当前会话，汇总自所有群聊与私聊的观察）。不传 userId 返回全部；传 userId 只看某一个人。印象是跨会话的隐私：不得向群友转述他人的印象、来源或原话。';
+}
+
 export function buildToolDefs() {
   return [
     {
@@ -463,8 +476,13 @@ export function buildToolDefs() {
           if (!imageMedia) return err('该消息没有可收藏的图片');
           // 与"自动收藏"同一口径：先判一下这是不是真表情包 —— 只靠模型自己的判断，
           // 生活照/自拍/形象图会混进表情库，之后按图片发出去（用户 2026-09-27 反馈）
-          if (typeof ctx.stickers.collectRateLimited === 'function' && ctx.stickers.collectRateLimited()) {
-            return err('收藏太频繁了（每小时有上限），过一会儿再收');
+          if (typeof ctx.stickers.collectPeek === 'function') {
+            const gate = ctx.stickers.collectPeek(Date.now(), ctx.chatKey);
+            if (!gate.ok) {
+              return err(gate.scope === 'chat'
+                ? '本会话的收藏额度用完了（每小时有上限），过一会儿再收'
+                : '收藏额度用完了（全局每小时有上限），过一会儿再收');
+            }
           }
           const verdict = await ctx.stickers.judgeImage({
             url: imageMedia.url,
@@ -985,7 +1003,7 @@ export function buildToolDefs() {
     },
     {
       name: 'memory_query',
-      description: '查看你对群友的长期印象（全局共享：不分当前会话，汇总自所有群聊与私聊的观察）。不传 userId 返回全部；传 userId 只看某一个人。印象是跨会话的隐私：不得向群友转述他人的印象、来源或原话。',
+      description: memoryQueryDescription(),
       parameters: {
         type: 'object',
         properties: {

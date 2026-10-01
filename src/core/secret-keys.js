@@ -1,0 +1,106 @@
+// 密钥字段的统一判定与脱敏（改进方案 #5/#6 共同前置）。
+// SECRET_KEY_PATTERN / SECRET_KEY_EXCLUDE / sanitizeConfigSecrets 从 src/console/app.js 逐字迁出，
+// 控制台配置脱敏与审计脱敏从此共用同一份模式表，避免两处口径漂移。
+//
+// 判定口径：字段名命中 SECRET_KEY_PATTERN 即视为"值本身是密钥"；`*From` 结尾的字段存的是
+// 来源标识（如 manual），`has*` 布尔是派生标记，都不算。
+export const SECRET_KEY_PATTERN = /(^token$|apikey|api_key|accesstoken|access_token|secret|password|privatekey|private_key)/i;
+// 形如 apiKeyFrom 的字段存的是"密钥来源标识"（如 manual），不是密钥本身，不要脱敏
+export const SECRET_KEY_EXCLUDE = /from$/i;
+
+// ── 配置形态脱敏（控制台 /api/config 下发用，语义与迁出前逐字一致）────────────────
+/**
+ * 凡是字段名命中 SECRET_KEY_PATTERN 的，值一律替换为空串（保留"有/无"的 hasXxx 标记）。
+ * 覆盖：apiKey / api_key / accessToken / httpAccessToken / token / secret / password …
+ */
+export function sanitizeConfigSecrets(cfg) {
+  const out = JSON.parse(JSON.stringify(cfg ?? {}));
+  const seen = new WeakSet();
+
+  const walk = (node) => {
+    if (!node || typeof node !== 'object' || seen.has(node)) return;
+    seen.add(node);
+    for (const key of Object.keys(node)) {
+      const value = node[key];
+      if (value && typeof value === 'object') { walk(value); continue; }
+      if (SECRET_KEY_EXCLUDE.test(key)) continue;
+      // 已生成的 hasXxx 布尔标记本身也会被 apikey 模式匹配到，
+      // 不排除就会连锁生成 hasHasXxx
+      if (/^has/i.test(key) && typeof value === 'boolean') continue;
+      if (SECRET_KEY_PATTERN.test(key)) {
+        // ⚠️ 必须"删除字段"而不是"置为空串"。
+        // 前端保存设置时会把整个 config 展开成 patch 回传（...c.webSearch?.deepseek），
+        // 若这里留一个空串，deepMerge 会拿空串覆盖掉服务端保存的真 Key ——
+        // 表现为：用户点一次"保存设置"，所有搜索 Key 就被静默清空。
+        // 删掉字段则展开时不会带上该键，服务端原值得以保留。
+        delete node[key];
+        const flagName = `has${key.charAt(0).toUpperCase()}${key.slice(1)}`;
+        node[flagName] = Boolean(String(value ?? '').trim());
+      }
+    }
+  };
+  walk(out);
+
+  // 密钥集合整体清空（不逐 key 暴露存在性）
+  if (out.providerKeys && typeof out.providerKeys === 'object') {
+    const has = {};
+    for (const [k, v] of Object.entries(out.providerKeys)) has[k] = Boolean(String(v ?? '').trim());
+    out.providerKeys = {};
+    out.providerKeyPresence = has;
+  }
+
+  // tts.keys 同款处理（2026-09-29 审查 P1）：SECRET_KEY_PATTERN 只匹配字段名，"按服务 id
+  // 存 Key" 的 keys 映射（{ siliconflow: 'sk-…', doubao: '…' }）会整包穿过去、明文下发。
+  // 前端的"哪几家存过"口径由 safeConfigWithAsrStatus 里的 ttsKeyServices 另行下发。
+  if (out.tts && typeof out.tts === 'object' && out.tts.keys && typeof out.tts.keys === 'object') {
+    out.tts.keys = {};
+  }
+
+  // 提供商列表：删掉 key 字段（同样不能置空串，否则回传时覆盖真实 Key），补 hasKey
+  if (Array.isArray(out.providers)) {
+    for (const p of out.providers) {
+      const real = (cfg?.providerKeys || {})[p.id] || p.apiKey;
+      delete p.apiKey;
+      p.hasKey = Boolean(String(real ?? '').trim());
+    }
+  }
+  // 顶层 api：walk 已生成 hasApiKey，这里补一个简写的 hasKey 供旧代码读取
+  if (out.api) out.api.hasKey = out.api.hasApiKey ?? Boolean(String(cfg?.api?.apiKey ?? '').trim());
+
+  return out;
+}
+
+// ── 审计用通用脱敏 ─────────────────────────────────────────────────────────
+// 凭据集合字段：模式表不匹配裸 key（故意的，避免误伤普通 "key" 字段），但
+// { keys: { 服务名: 'sk-…' } } 这类映射的内部键名不含模式，逐层递归就会漏 ——
+// 命中这些名字时整包隐藏（2026-09-30 写单测时抓到的真缺口）。
+const SECRET_CONTAINER = /^(keys|providerkeys|ttskeys)$/i;
+
+/**
+ * 任意 JSON 值 → 一份副本，命中密钥字段名的值整体替换为 '[redacted]'。
+ * 与 sanitizeConfigSecrets 同一份模式表，但语义不同：这里不"删字段 + 补 hasXxx"，
+ * 而是留下 '[redacted]' 标记 —— 审计日志要能看出"这里原本有个值"。
+ * - `*From`（来源标识）与 `has*` 布尔（派生标记）不脱敏；
+ * - 密钥字段名（或 SECRET_CONTAINER）的值是对象/数组时**整包替换**，否则内部键名不含模式会漏网；
+ * - 循环引用 → '[circular]'，超 12 层 → '[depth-limit]'（审计是旁路，宁缺勿炸）。
+ */
+export function redactSecretFields(value) {
+  const seen = new WeakSet();
+  const walk = (node, depth) => {
+    if (node === null || typeof node !== 'object') return node;
+    if (depth > 12) return '[depth-limit]';
+    if (seen.has(node)) return '[circular]';
+    seen.add(node);
+    if (Array.isArray(node)) return node.map((v) => walk(v, depth + 1));
+    const out = {};
+    for (const [key, v] of Object.entries(node)) {
+      if (/^has/i.test(key) && typeof v === 'boolean') { out[key] = v; continue; }
+      if (SECRET_CONTAINER.test(key)) { out[key] = '[redacted]'; continue; }
+      if (SECRET_KEY_EXCLUDE.test(key)) { out[key] = walk(v, depth + 1); continue; }
+      if (SECRET_KEY_PATTERN.test(key)) { out[key] = '[redacted]'; continue; }
+      out[key] = walk(v, depth + 1);
+    }
+    return out;
+  };
+  return walk(value, 0);
+}

@@ -6467,6 +6467,24 @@ function renderApiSection(c) {
     </details>
     <div class="settings-divider"></div>
 
+    <h3>每日花费上限</h3>
+    <div class="field">
+      <label class="checkbox-row"><input type="checkbox" id="cfg-budget-enabled" ${c.api?.budget?.enabled === true ? 'checked' : ''} />
+        <span>启用（按估算价累计当日用量；仅本地开关，不产生任何实际扣费动作）</span></label>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>每日上限（元）</label>
+        <input type="number" id="cfg-budget-daily" min="0" step="1" value="${esc(c.api?.budget?.dailyYuan ?? 20)}" style="width:120px" /></div>
+      <div class="field"><label>超限后</label>
+        <select id="cfg-budget-onexceed">
+          <option value="degrade" ${(c.api?.budget?.onExceed || 'degrade') === 'degrade' ? 'selected' : ''}>降级：只回应 @（私聊与手动唤醒不受限）</option>
+          <option value="block" ${c.api?.budget?.onExceed === 'block' ? 'selected' : ''}>停止：新消息不处理</option>
+        </select></div>
+    </div>
+    <div class="hint">超限当天私聊通知管理员一次（需配好管理员 QQ）；跨日自动重置。未定价的运行不计入金额，但会在用量状态里标出次数，避免"没价＝永远不超限"。</div>
+
+    <div class="settings-divider"></div>
+
     <h3>成本怎么算</h3>
     <div class="hint" style="margin-bottom:8px">选一个就行，不用逐个模型配。默认第一项。</div>
     <div id="cost-mode-block">
@@ -6904,6 +6922,7 @@ function renderSearchSection(c) {
 
 function renderMemorySettingsSection(c) {
   const mem = c.memory || {};
+  const vis = mem.visibility || {};   // #13 可见性策略（默认 global + 不隐藏）
   const providers = state.providers || [];
   const useChat = mem.useChatModel !== false;
   const selP = providers.find((p) => p.id === mem.provider);
@@ -6932,7 +6951,16 @@ function renderMemorySettingsSection(c) {
       <div class="field"><label>单次最多发现几人</label>
         <input type="number" id="cfg-mem-discover-max" min="1" max="20" value="${esc(mem.discoverMaxMembers ?? 3)}" /></div>
     </div>
-    <div class="hint">整理（含自动整理与「整理本群记忆」）时，把"最近 2000 条里发言达到这个条数、且还没有任何印象"的群友挑出来，读他的发言提炼新印象（单次最多挑上面那个人数）。<b>门槛越高，新人越难进入记忆</b>：高于群里多数人的发言量时，这些人可能永远不会有印象。模型自己很少主动记，这里是主要入口。默认 20 条 / 3 人。</div>`;
+    <div class="hint">整理（含自动整理与「整理本群记忆」）时，把"最近 2000 条里发言达到这个条数、且还没有任何印象"的群友挑出来，读他的发言提炼新印象（单次最多挑上面那个人数）。<b>门槛越高，新人越难进入记忆</b>：高于群里多数人的发言量时，这些人可能永远不会有印象。模型自己很少主动记，这里是主要入口。默认 20 条 / 3 人。</div>
+    <div class="field"><label>记忆可见性</label>
+      <select id="cfg-mem-visibility">
+        <option value="global" ${vis.mode === 'global' ? 'selected' : ''}>全局（默认）：所有会话的印象都注入</option>
+        <option value="perChat" ${vis.mode === 'perChat' ? 'selected' : ''}>仅本会话：只注入来源含当前会话的印象</option>
+      </select>
+      <div class="hint">改成「仅本会话」后，模型在群里只看得到这个群里观察到的印象；控制台人物记忆页仍可查全部（来源不交给模型）。</div>
+    </div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-mem-hideprivate" ${vis.hidePrivateInGroup ? 'checked' : ''} />
+      <label for="cfg-mem-hideprivate">群聊里隐藏「私聊来源」的印象</label></div>`;
 }
 
 function renderExperimentalSettingsSection(c) {
@@ -12059,7 +12087,12 @@ async function saveConfig({ quiet = false } = {}) {
       consolidateMinIntervalMs: Number(val('#cfg-mem-interval', c.memory?.consolidateMinIntervalMs ?? 21600000)) || 21600000,
       // 发现新人的门槛：这两项决定"聊天多但零印象"的人能不能进记忆
       discoverMinMessages: memThreshold(val('#cfg-mem-discover-min', c.memory?.discoverMinMessages ?? 20), c.memory?.discoverMinMessages, 500, 20),
-      discoverMaxMembers: memThreshold(val('#cfg-mem-discover-max', c.memory?.discoverMaxMembers ?? 3), c.memory?.discoverMaxMembers, 20, 3)
+      discoverMaxMembers: memThreshold(val('#cfg-mem-discover-max', c.memory?.discoverMaxMembers ?? 3), c.memory?.discoverMaxMembers, 20, 3),
+      // #13 记忆可见性：默认 global + 不隐藏 = 历史行为
+      visibility: {
+        mode: val('#cfg-mem-visibility', c.memory?.visibility?.mode === 'perChat' ? 'perChat' : 'global'),
+        hidePrivateInGroup: chk('#cfg-mem-hideprivate', c.memory?.visibility?.hidePrivateInGroup === true)
+      }
     };
   }
 
@@ -12256,6 +12289,13 @@ async function saveConfig({ quiet = false } = {}) {
     const priceCached = priceEditable ? (Number(val('#cfg-price-cached', 0)) || 0) : (Number(c.api.priceCachedPerM) || 0);
     patch.api = {
       vision: chk('#cfg-vision', c.api.vision !== false),
+      // 每日花费上限（改进方案 #8）：金额 0/非法 = 永不超限（宁可不拦，也不把 0 当"零预算即封锁"）
+      budget: {
+        ...(c.api?.budget || {}),
+        enabled: chk('#cfg-budget-enabled', c.api?.budget?.enabled === true),
+        dailyYuan: Number(val('#cfg-budget-daily', 20)) || 0,
+        onExceed: val('#cfg-budget-onexceed', 'degrade') === 'block' ? 'block' : 'degrade'
+      },
       // 思考模式：每供应商独立（thinkingByService[主机]）。只有用户真的动过控件才写，
       // 避免"保存别的字段"顺手改动；全局 api.thinking 保持不动（作为未配置供应商的兜底）。
       // 勾了「聊天单独设档」→ 存 {chat, default} 对象（各任务按用途取，与你手写的配置同形）；

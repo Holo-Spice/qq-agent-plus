@@ -3,6 +3,7 @@ import { MemoryStore as BaseMemoryStore } from './memory-global.js';
 import { bindGlobalMemoryStore } from './memory-runtime-integration.js';
 import { backupPersonBeforeConsolidation } from './memory-consolidation-backup.js';
 import '../pilots/relationship-runtime-integration.js';
+import { impressionVisible, memoryVisibilityOf } from '../core/memory-visibility.js';
 
 export class MemoryStore extends BaseMemoryStore {
   constructor(...args) {
@@ -19,14 +20,17 @@ export class MemoryStore extends BaseMemoryStore {
   }
 
   /**
-   * memory_query 的底层查询改为全局人物记忆。
-   * chatKey 参数仅为兼容旧调用签名，不再参与人物记忆过滤。
+   * memory_query 的底层查询：全局人物记忆，受 memory.visibility 策略约束（#13）——
+   * mode='perChat' 只返回来源含当前会话的印象；hidePrivateInGroup 时群聊里剔除私聊来源。
+   * 默认（global + 不隐藏）与历史行为逐字一致。
    */
-  query(_chatKey, category = '') {
+  query(chatKey, category = '') {
     if (category && category !== 'memberImpression') return { [category]: [] };
+    const vis = memoryVisibilityOf();
     const memberImpression = [];
     for (const member of this.people.members()) {
       for (const entry of member.impressions || []) {
+        if (!impressionVisible(entry, chatKey, vis)) continue;
         memberImpression.push({
           userId: String(member.userId || ''),
           target: String(member.name || member.userId || '某人'),

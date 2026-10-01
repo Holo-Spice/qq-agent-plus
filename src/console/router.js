@@ -13,7 +13,8 @@
 //                    SSE（/api/events）**也用默认 true**（旧实现是分支内手写 authorize）——
 //                    不要给它加 auth:false，那会让事件流免鉴权（2026-09-30 审查 P3 修正文案）
 //   - opts.keyEndpoint true 时经 keyEndpointAllowed（明文密钥回读端点专用）
-//   - opts.audit      #5 完成后填动作名（本批只留挂点）
+//   - opts.audit      #5 阶段二（路由声明式审计）留的挂点；阶段一手工埋点不经过它
+//   - deps.tokenFp    () => string：鉴权成功后记 req.consoleTokenFp（#5 审计埋点读它）
 // - handle(req, res) → true 已处理；false 交回 if 链 / 静态兜底。
 //   路径命中但方法不匹配 → 405（带 Allow 头，附录 J.1 拍板的行为变化）。
 //   迁移期「未命中的 /api/ 一律 404 不落静态」暂不启用：那会吃掉 if 链里尚未迁移的路由；
@@ -21,12 +22,15 @@
 
 // 迁移已完成（2026-09-30）：apiFallthrough 默认 false —— 未命中的 /api/ 一律 404 JSON
 // （与旧 if 链尾部的文案逐字一致），不落静态服务。deps.apiFallthrough 仅作测试/过渡用。
+import { newTraceId, withTrace } from '../core/logger.js';
+
 export function createRouter(deps = {}) {
   // 显式取别名而不是解构参数：ops.js 的未定义调用扫描器不认识解构参数，
   // 会把 authorize(...) 误报成"可疑未定义调用"（CI 门禁 --strict 会红）。
   const authorize = deps.authorize;
   const json = deps.json;
   const keyEndpointAllowed = deps.keyEndpointAllowed || (() => true);
+  const tokenFp = deps.tokenFp || null;
   const apiFallthrough = deps.apiFallthrough === true;
   const routes = [];
 
@@ -68,6 +72,10 @@ export function createRouter(deps = {}) {
     const url = new URL(req.url, 'http://127.0.0.1');
     const pathname = url.pathname;
     const method = String(req.method || 'GET').toUpperCase();
+    // #6：每个 HTTP 请求一个 trace id，回在响应头里（控制台/脚本按它去捞日志）。
+    // remember:false —— 它不该覆盖 /api/status 的 lastTraceId（那是"最近一次运行"的 id）。
+    const traceId = newTraceId();
+    res.setHeader('x-trace-id', traceId);
 
     // 先做完整匹配收集：**405/404 也必须先过鉴权**。旧的 /api/ 总闸是"先 authorize
     // 再看路径"，无 token 时任何 /api/* 都是 401；若让 405/404 绕过鉴权，未授权者就能
@@ -86,6 +94,11 @@ export function createRouter(deps = {}) {
       json(res, 401, { error: '未授权' });
       return true;
     }
+    // 审计（#5）：鉴权成功即记下本次凭据指纹，供写接口埋点直接读（与鉴权同一次取值，
+    // 埋点不再各自读配置）。未设令牌（localhost 模式）时为空串。
+    if (needsAuth && typeof tokenFp === 'function' && req.consoleTokenFp === undefined) {
+      req.consoleTokenFp = String(tokenFp() ?? '');
+    }
 
     const hit = matched.find(({ route }) => route.method === method);
     if (hit) {
@@ -93,7 +106,7 @@ export function createRouter(deps = {}) {
         json(res, 403, { error: '请求来源不被信任，已拒绝读取明文密钥。' });
         return true;
       }
-      await hit.route.handler(req, res, hit.params, url);   // 异常冒泡给 createServer 的统一处理（记 incident + 500）
+      await withTrace(traceId, () => hit.route.handler(req, res, hit.params, url), { remember: false });   // 异常冒泡给 createServer 的统一处理（记 incident + 500）
       return true;
     }
     if (matched.length > 0) {

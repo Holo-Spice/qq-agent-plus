@@ -13,7 +13,7 @@ process.on('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
 
 const { currentMessageAudioUrl, ffmpegToPcm, consumeAsrQuota, resetAsrQuota } = await import('../src/tools/audio-transcribe.js');
 const { extractMediaFromSegments } = await import('../src/onebot/onebot.js');
-const { asrAvailable, asrMaxPerHour, DEFAULT_CONFIG, setRuntimeConfig } = await import('../src/core/config.js');
+const { asrAvailable, asrMaxPerHour, asrMaxPerHourPerChat, DEFAULT_CONFIG, setRuntimeConfig } = await import('../src/core/config.js');
 
 it('extractMediaFromSegments 提取 record/video/音频文件段为 audio', () => {
   const media = extractMediaFromSegments([
@@ -108,23 +108,46 @@ it('ASR 用自己的 Key，且与「联网搜索」开关解耦', () => {
   assert.equal(asrAvailable(searchOffOnly), true, 'ASR 有自己的 Key 时不受搜索 Key 影响');
 });
 
-it('每小时转写次数闸门：到上限就拒绝，跨小时自动重置', () => {
+it('每小时转写双闸（会话侧）：同一会话到上限被拒（scope=chat），别的会话不受影响，跨小时重置', () => {
   const cfg = structuredClone(DEFAULT_CONFIG);
-  cfg.asr.maxPerHour = 3;
+  cfg.asr.maxPerHour = 10;
+  cfg.asr.maxPerHourPerChat = 3;
   setRuntimeConfig(cfg);
-  assert.equal(asrMaxPerHour(cfg), 3);
+  assert.equal(asrMaxPerHour(cfg), 10);
+  assert.equal(asrMaxPerHourPerChat(cfg), 3);
   resetAsrQuota();
   const base = 1_790_000_000_000; // 固定时刻，避免跨真实小时边界
   assert.deepEqual(
-    [consumeAsrQuota(base, cfg), consumeAsrQuota(base, cfg), consumeAsrQuota(base, cfg), consumeAsrQuota(base, cfg)],
-    [true, true, true, false],
-    '第 4 次应被拒'
+    [1, 2, 3].map(() => consumeAsrQuota(base, cfg, 'group:1').ok),
+    [true, true, true],
   );
-  assert.equal(consumeAsrQuota(base + 3600_000, cfg), true, '下一个小时恢复额度');
+  const denied = consumeAsrQuota(base, cfg, 'group:1');
+  assert.equal(denied.ok, false, '第 4 次（每会话上限 3）应被拒');
+  assert.equal(denied.scope, 'chat');
+  assert.equal(consumeAsrQuota(base, cfg, 'group:2').ok, true, '另一个会话不受影响');
+  assert.equal(consumeAsrQuota(base + 3600_000, cfg, 'group:1').ok, true, '下一个小时恢复额度');
   resetAsrQuota();
 });
 
-it('坏值兜底：maxPerHour 非正数/离谱值都收敛到 12 / 200 上限', () => {
+it('每小时转写双闸（全局侧）：全局上限封顶（scope=global），老配置只写 maxPerHour 时语义不变', () => {
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.asr.maxPerHour = 2;
+  cfg.asr.maxPerHourPerChat = 10;
+  setRuntimeConfig(cfg);
+  resetAsrQuota();
+  const base = 1_790_000_000_000;
+  assert.equal(consumeAsrQuota(base, cfg, 'group:1').ok, true);
+  assert.equal(consumeAsrQuota(base, cfg, 'group:2').ok, true);
+  const denied = consumeAsrQuota(base, cfg, 'group:3');
+  assert.equal(denied.ok, false, '全局 2 次后第三个会话也受限');
+  assert.equal(denied.scope, 'global');
+  assert.ok(denied.retryAfterMs > 0 && denied.retryAfterMs <= 3600_000);
+  // 老配置没写 maxPerHourPerChat → 默认 4；「全局 2 就到顶」的既有语义不变
+  assert.equal(asrMaxPerHourPerChat({ asr: {} }), 4);
+  resetAsrQuota();
+});
+
+it('坏值兜底：maxPerHour / maxPerHourPerChat 非正数或离谱值都收敛到 12/4、200 上限', () => {
   const cfg = structuredClone(DEFAULT_CONFIG);
   cfg.asr.maxPerHour = 0;
   assert.equal(asrMaxPerHour(cfg), 12);
@@ -132,6 +155,9 @@ it('坏值兜底：maxPerHour 非正数/离谱值都收敛到 12 / 200 上限', 
   assert.equal(asrMaxPerHour(cfg), 12);
   cfg.asr.maxPerHour = 9999;
   assert.equal(asrMaxPerHour(cfg), 200);
+  assert.equal(asrMaxPerHourPerChat({ asr: { maxPerHourPerChat: 0 } }), 4);
+  assert.equal(asrMaxPerHourPerChat({ asr: { maxPerHourPerChat: -1 } }), 4);
+  assert.equal(asrMaxPerHourPerChat({ asr: { maxPerHourPerChat: 9999 } }), 200);
 });
 
 // ── 多供应商（2026-09-26：用户要求"API 不一定要同一家、不一定要火山"）──

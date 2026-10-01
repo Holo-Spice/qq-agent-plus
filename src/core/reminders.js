@@ -98,10 +98,18 @@ export class ReminderStore {
     const now = Date.now();
     if (when <= now + 5000) throw new Error('提醒时间必须晚于现在');
     if (when - now > MAX_DELAY_MS) throw new Error('最多只能设到 30 天后');
-    const pending = this.items.filter((it) => it.status === 'pending');
-    if (pending.length >= MAX_PENDING) throw new Error('待触发提醒太多（全局上限 50），先取消一些');
-    if (pending.filter((it) => it.chatKey === chatKey).length >= MAX_PER_CHAT) {
+    // #9：先把"早就过期、还没被巡检标掉"的项标成 expired（它们才是真占着 pending 名额的那批），
+    // 再剪留档，最后判上限 —— 否则用户会因为一堆早该作废的提醒而被告知"满了"。
+    let expiredNow = false;
+    for (const it of this.expired(now)) { it.status = 'expired'; it.finishedAt = now; expiredNow = true; }
+    this.#prune();
+    if (expiredNow) this.#save();
+    const pendingNow = () => this.items.filter((it) => it.status === 'pending');
+    if (pendingNow().filter((it) => it.chatKey === chatKey).length >= MAX_PER_CHAT) {
       throw new Error('本会话待触发提醒已达上限（10 条），先取消一些');
+    }
+    if (pendingNow().length >= MAX_PENDING) {
+      throw new Error('全局提醒位已满（每人上限 10 条，共 50 条），先取消一些');
     }
     const item = {
       id: crypto.randomBytes(4).toString('hex'),

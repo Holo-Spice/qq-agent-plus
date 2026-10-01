@@ -35,6 +35,16 @@ test('redactText：JSON 体与 Basic/Cookie 头形态', () => {
   assert.equal(redactText('{"reasoning_effort":"low"}'), '{"reasoning_effort":"low"}');
 });
 
+test('redactText：裸的 sk-/pk-/rk- 密钥前缀也脱敏（2026-09-30 #6 补）', () => {
+  // 前面的查询串/JSON 形态拦不住"裸串"：错误文本、粘贴的配置里经常就是 key=sk-… 这种形态
+  assert.equal(redactText('Authorization failed, key sk-abc123XYZ456789 rejected'),
+    'Authorization failed, key sk-[redacted] rejected');
+  assert.equal(redactText('pk_live_1234567890 and rk-test-abcdefgh'), 'pk-[redacted] and rk-[redacted]');
+  // 太短的（不足 8 位）不误伤，避免把普通词吃掉
+  assert.equal(redactText('sk-short'), 'sk-short');
+  assert.equal(redactText('ask-something-long'), 'ask-something-long');
+});
+
 test('redactText：不该动的文本原样保留（只截断/去空字符）', () => {
   // 参数名相似的普通词不能误伤（前缀必须是 ? 或 &，且名字要对上）
   assert.equal(redactText('monkey=13 & tokenizer=x'), 'monkey=13 & tokenizer=x');

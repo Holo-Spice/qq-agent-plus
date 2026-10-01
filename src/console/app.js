@@ -9,6 +9,10 @@ import { createRouter } from './router.js';
 
 import { asrApiKey, asrAvailable, asrConfigured, asrKeyHost, asrKeySource, asrLocalBin, asrLocalModel, asrSecretId, asrSecretKey, conversationConfigForChat, findWhisperBinSync, getConfig, identityPilotEnabled, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, DATA_DIR, ROOT } from '../core/config.js';
 import { tokenSaverEffective } from '../core/token-saver.js';
+import { budgetStatus } from '../core/budget.js';
+import { sanitizeConfigSecrets } from '../core/secret-keys.js';
+import { appendAudit, queryAudit } from '../core/audit-log.js';
+import { lastTraceId } from '../core/logger.js';
 import { customSearch } from '../llm/web-search.js';
 import { OneBotClient, segmentsToText, extractMediaFromSegments, expandForwardNodes } from '../onebot/onebot.js';
 import { readForwardMessages } from '../onebot/forward-reader.js';
@@ -1258,71 +1262,12 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     fs.chmodSync(file, 0o600);
   }
 
-  // ── 配置脱敏 ────────────────────────────────────────────────────────────
-  // 凡是字段名命中这些模式的，值一律替换为空串（保留"有/无"的 hasXxx 标记）。
-  // 覆盖：apiKey / api_key / accessToken / httpAccessToken / token / secret / password …
-  const SECRET_KEY_PATTERN = /(^token$|apikey|api_key|accesstoken|access_token|secret|password|privatekey|private_key)/i;
-  // 形如 apiKeyFrom 的字段存的是"密钥来源标识"（如 manual），不是密钥本身，不要脱敏
-  const SECRET_KEY_EXCLUDE = /from$/i;
+  // ── 配置脱敏 ─────────────────────────────────────────────────────────────
+  // 判定与实现已迁出到 src/core/secret-keys.js（#5/#6 共同前置：控制台脱敏与审计脱敏
+  // 共用同一份模式表）。保留原名做薄包装，调用点不动。
+  const sanitizeConfig = sanitizeConfigSecrets;
 
-  function sanitizeConfig(cfg) {
-    const out = JSON.parse(JSON.stringify(cfg ?? {}));
-    const seen = new WeakSet();
-
-    const walk = (node) => {
-      if (!node || typeof node !== 'object' || seen.has(node)) return;
-      seen.add(node);
-      for (const key of Object.keys(node)) {
-        const value = node[key];
-        if (value && typeof value === 'object') { walk(value); continue; }
-        if (SECRET_KEY_EXCLUDE.test(key)) continue;
-        // 已生成的 hasXxx 布尔标记本身也会被 apikey 模式匹配到，
-        // 不排除就会连锁生成 hasHasXxx
-        if (/^has/i.test(key) && typeof value === 'boolean') continue;
-        if (SECRET_KEY_PATTERN.test(key)) {
-          // ⚠️ 必须"删除字段"而不是"置为空串"。
-          // 前端保存设置时会把整个 config 展开成 patch 回传（...c.webSearch?.deepseek），
-          // 若这里留一个空串，deepMerge 会拿空串覆盖掉服务端保存的真 Key ——
-          // 表现为：用户点一次"保存设置"，所有搜索 Key 就被静默清空。
-          // 删掉字段则展开时不会带上该键，服务端原值得以保留。
-          delete node[key];
-          const flagName = `has${key.charAt(0).toUpperCase()}${key.slice(1)}`;
-          node[flagName] = Boolean(String(value ?? '').trim());
-        }
-      }
-    };
-    walk(out);
-
-    // 密钥集合整体清空（不逐 key 暴露存在性）
-    if (out.providerKeys && typeof out.providerKeys === 'object') {
-      const has = {};
-      for (const [k, v] of Object.entries(out.providerKeys)) has[k] = Boolean(String(v ?? '').trim());
-      out.providerKeys = {};
-      out.providerKeyPresence = has;
-    }
-
-    // tts.keys 同款处理（2026-09-29 审查 P1）：SECRET_KEY_PATTERN 只匹配字段名，"按服务 id
-    // 存 Key" 的 keys 映射（{ siliconflow: 'sk-…', doubao: '…' }）会整包穿过去、明文下发。
-    // 前端的"哪几家存过"口径由 safeConfigWithAsrStatus 里的 ttsKeyServices 另行下发。
-    if (out.tts && typeof out.tts === 'object' && out.tts.keys && typeof out.tts.keys === 'object') {
-      out.tts.keys = {};
-    }
-
-    // 提供商列表：删掉 key 字段（同样不能置空串，否则回传时覆盖真实 Key），补 hasKey
-    if (Array.isArray(out.providers)) {
-      for (const p of out.providers) {
-        const real = (cfg?.providerKeys || {})[p.id] || p.apiKey;
-        delete p.apiKey;
-        p.hasKey = Boolean(String(real ?? '').trim());
-      }
-    }
-    // 顶层 api：walk 已生成 hasApiKey，这里补一个简写的 hasKey 供旧代码读取
-    if (out.api) out.api.hasKey = out.api.hasApiKey ?? Boolean(String(cfg?.api?.apiKey ?? '').trim());
-
-    return out;
-  }
-
-  // ── ASR 的运行时结论 ────────────────────────────────────────────────────
+  // ── ASR 的运行时结论 ─────────────────────────────────────────────────────
   /**
    * /api/config 里 asr 那节附带的"服务端结论"：是否配齐/可用、Key 的来源与归属、
    * 本机转写实际会用哪个二进制与模型。
@@ -1435,7 +1380,44 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
 
   // ── 路由表（改进方案 #2；迁移方式：加壳并行，搬走即删原分支）──
   // 第一批：三个 auth:false 例外 + SSE（/healthz、/api/login、/api/events）。
-  const router = createRouter({ authorize, json, keyEndpointAllowed });
+  // ── 审计（#5）────────────────────────────────────────────────────────────
+  // 写接口留痕（方案 #5，落盘见 core/audit-log.js）：全程旁路 —— 写失败只 warn，
+  // 绝不影响响应。before/after 由调用方给，脱敏与截断在 core 里统一做。
+  const tokenFpOf = (token) => (token
+    ? crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 8)
+    : '');
+
+  function auditWrite(action, target, extra = {}) {
+    const req = extra.req || null;
+    appendAudit({
+      action,
+      target,
+      ip: req?.socket?.remoteAddress || '',
+      fwd: String(req?.headers?.['x-forwarded-for'] || ''),
+      ua: String(req?.headers?.['user-agent'] || ''),
+      tokenFp: String(req?.consoleTokenFp ?? ''),
+      before: extra.before,
+      after: extra.after,
+      changed: extra.changed,
+      ok: extra.ok !== false,
+      error: extra.error ? String(extra.error) : ''
+    });
+  }
+
+  /** 顶层键差异清单（config.update 的审计摘要用）；只比 JSON 形态，键名排序稳定。 */
+  function changedTopKeys(a, b) {
+    const keys = new Set([...Object.keys(a || {}), ...Object.keys(b || {})]);
+    return [...keys].filter((k) => JSON.stringify(a?.[k]) !== JSON.stringify(b?.[k])).sort();
+  }
+
+  const router = createRouter({
+    authorize,
+    json,
+    keyEndpointAllowed,
+    // 审计（#5）：鉴权成功后由 router 记下本次凭据指纹（sha256 前 8 位），写接口埋点直接
+    // 读 req.consoleTokenFp —— 与鉴权同一次取值，不在每个埋点里各自重算。
+    tokenFp: () => tokenFpOf(getConfig().server?.token)
+  });
 
   router.add('GET', '/healthz', async (req, res) => {
     // 给拨测/uptime 监控用：无鉴权，但只含版本与连接状态，不带任何配置
@@ -1474,6 +1456,8 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     const next = String(body.newToken ?? '').trim();
     const confirm = String(body.confirmToken ?? '').trim();
     if (!sameSecret(current, getConfig().server.token)) {
+      // 凭据相关的失败也留痕（#5 埋点口径：成功 + 异常 + 凭据校验失败；普通参数校验 4xx 不记）
+      auditWrite('console-token.rotate', 'server.token', { req, ok: false, error: '当前 Token 不正确' });
       return json(res, 403, { error: '当前 Token 不正确' });
     }
     if (!/^[A-Za-z0-9._~-]{16,128}$/.test(next)) {
@@ -1488,10 +1472,25 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       accessFileUpdated = false;
       log('[console] Token 已更新，但 console-access.txt 写入失败:', error?.message ?? error);
     }
+    // 审计（#5）：只记前后指纹（sha256 前 8 位），令牌明文既不落盘也不进日志；
+    // 换令牌前后可对账（旧指纹来自本次鉴权用的令牌，新指纹来自刚设置的值）。
+    auditWrite('console-token.rotate', 'server.token', {
+      req,
+      before: { tokenFp: String(req.consoleTokenFp ?? '') },
+      after: { tokenFp: tokenFpOf(next), accessFileUpdated }
+    });
     setConsoleCookie(res, next);
     for (const client of sseClients) client.end();
     sseClients.clear();
     return json(res, 200, { ok: true, accessFileUpdated });
+  });
+
+  router.add('GET', '/api/audit', async (req, res, params, url) => {
+    // 审计留痕查询（#5）：默认 200 条、硬上限 500（core 里再兜一次），before = ts 游标。
+    // 不做全量导出；config.update 类的记录含前后快照（单条可达数十 KB），翻页取即可。
+    const limit = Number(url.searchParams.get('limit') || 0) || 200;
+    const beforeTs = Number(url.searchParams.get('before') || 0) || 0;
+    return json(res, 200, queryAudit({ limit, beforeTs }));
   });
 
   router.add('GET', '/api/api-key', async (req, res) => {
@@ -1566,8 +1565,10 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     }
     try {
       const status = autoUpdate.requestManual({ version: body.version });
+      auditWrite('auto-update.run', String(body.version || ''), { req, after: status });
       return json(res, 202, { ok: true, status });
     } catch (error) {
+      auditWrite('auto-update.run', String(body.version || ''), { req, ok: false, error: String(error?.message ?? error) });
       return json(res, error.httpStatus || 409, {
         error: String(error?.message ?? error)
       });
@@ -1583,8 +1584,10 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         ownerUin: body.ownerUin,
         intervalHours: body.intervalHours
       });
+      auditWrite('auto-update.resume', String(body.ownerUin ?? ''), { req, after: autoUpdate.status() });
       return json(res, 200, { ok: true, status: autoUpdate.status() });
     } catch (error) {
+      auditWrite('auto-update.resume', String(body.ownerUin ?? ''), { req, ok: false, error: String(error?.message ?? error) });
       return json(res, error.httpStatus || 400, {
         error: String(error?.message ?? error)
       });
@@ -2227,8 +2230,11 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
   router.add('POST', '/api/asr/install', async (req, res) => {
     if (!keyEndpointAllowed(req)) return json(res, 403, { error: '请求来源不被信任，已拒绝。' });
     try {
-      return json(res, 202, startAsrInstall());
+      const started = startAsrInstall();
+      auditWrite('asr.install', '', { req, after: started });
+      return json(res, 202, started);
     } catch (error) {
+      auditWrite('asr.install', '', { req, ok: false, error: String(error?.message ?? error) });
       return json(res, 409, { error: String(error?.message ?? error) });
     }
   });
@@ -2330,8 +2336,10 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
         models: body.models || [],
         preset: String(body.preset ?? '')
       });
+      auditWrite('providers.upsert', String(r.provider?.id ?? ''), { req, after: sanitizeProvider(r.provider) });
       return json(res, 200, { ok: true, ...r, provider: sanitizeProvider(r.provider) });
     } catch (error) {
+      auditWrite('providers.upsert', '', { req, ok: false, error: String(error?.message ?? error) });
       return json(res, 400, { ok: false, error: String(error?.message ?? error) });
     }
   });
@@ -2340,8 +2348,10 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       const body = await readBody(req);
       const p = addModelsToProvider(String(body.providerId ?? ''), body.models || []);
       if (!p) return json(res, 404, { ok: false, error: '提供商不存在' });
+      auditWrite('providers.models.add', String(body.providerId ?? ''), { req, after: sanitizeProvider(p) });
       return json(res, 200, { ok: true, provider: sanitizeProvider(p) });
     } catch (error) {
+      auditWrite('providers.models.add', '', { req, ok: false, error: String(error?.message ?? error) });
       return json(res, 400, { ok: false, error: String(error?.message ?? error) });
     }
   });
@@ -2350,8 +2360,10 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       const body = await readBody(req);
       const p = removeModelFromProvider(String(body.providerId ?? ''), String(body.modelId ?? ''));
       if (!p) return json(res, 404, { ok: false, error: '提供商或模型不存在' });
+      auditWrite('providers.models.remove', String(body.providerId ?? ''), { req, after: sanitizeProvider(p) });
       return json(res, 200, { ok: true, provider: sanitizeProvider(p) });
     } catch (error) {
+      auditWrite('providers.models.remove', '', { req, ok: false, error: String(error?.message ?? error) });
       return json(res, 400, { ok: false, error: String(error?.message ?? error) });
     }
   });
@@ -2359,6 +2371,8 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     const body = await readBody(req);
     const updated = setProviderKey(String(body.providerId ?? ''), String(body.apiKey ?? ''));
     if (!updated) return json(res, 404, { ok: false, error: '提供商不存在' });
+    // 只记 hasKey（明文 Key 由 core 的脱敏链兜底，即使误传也不会落盘）
+    auditWrite('providers.key.set', String(body.providerId ?? ''), { req, after: { hasKey: !!updated.apiKey } });
     return json(res, 200, { ok: true, hasKey: !!updated.apiKey });
   });
   router.add('POST', '/api/providers/test-all', async (req, res) => {
@@ -2481,10 +2495,12 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     // 先写配置（意图），再拉一次（结果）
     const current = getConfig();
     const feeds = Array.isArray(current.api?.channelPriceFeeds) ? current.api.channelPriceFeeds : [];
+    const auditBeforeFeeds = structuredClone(feeds);   // feeds 是配置里的活引用，先拍审计快照
     const next = feeds.filter((f) => String(f?.vendor || '').trim() !== vendor);
     next.push({ vendor, url: feedUrl });
     updateConfig({ api: { ...(current.api || {}), channelPriceFeeds: next } });
     const status = await refreshChannelFeed(vendor, feedUrl);
+    auditWrite('channel-prices.save', vendor, { req, before: auditBeforeFeeds, after: next });
     return json(res, 200, { ok: true, feeds: status });
   });
   router.add('POST', '/api/channel-prices/refresh', async (req, res) => {
@@ -2718,7 +2734,10 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       totalTokens: totals.totalTokens,
       cachedTokens: totals.cachedTokens,
       runs: sessionUsage.runs,
-      webSearchCount: dailyStats.searchCount
+      webSearchCount: dailyStats.searchCount,
+      // 改进方案 #8：当日估算金额与未计价运行数（budgetStatus 的口径来源）
+      estimatedYuan: Number(sessionUsage.estimatedYuan) || 0,
+      unpricedRuns: Number(sessionUsage.unpricedRuns) || 0
     };
     const cfgNow = getConfig();
     // 省 Token 模式的"用户值 / 生效值"对照表：控制台设置页直接渲染，避免两边各写一份上限数字
@@ -2776,6 +2795,10 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       orchestrator: orchestrator.statusSummary(),
       incidentPilot: incidentPilotStatus(),
       usage,
+      // 改进方案 #8：当日预算状态（enabled/limit/spent/exceeded/onExceed/unpricedRuns）
+      budget: budgetStatus(cfgNow, usage),
+      // 改进方案 #6：最近一次运行的 trace id（拿它去 journalctl / 日志文件捞整条链路）
+      lastTraceId: lastTraceId(),
       cost,
       cacheHitRate: totals.cacheHitRate,
       webSearchCount: usage.webSearchCount || 0,
@@ -2821,6 +2844,9 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
   });
   router.add('POST', '/api/config', async (req, res) => {
     const cfgNow = getConfig();
+    // 审计（#5）：getConfig() 返回引用，patch 应用后会被就地改写 —— 必须先拍快照，
+    // 否则 before 会被写成 after（等于没记；方案附录 J.2）。
+    const auditBefore = structuredClone(cfgNow);
     const patch = await readBody(req);
     // 控制台保存总会带上显式的 provider（来自服务预设）：等于用户确认过这一家，
     // 清掉"升级默认值"的标记，让环境变量 Key 恢复生效（2026-09-26 审查 P2）
@@ -2885,7 +2911,14 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
       delete patch.server.token;
       delete patch.server.hasToken;
     }
-    const next = updateConfig(patch);
+    let next;
+    try {
+      next = updateConfig(patch);
+    } catch (error) {
+      auditWrite('config.update', 'config', { req, before: auditBefore, ok: false, error: String(error?.message ?? error) });
+      throw error;
+    }
+    auditWrite('config.update', 'config', { req, before: auditBefore, after: next, changed: changedTopKeys(auditBefore, next) });
     store.setMaxPerChat(next.store?.maxMessagesPerChat ?? 0);
     let closedThreads = 0;
     for (const [chatKey, previousMode] of previousModes) {
@@ -3631,7 +3664,10 @@ export function createApp({ log = console.log, autoUpdateOptions = {}, asrInstal
     updateConfig,
     // 外部模块注册控制台路由的唯一入口（改进方案 #2 / J.1 的例外路由收口）：
     // 与内部路由共享同一套鉴权（auth 默认 true）、405 与未命中 404 语义。
-    addRoute(method, routePath, handler, opts) { router.add(method, routePath, handler, opts); }
+    addRoute(method, routePath, handler, opts) { router.add(method, routePath, handler, opts); },
+    // 外部模块写审计（#5）：例外路由（manual-friend-review）用它留痕，语义与内部埋点一致
+    // （旁路、脱敏、永不抛；见 core/audit-log.js）。
+    auditWrite
   };
 }
 

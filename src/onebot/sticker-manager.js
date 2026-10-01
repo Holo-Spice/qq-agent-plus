@@ -57,6 +57,10 @@ function stickerSourceKey(url) {
 import { chatCompletionWithRetry } from '../llm/llm.js';
 import { safeFetchBinary, validateImageUrl } from '../llm/safe-fetch.js';
 import { resolveToolCalls } from '../tools/inline-tools.js';
+import { createLogger } from '../core/logger.js';
+import { createQuota } from '../core/quota.js';
+
+const log = createLogger('sticker');
 
 export class StickerManager {
   constructor(onebot) {
@@ -70,7 +74,7 @@ export class StickerManager {
     }
     this.syncedAt = 0;
     this.syncing = null;
-    this.collectTimes = [];
+    this.collectQuota = createQuota({ windowMs: 3600_000 });   // #9 双闸：每会话 + 全局（替换旧的 collectTimes 数组）
   }
 
   get enabled() {
@@ -390,15 +394,15 @@ export class StickerManager {
           continue;
         }
         // 三次都拿不到图就安静放弃，不要打扰群聊
-        console.log('[sticker] 取图或判断失败（已重试 3 次），这次跳过：' + (error?.message ?? error));
+        log.info('[sticker] 取图或判断失败（已重试 3 次），这次跳过：' + (error?.message ?? error));
         return null;
       }
     }
     if (!pick) {
-      console.log('[sticker] 判断没有返回结果，这次跳过');
+      log.info('[sticker] 判断没有返回结果，这次跳过');
       return null;
     }
-    console.log('[sticker] 判断：' + (pick.save ? '收下' : '不收') + ' —— ' + (pick.reason || '（没说理由）'));
+    log.info('[sticker] 判断：' + (pick.save ? '收下' : '不收') + ' —— ' + (pick.reason || '（没说理由）'));
     if (pick.save !== true) return null;
     const sender = String(message?.senderName || '').trim().slice(0, 12);
     const note = String(pick.note || '').trim() || (sender ? `自动收藏 · ${sender}` : '自动收藏');
@@ -412,11 +416,11 @@ export class StickerManager {
         try {
           if (this.peek(qq.emojiId)) this.note(qq.emojiId, { note });
         } catch { /* 备注失败不影响收藏 */ }
-        console.log('[sticker] 已加进 QQ 收藏表情：' + note);
+        log.info('[sticker] 已加进 QQ 收藏表情：' + note);
         return this.peek(qq.emojiId) || { id: qq.emojiId, localNote: note, source: 'qq' };
       }
     }
-    const entry = await this.collect(message?.mid, { url: usedUrl, srcKey, note });
+    const entry = await this.collect(message?.mid, { url: usedUrl, srcKey, note, chatKey });
     if (entry && !entry.srcKey) {
       entry.srcKey = srcKey;
       this.saveEntries(this.entries);
@@ -448,7 +452,7 @@ export class StickerManager {
       this.qqCountAt = now;
       this.qqCount = list.length;
       this.qqFull = list.length >= 500;
-      if (this.qqFull) console.log('[sticker] QQ 收藏表情已满（' + list.length + '/500），这张改存本地库');
+      if (this.qqFull) log.info('[sticker] QQ 收藏表情已满（' + list.length + '/500），这张改存本地库');
       return this.qqFull;
     } catch {
       this.qqFailAt = now;
@@ -466,7 +470,7 @@ export class StickerManager {
     } catch (error) {
       const msg = String(error?.message ?? error);
       const maybeFull = /full|limit|上限|超过|超出|500/i.test(msg);
-      console.log('[sticker] 加进 QQ 收藏失败' + (maybeFull ? '（可能收藏已满）' : '') + '，改存本地库：' + msg);
+      log.info('[sticker] 加进 QQ 收藏失败' + (maybeFull ? '（可能收藏已满）' : '') + '，改存本地库：' + msg);
       return null;
     }
   }
@@ -505,11 +509,22 @@ export class StickerManager {
     return this.#judgeSticker({ url }, message, signal);
   }
 
-  /** 现在还能不能收藏（限频闸门）：工具层在"看图判断"之前先问一句，别白跑一次视觉调用。 */
-  collectRateLimited(now = Date.now()) {
-    const times = (this.collectTimes || []).filter((t) => now - t < 3600000);
-    this.collectTimes = times;
-    return times.length >= Math.max(1, Number(getConfig().sticker?.maxCollectPerHour) || 10);
+  /** #9：把配置里的双闸限值同步到配额实例（全局 = maxCollectPerHour，会话 = maxCollectPerHourPerChat）。 */
+  #configureCollectQuota() {
+    const cfg = getConfig().sticker || {};
+    this.collectQuota.configure({
+      globalMax: Math.max(1, Number(cfg.maxCollectPerHour) || 10),
+      perChatMax: Math.max(1, Number(cfg.maxCollectPerHourPerChat) || 3)
+    });
+  }
+
+  /**
+   * 收藏配额预检（#9 双闸：每会话 + 全局）：工具层在"看图判断"之前先问一句，别白跑一次视觉调用。
+   * 只查不记 —— 真正扣额度发生在 collect() 落库成功之后。返回 { ok, scope:'chat'|'global'|'' }。
+   */
+  collectPeek(now = Date.now(), chatKey = '') {
+    this.#configureCollectQuota();
+    return this.collectQuota.peek(chatKey, now);
   }
 
   /** 一次极小的视觉判断：这张图收不收？收的话备注写什么？ */
@@ -617,7 +632,7 @@ export class StickerManager {
       args = pickArgs(response);
     }
     if (!args) {
-      console.log('[sticker] 三次都没拿到决定'
+      log.info('[sticker] 三次都没拿到决定'
         + (filtered ? `（其中 ${filtered} 次被服务商内容过滤：图片含敏感内容，属正常拦截）` : '')
         + '，这张跳过：' + String(response?.message?.content || '').slice(0, 100));
       return null;
@@ -631,14 +646,16 @@ export class StickerManager {
   }
 
   /** 收藏一条消息里的图片（本地新增条目，不入 QQ 收藏）。 */
-  async collect(messageId, { url, note = '', srcKey = '', signal } = {}) {
+  async collect(messageId, { url, note = '', srcKey = '', signal, chatKey = '' } = {}) {
     note = String(note ?? '').slice(0, 300);
     if (!getConfig().sticker?.collectEnabled) throw new Error('收藏表情功能未开启');
-    // 限频
+    // 限频（#9 双闸：每会话 + 全局；只查，落库成功后才扣）
     const now = Date.now();
-    this.collectTimes = this.collectTimes.filter((t) => now - t < 3600000);
-    if (this.collectTimes.length >= Math.max(1, Number(getConfig().sticker?.maxCollectPerHour) || 10)) {
-      throw new Error('收藏太频繁了，一小时后再试');
+    const gate = this.collectPeek(now, chatKey);
+    if (!gate.ok) {
+      throw new Error(gate.scope === 'chat'
+        ? '本会话收藏太频繁了（每小时有上限），过一会儿再收'
+        : '收藏太频繁了（全局每小时有上限），过一会儿再收');
     }
     url = String(url || '');
     if (!url) throw new Error('该消息没有可收藏的图片地址');
@@ -685,7 +702,7 @@ export class StickerManager {
       try { fs.rmSync(assetFile, { force: true }); } catch { /* 清不掉无害 */ }
       throw error;
     }
-    this.collectTimes.push(now);
+    this.collectQuota.tryConsume(chatKey, now);   // 落库成功才扣额度
     return entry;
   }
 }

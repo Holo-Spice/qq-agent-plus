@@ -4,6 +4,7 @@ import { DATA_DIR, getConfig, updateConfig } from '../core/config.js';
 import { todayKey, sanitizeUserText, ZONE_OFFSET_MS } from '../core/util.js';
 import { cappedByTokenSaver, tokenSaverCapsOf } from '../core/token-saver.js';
 import { GlobalPersonMemoryStore } from './global-person-memory-store.js';
+import { memoryVisibilityOf, visibleImpressions } from '../core/memory-visibility.js';
 
 const MEMORY_DIR = path.join(DATA_DIR, 'memory');
 const chatDirName = (chatKey) => String(chatKey).replace(/[^a-z0-9_]/gi, '_');
@@ -179,7 +180,14 @@ export class MemoryStore {
     const cfg = getConfig();
     const notes = cfg.memberNotes || {};
     const ownerUin = String(cfg?.admin?.ownerUin || '').trim();
-    const picked = userIds ? [...new Set([...userIds].map(String))].map((id) => this.people.get(id)).filter((m) => m.impressions.length) : this.people.members(chatKey).slice(0, 15);
+    const raw = userIds ? [...new Set([...userIds].map(String))].map((id) => this.people.get(id)).filter((m) => m.impressions.length) : this.people.members(chatKey).slice(0, 15);
+    // #13：按 memory.visibility 策略过滤到「对这个 chatKey 可见」的印象（默认策略下与历史逐字一致）
+    const vis = memoryVisibilityOf(getConfig());
+    const picked = [];
+    for (const m of raw) {
+      const keep = visibleImpressions(m.impressions, chatKey, vis);
+      if (keep.length) { m.impressions = keep; picked.push(m); }
+    }
     if (!picked.length) return '';
     const lines = ['【对群友的全局印象】'];
     for (const m of picked.slice(0, 20)) {

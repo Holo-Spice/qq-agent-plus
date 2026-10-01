@@ -461,3 +461,23 @@ test('Issue #17：备注命中不被标签擦边否决；整行粘贴（带标�
   assert.equal(findSticker(d, '裂开（崩溃） [崩溃]')?.id, 'd2', '截断行（无 stickerId）从最完整形态开始试');
   assert.equal(findSticker(d, '- 裂开（崩溃）')?.id, 'd2', '行首项目符号 + 括号结尾的备注');
 });
+
+
+test('收藏双闸（#9）：会话额度互不影响；全局额度共享（配额在 manager 实例上）', async () => {
+  const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+  updateConfig({ sticker: { ...DEFAULT_CONFIG.sticker, collectEnabled: true, maxCollectPerHour: 4, maxCollectPerHourPerChat: 2 } });
+  const manager = new StickerManager({ async call() { return []; } });
+  const t0 = Date.now();
+  assert.equal(manager.collectPeek(t0, 'group:1').ok, true);
+  manager.collectQuota.tryConsume('group:1', t0);
+  manager.collectQuota.tryConsume('group:1', t0 + 1);
+  const chatDenied = manager.collectPeek(t0 + 2, 'group:1');
+  assert.equal(chatDenied.ok, false);
+  assert.equal(chatDenied.scope, 'chat');
+  assert.equal(manager.collectPeek(t0 + 2, 'group:2').ok, true, '别的会话不受影响');
+  manager.collectQuota.tryConsume('group:2', t0 + 3);
+  manager.collectQuota.tryConsume('group:2', t0 + 4);
+  const globalDenied = manager.collectPeek(t0 + 5, 'group:3');
+  assert.equal(globalDenied.ok, false, '全局 4 张已满，第三个会话也受限');
+  assert.equal(globalDenied.scope, 'global');
+});

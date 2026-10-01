@@ -3,7 +3,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { DATA_DIR } from './config.js';
+import { DATA_DIR, getConfig } from './config.js';
+import { estimateCost } from '../llm/llm.js';
+import { vendorOfConfig } from '../pricing/model-prices.js';
 import { todayKey } from './util.js';
 
 const SESSIONS_DIR = path.join(DATA_DIR, 'sessions');
@@ -280,6 +282,11 @@ export class SessionRegistry {
     let cachedTokens = 0;
     let runs = 0;
     let webSearchCount = 0;
+    // 每日预算（改进方案 #8）的当日额度来源：此前这里的返回是 6 个 token 字段的白名单，
+    // 漏传 estimatedYuan/unpricedRuns 会让 budgetStatus 永远读到 0（拦截失效，2026-09-30
+    // 由集成用例抓到）。
+    let estimatedYuan = 0;
+    let unpricedRuns = 0;
     // 结束的会话记在汇总文件里
     try {
       const data = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'usage-today.json'), 'utf8'));
@@ -290,6 +297,8 @@ export class SessionRegistry {
         cachedTokens = data.cachedTokens || 0;
         runs = data.runs || 0;
         webSearchCount = data.webSearchCount || 0;
+        estimatedYuan = Number(data.estimatedYuan) || 0;
+        unpricedRuns = Number(data.unpricedRuns) || 0;
       }
     } catch { /* 无记录 */ }
     // 加上运行中的
@@ -300,7 +309,7 @@ export class SessionRegistry {
       cachedTokens += Number(s.usage.cachedTokens) || 0;
       webSearchCount += Number(s.webSearchCount) || 0;
     }
-    return { dayKey, promptTokens, completionTokens, totalTokens, cachedTokens, runs, webSearchCount };
+    return { dayKey, promptTokens, completionTokens, totalTokens, cachedTokens, runs, webSearchCount, estimatedYuan, unpricedRuns };
   }
 
   /** 在会话结束时累加今日用量。 */
@@ -319,6 +328,20 @@ export class SessionRegistry {
     data.cachedTokens = (data.cachedTokens || 0) + (Number(s.usage.cachedTokens) || 0);
     data.runs += 1;
     data.webSearchCount = (data.webSearchCount || 0) + (Number(s.webSearchCount) || 0);
+    // 估算金额（改进方案 #8/J.3）：按会话实际模型估价；价格缺失记 0 并计 unpricedRuns
+    // —— budgetStatus 会把它暴露给控制台，防"没价＝永远不超限"的静默失效。
+    try {
+      const cfgNow = getConfig();
+      const est = estimateCost({ ...s.usage }, {
+        model: s.model || cfgNow.api?.model,
+        at: Date.now(),
+        vendor: vendorOfConfig(cfgNow)
+      });
+      const cost = Number(est?.cost) || 0;
+      data.estimatedYuan = (Number(data.estimatedYuan) || 0) + cost;
+      const hadUsage = (Number(s.usage.totalTokens) || 0) > 0;
+      if (hadUsage && !(cost > 0)) data.unpricedRuns = (Number(data.unpricedRuns) || 0) + 1;
+    } catch { /* 估价失败不影响用量累加（最坏情况＝这项当天少算） */ }
     const tmp = path.join(DATA_DIR, 'usage-today.json.tmp');
     try { fs.rmSync(tmp, { force: true }); } catch { /* 不存在就算了 */ }
     fs.writeFileSync(tmp, JSON.stringify(data), { encoding: 'utf8', mode: 0o600 });

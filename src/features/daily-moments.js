@@ -30,6 +30,7 @@ import {
   ZONE_OFFSET_MS
 } from '../core/util.js';
 import { resolveToolCalls } from '../tools/inline-tools.js';
+import { newTraceId, withTrace } from '../core/logger.js';
 
 const STATE_FILE = path.join(DATA_DIR, 'daily-moments.json');
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -413,7 +414,7 @@ export class DailyMomentsManager {
     const version = this.scheduleVersion;
     this.nextRunAt = Number(targetAt) || (this.now() + wait);
     this.timer = setTimeout(() => {
-      this.#tick(startup, version).catch((error) => {
+      withTrace(newTraceId(), () => this.#tick(startup, version)).catch((error) => {
         this.log('[daily-moments] scheduler error:', error?.message ?? error);
         if (!this.stopped && version === this.scheduleVersion) this.#schedule(60000);
       });

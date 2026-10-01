@@ -4,6 +4,7 @@ import { getConfig } from '../core/config.js';
 import { chatCompletion } from '../llm/llm.js';
 import { nextAtFromHHMM } from '../core/reminders.js';
 import { sanitizeUserText } from '../core/util.js';
+import { newTraceId, withTrace } from '../core/logger.js';
 
 const MIN_MESSAGES = 5;          // 少于这个数不生成（"昨天没人说话"没必要日报）
 const WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -50,7 +51,7 @@ export class GroupDigestManager {
     }
     const wait = Math.max(1000, at - this.now());
     this.timer = setTimeout(() => {
-      this.runOnce().catch((error) => this.log('[group-digest] 运行出错:', error?.message ?? error));
+      withTrace(newTraceId(), () => this.runOnce()).catch((error) => this.log('[group-digest] 运行出错:', error?.message ?? error));
       this.reconfigure();   // 排下一天
     }, wait);
     if (this.timer.unref) this.timer.unref();

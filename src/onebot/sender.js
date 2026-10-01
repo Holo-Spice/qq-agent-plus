@@ -7,6 +7,9 @@ import { getConfig, DEFAULT_CONFIG } from '../core/config.js';
 import { sleep, randInt, createSendChain, formatClockTime } from '../core/util.js';
 import { mdToPlain, splitForQQ } from '../llm/md-to-plain.js';
 import { assertCanSend } from '../core/access.js';
+import { createLogger } from '../core/logger.js';
+
+const log = createLogger('sender');
 
 // 限频回退值统一取自 DEFAULT_CONFIG，杜绝"代码默认 80 / 回退值 8 / UI 回退 8"三处打架。
 const DEFAULT_MAX_PER_MINUTE = DEFAULT_CONFIG.send.maxPerMinute;
@@ -69,7 +72,7 @@ export function muteMark(raw, nowSec) {
   const shut = Number(raw || 0);
   if (!Number.isFinite(shut) || shut <= nowSec) return 0;
   if (shut > nowSec + MUTE_MAX_AHEAD_SEC) {
-    console.warn('[send] 禁言时间戳超出常识范围（>365 天），按未禁言处理:', raw);
+    log.warn('[send] 禁言时间戳超出常识范围（>365 天），按未禁言处理:', raw);
     return 0;
   }
   return shut;
@@ -80,7 +83,7 @@ function muteUntilMs(raw, nowSec) {
   if (shut === 'flag') return 0;              // 标志位没有解禁时间，交给下面单独判定
   if (!shut) return 0;
   if (shut > nowSec + MUTE_MAX_AHEAD_SEC) {
-    console.warn('[send] 禁言时间戳超出常识范围（>365 天），按未禁言处理:', raw);
+    log.warn('[send] 禁言时间戳超出常识范围（>365 天），按未禁言处理:', raw);
     return 0;
   }
   return shut * 1000;
@@ -189,7 +192,7 @@ export class SendQueue {
           // 重发会让群里出现两条一样的消息，而 outbox 只记一条，人工核对也看不到重复。
           const { definite, uncertain } = classifyTransportFailure(error);
           if (attempt >= 2 || !definite || uncertain || options.signal?.aborted) throw error;
-          console.log(`[sender] 发送失败（可确认未送达），1.5 秒后重试一次（${message.slice(0, 80)}）`);
+          log.info(`[sender] 发送失败（可确认未送达），1.5 秒后重试一次（${message.slice(0, 80)}）`);
           await sleep(1500);
         }
       }
@@ -306,7 +309,7 @@ export class SendQueue {
         if (codes.size === 1) error.code = [...codes][0];
         throw error;
       }
-      console.warn(`[sender] 部分发送失败（${failed.length}/${parts.length}）：${detail}`);
+      log.warn(`[sender] 部分发送失败（${failed.length}/${parts.length}）：${detail}`);
     }
     return { sent, failed };
   }

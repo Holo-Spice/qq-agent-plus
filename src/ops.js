@@ -7,7 +7,7 @@
 // 约定：
 //   - 只读子命令（audit / audit-host / scan / watch-* / face-names --print / console --print）
 //     不写业务数据；
-//   - 破坏性操作（backup / deploy / guard 真实执行 / install-timers 写盘）必须显式 --confirm，
+//   - 破坏性操作（backup / deploy / guard 真实执行 / install-timers 写盘 / audit-prune 删文件）必须显式 --confirm，
 //     预先查看可用 --dry-run / --print；
 //   - 外部命令（systemctl / docker / journalctl / ss / tar ...）缺失时，对应段落自动降级为
 //     「跳过」，不会中断整体体检；
@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { openDatabase } from './core/sqlite.js';
 import { runHealthCheck } from './core/health-check.js';
 import { readOwnerUin, sendOwnerText } from './core/notify-owner.js';
+import { pruneAudit } from './core/audit-log.js';
 import { resolveModelPrice, modelLabel, setRemotePrices, setChannelPrices } from './pricing/model-prices.js';
 
 const REPO_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -1917,13 +1918,38 @@ AccuracySec=1min
 [Install]
 WantedBy=timers.target
 `;
+  const auditPruneService = `[Unit]
+# 审计日志清理（改进方案 #5）：删除超过保留月数的 data/audit-log/audit-YYYYMM.jsonl。
+# 由 node src/ops.js install-timers 生成；路径按实际部署改。
+Description=QQ Agent audit log prune
+
+[Service]
+Type=oneshot
+# ops.js 的默认值可能与本机部署不一致（本单元要在无人值守下自足）
+Environment=QQ_AGENT_DATA_DIR=${cfg.dataDir}
+ExecStart=${nodeBin} ${opsPath} audit-prune --confirm
+`;
+  const auditPruneTimer = `[Unit]
+# 每月 1 日 04:20 清理一次（排在 backup 之后）；关机错过会在下次开机补跑。
+Description=Monthly QQ Agent audit log prune (1st 04:20)
+
+[Timer]
+OnCalendar=*-*-01 04:20:00
+Persistent=true
+Unit=qq-agent-audit-prune.service
+
+[Install]
+WantedBy=timers.target
+`;
   return [
     ['qq-agent-backup.service', backupService],
     ['qq-agent-backup.timer', backupTimer],
     ['process-guard.service', guardService],
     ['process-guard.timer', guardTimer],
     ['qq-agent-health.service', healthService],
-    ['qq-agent-health.timer', healthTimer]
+    ['qq-agent-health.timer', healthTimer],
+    ['qq-agent-audit-prune.service', auditPruneService],
+    ['qq-agent-audit-prune.timer', auditPruneTimer]
   ];
 }
 
@@ -1958,13 +1984,36 @@ function cmdInstallTimers(args) {
   }
   const reload = systemctlUser(['daemon-reload']);
   if (reload.missing) {
-    skipLine('缺少 systemctl：请手动执行 systemctl --user daemon-reload && systemctl --user enable --now qq-agent-backup.timer process-guard.timer');
+    skipLine('缺少 systemctl：请手动执行 systemctl --user daemon-reload && systemctl --user enable --now qq-agent-backup.timer process-guard.timer qq-agent-health.timer qq-agent-audit-prune.timer');
     return 0;
   }
   if (!reload.ok) ngLine(`daemon-reload 失败: ${text(reload)}`);
-  const enable = systemctlUser(['enable', '--now', 'qq-agent-backup.timer', 'process-guard.timer', 'qq-agent-health.timer'], { timeout: 60000 });
-  if (enable.ok) okLine('定时器已启用：qq-agent-backup.timer（每周日 04:10）、process-guard.timer（每 10 分钟）、qq-agent-health.timer（每 5 分钟巡检）');
+  const enable = systemctlUser(['enable', '--now', 'qq-agent-backup.timer', 'process-guard.timer', 'qq-agent-health.timer', 'qq-agent-audit-prune.timer'], { timeout: 60000 });
+  if (enable.ok) okLine('定时器已启用：qq-agent-backup.timer（每周日 04:10）、process-guard.timer（每 10 分钟）、qq-agent-health.timer（每 5 分钟巡检）、qq-agent-audit-prune.timer（每月 1 日 04:20 清理审计日志）');
   else ngLine(`启用定时器失败: ${text(enable)}`);
+  return 0;
+}
+
+// ───────────────────────────────── audit-prune ─────────────────────────────────
+
+function cmdAuditPrune(args) {
+  if (wantsHelp(args)) { say(HELP['audit-prune']); return 0; }
+  const cfg = config({});
+  const keepMonths = Math.max(1, intOpt(args, '--keep-months', 6));
+  const dryRun = hasFlag(args, '--dry-run');
+  const dir = path.join(cfg.dataDir, 'audit-log');
+  if (!dryRun && !hasFlag(args, '--confirm')) {
+    ngLine(`audit-prune 会删除 ${dir} 下超过保留月数的审计文件：请加 --confirm（或 --dry-run 预演）`);
+    return 1;
+  }
+  const r = pruneAudit({ dir, keepMonths, dryRun });
+  noteLine(`目录: ${r.dir}`);
+  for (const name of r.kept) noteLine(`保留 ${name}`);
+  for (const name of r.removed) noteLine(`${dryRun ? '将删除' : '已删除'} ${name}`);
+  if (!r.kept.length && !r.removed.length) noteLine('没有审计文件，无需处理');
+  okLine(dryRun
+    ? `预演完成（未删任何文件）：将删除 ${r.removed.length} 个，保留 ${r.kept.length} 个`
+    : `审计清理完成：删除 ${r.removed.length} 个，保留 ${r.kept.length} 个（保留 ${keepMonths} 个月）`);
   return 0;
 }
 
@@ -2002,6 +2051,18 @@ SSH 配置、防火墙、定时任务、可升级包、TLS 证书到期、备份
 环境变量: QQ_AGENT_DIR / QQ_AGENT_DATA_DIR / QQ_AGENT_USER
 
 外部命令（systemctl/free/df/journalctl/docker/ss/...）缺失时对应段落打印跳过。`,
+
+  'audit-prune': `用法: node src/ops.js audit-prune --confirm [--keep-months=N] [--data=目录]
+       node src/ops.js audit-prune --dry-run
+
+删除 data/audit-log/ 下超过保留月数的 audit-YYYYMM.jsonl（控制台写操作的审计留痕，改进方案 #5）。
+按自然月切文件，默认保留 6 个月；qq-agent-audit-prune.timer 每月 1 日 04:20 自动跑。
+
+--confirm       实际删除（必需；没有它会打印提醒后退出 1）
+--dry-run       只列出将删除的文件
+--keep-months=N 保留月数（默认 6）
+
+环境变量: QQ_AGENT_DATA_DIR`,
 
   backup: `用法: node src/ops.js backup --confirm [--keep=N] [--data=目录] [--backup-dir=目录]
        node src/ops.js backup --dry-run
@@ -2105,9 +2166,11 @@ SSH 配置、防火墙、定时任务、可升级包、TLS 证书到期、备份
   'install-timers': `用法: node src/ops.js install-timers --print
        node src/ops.js install-timers --confirm
 
-安装两个 systemd user 定时器：
+安装 systemd user 定时器：
   qq-agent-backup.timer（每周日 04:10 备份，Persistent=true）
   process-guard.timer（每 10 分钟进程看门狗）
+  qq-agent-health.timer（每 5 分钟健康巡检）
+  qq-agent-audit-prune.timer（每月 1 日 04:20 清理审计日志）
 
 --print    只打印单元内容，不写盘
 --confirm  写入并执行 systemctl --user daemon-reload / enable --now
@@ -2124,6 +2187,7 @@ function printMainHelp() {
   say('子命令:');
   say('  audit           服务 + 代码 + 数据体检（只读）');
   say('  audit-host      主机体检（只读）');
+  say('  audit-prune     清理超期的审计日志（需 --confirm）');
   say('  backup          停/起服务 + 打包数据目录 + 只留最近 N 份（需 --confirm）');
   say('  scan            未定义调用扫描（只报告、不阻断）');
   say('  watch-send      盯 outbox 水位线，确认消息通过工具层发出');
@@ -2132,7 +2196,7 @@ function printMainHelp() {
   say('  face-names      合并三个来源导出表情名对照表');
   say('  deploy          非交互部署（需 --confirm）');
   say('  console         SSH 隧道 + 打开控制台（Windows/macOS/Linux）');
-  say('  install-timers  生成并安装两个 systemd user 定时器（需 --confirm）');
+  say('  install-timers  生成并安装 systemd user 定时器（需 --confirm）');
   say('  help            显示本帮助');
   say();
   say('环境变量与常用示例见 docs/OPS.md。');
@@ -2144,6 +2208,7 @@ function printMainHelp() {
 const COMMANDS = {
   audit: { run: auditServer, help: HELP.audit },
   'audit-host': { run: auditHost, help: HELP['audit-host'] },
+  'audit-prune': { run: cmdAuditPrune, help: HELP['audit-prune'] },
   backup: { run: cmdBackup, help: HELP.backup },
   scan: { run: cmdScan, help: HELP.scan },
   'watch-send': { run: cmdWatchSend, help: HELP['watch-send'] },

@@ -331,11 +331,11 @@ test('collect_sticker：限频时不再白跑一次看图判断', async () => {
       findByMid: () => ({ mid: '1710457251', media: [{ kind: 'image', url: 'https://example.com/a.jpg' }], senderId: '42', senderName: '群友', text: '图' }),
       recent: () => []
     },
-    stickers: { collectRateLimited: () => true, judgeImage: async () => { judged += 1; return { save: true }; }, collect: async () => ({ id: 'x' }) }
+    stickers: { collectPeek: () => ({ ok: false, scope: 'chat' }), judgeImage: async () => { judged += 1; return { save: true }; }, collect: async () => ({ id: 'x' }) }
   });
   const result = await tool('collect_sticker').execute(f.ctx, { messageId: '1710457251', note: 'x' });
   assert.equal(judged, 0, '限频了就别再调模型');
-  assert.match(JSON.stringify(result), /收藏太频繁/);
+  assert.match(JSON.stringify(result), /收藏额度用完了/);
 });
 
 test('get_recent_messages / get_message_detail 与提示词同形：正文缺引用块时补上', async () => {

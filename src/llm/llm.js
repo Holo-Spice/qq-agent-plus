@@ -6,6 +6,9 @@ import { normalizeThinkingIntent, resolveThinkingPatch, modelServiceById, modelS
 import { resolveModelPrice, priceAt } from '../pricing/model-prices.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertTimeAllowed, watchTimeWindow } from '../core/time-gate.js';
+import { createLogger } from '../core/logger.js';
+
+const log = createLogger('llm');
 
 function joinUrl(base, path) {
   return `${String(base).replace(/\/+$/, '')}${path}`;
@@ -192,7 +195,7 @@ function thinkingFor(purpose, overrides = null) {
     const key = `${serviceId || 'unknown'}:${intent}`;
     if (intent !== 'off' && !thinkingUnsupportedWarned.has(key)) {
       thinkingUnsupportedWarned.add(key);
-      console.warn(`[llm] 当前渠道（${serviceId || '未识别'}）未验证思考档位「${intent}」，已跳过该参数；可用「额外请求参数」自定义。`);
+      log.warn(`[llm] 当前渠道（${serviceId || '未识别'}）未验证思考档位「${intent}」，已跳过该参数；可用「额外请求参数」自定义。`);
     }
     return { mode: intent, patch: null, approx: false, effectiveOff: false, serviceId };
   }
@@ -235,7 +238,7 @@ async function runCompletionWithRetries(args, retries) {
       if (!moderationRetried && isModerationRefusal(response)) {
         moderationRetried = true;
         args = { ...args, messages: trimForModerationRetry(args.messages) };
-        console.warn('[llm] 服务商审核拦截整次请求，改用精简上下文重试一次');
+        log.warn('[llm] 服务商审核拦截整次请求，改用精简上下文重试一次');
         await delay(600, undefined, { signal: args.signal });
         continue;
       }
@@ -244,7 +247,7 @@ async function runCompletionWithRetries(args, retries) {
       lastError = error;
       if (args.signal?.aborted || attempt >= retries || !isRetryableError(error)) throw error;
       const wait = 1000 * Math.pow(2, attempt);   // 1s, 2s
-      console.warn(`[llm] 请求失败（第 ${attempt + 1} 次尝试），${wait}ms 后重试：${error?.message ?? error}`);
+      log.warn(`[llm] 请求失败（第 ${attempt + 1} 次尝试），${wait}ms 后重试：${error?.message ?? error}`);
       await delay(wait, undefined, { signal: args.signal });
     }
   }
@@ -302,7 +305,7 @@ export async function chatCompletionWithRetry(args, retries = 2) {
   const why = primaryError
     ? `失败（${String(primaryError?.message ?? primaryError).slice(0, 90)}）`
     : '两轮都被审核拦截';
-  console.warn(`[llm] 主模型${why}，改用兜底模型 ${fb.model}`);
+  log.warn(`[llm] 主模型${why}，改用兜底模型 ${fb.model}`);
   return await runCompletionWithRetries({ ...args, overrides: fb }, 1);
 }
 
@@ -365,7 +368,7 @@ export async function chatCompletion({
       const name = String(toolChoice?.function?.name || '');
       if (!thinkingToolChoiceWarned.has(name)) {
         thinkingToolChoiceWarned.add(name);
-        console.warn('[llm] 思考模式不接受强制 tool_choice，已降级为 auto（每种工具只提示一次）：', name || JSON.stringify(toolChoice));
+        log.warn('[llm] 思考模式不接受强制 tool_choice，已降级为 auto（每种工具只提示一次）：', name || JSON.stringify(toolChoice));
       }
       body.tool_choice = 'auto';
     } else {
@@ -403,7 +406,7 @@ export async function chatCompletion({
     // 连打三次（表现为"已读不回"）——强制回 false 并提示一次（审查 2026-09-28）。
     if (!extraBodyStreamWarned) {
       extraBodyStreamWarned = true;
-      console.warn('[llm] 额外请求参数里的 stream:true 已忽略：本端固定按非流式解析响应。');
+      log.warn('[llm] 额外请求参数里的 stream:true 已忽略：本端固定按非流式解析响应。');
     }
     body.stream = false;
   }
@@ -444,7 +447,7 @@ export async function chatCompletion({
         for (const k of patchKeys) delete retryBody[k];
         if (!thinkingParamRejectedWarned.has(api.model)) {
           thinkingParamRejectedWarned.add(api.model);
-          console.warn('[llm] 模型拒绝思考参数，已去掉后重试（每个模型提示一次）：', api.model, '|', text.slice(0, 160));
+          log.warn('[llm] 模型拒绝思考参数，已去掉后重试（每个模型提示一次）：', api.model, '|', text.slice(0, 160));
         }
         res = await send(retryBody);
         if (!res.ok) text = await res.text();

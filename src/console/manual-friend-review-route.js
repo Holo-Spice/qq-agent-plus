@@ -120,8 +120,11 @@ async function handleManualFriendReview(app, req, res) {
       chatKey: body.chatKey,
       requestedBy: 'console'
     });
+    // 审计（#5）：例外路由走 app.auditWrite 留痕，与内部埋点同一套旁路语义（写失败不影响响应）
+    app.auditWrite?.('friend-review.manual', String(body.userId ?? ''), { req, after: result });
     json(res, 200, result);
   } catch (error) {
+    app.auditWrite?.('friend-review.manual', '', { req, ok: false, error: String(error?.message ?? error) });
     json(res, 409, { error: String(error?.message ?? error) });
   }
 }
