@@ -745,9 +745,18 @@ async function saveConfig({ quiet = false } = {}) {
     };
     const wsToken = tokenOf('#cfg-obtoken');
     const httpToken = tokenOf('#cfg-obhttptoken');
+    // 心跳策略：只有三个合法值；界面里是下拉框，兜底仍按 auto（服务端也有一层兜底）。
+    const hb = val('#cfg-wsheartbeat', 'auto').trim();
+    // 补课窗口：留空/非法 = 不改（清空输入框就变成"一律不回复"太吓人），0 才是显式的"只补记录"。
+    const rawWindow = val('#cfg-catchup-window', '').trim();
+    const windowMin = rawWindow === '' ? null : Number(rawWindow);
     patch.onebot = {
       wsUrl: val('#cfg-wsurl', c.onebot?.wsUrl || '').trim(),
       httpUrl: val('#cfg-httpurl', c.onebot?.httpUrl || '').trim(),
+      wsHeartbeat: ['auto', 'on', 'off'].includes(hb) ? hb : 'auto',
+      ...(windowMin !== null && Number.isFinite(windowMin) && windowMin >= 0
+        ? { catchupReplyWindowMs: Math.round(windowMin * 60000) }
+        : {}),
       ...(wsToken ? { accessToken: wsToken } : {}),
       ...(httpToken ? { httpAccessToken: httpToken } : {})
     };

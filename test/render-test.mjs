@@ -1440,6 +1440,45 @@ try {
       + (memOk ? '' : ` -> ${JSON.stringify(posted?.memory)}`));
   }
 
+  // OneBot 心跳策略与补课窗口（Issue #22）：两个控件都要在，保存要落到 onebot.*；
+  // 补课窗口**留空 = 不改**（清空输入框不该悄悄变成"一律不回复"），只有填了数字才提交。
+  {
+    const onebotRender = ctx.renderOnebotSection({
+      ...cfg,
+      onebot: { ...cfg.onebot, wsHeartbeat: 'off', catchupReplyWindowMs: 45 * 60 * 1000 }
+    });
+    const controlsOk = onebotRender.includes('id="cfg-wsheartbeat"')
+      && onebotRender.includes('id="cfg-catchup-window"')
+      && onebotRender.includes('value="off" selected')
+      && onebotRender.includes('value="45"');
+    let posted = null;
+    vm.runInContext("state.settingsSection = 'onebot';", ctx);
+    vm.runInContext(`state.config = ${JSON.stringify({ ...cfg, onebot: { ...cfg.onebot, wsHeartbeat: 'auto', catchupReplyWindowMs: 30 * 60 * 1000 } })};`, ctx);
+    document.querySelector('#cfg-wsheartbeat').value = 'off';
+    document.querySelector('#cfg-catchup-window').value = '45';
+    const before = sandbox.fetch;
+    sandbox.fetch = async (url, options) => {
+      if (String(url).includes('/api/config') && options?.method === 'POST') {
+        posted = JSON.parse(options.body);
+        return { ok: true, status: 200, json: async () => ({ config: { ...cfg, onebot: posted.onebot } }), text: async () => '' };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    };
+    try { await ctx.saveConfig({ quiet: true }); } catch { /* 看 patch */ }
+    const saved = { ...posted?.onebot };
+    // 留空 = 不改
+    document.querySelector('#cfg-catchup-window').value = '';
+    posted = null;
+    try { await ctx.saveConfig({ quiet: true }); } catch { /* 看 patch */ }
+    sandbox.fetch = before;
+    const ok = controlsOk
+      && saved.wsHeartbeat === 'off' && saved.catchupReplyWindowMs === 45 * 60000
+      && posted?.onebot && !('catchupReplyWindowMs' in posted.onebot);
+    ok ? pass++ : fail++;
+    console.log('  ' + (ok ? 'OK   ' : 'FAIL ') + '设置页：OneBot 心跳策略/补课窗口可设，清空窗口不改动原值'
+      + (ok ? '' : ` -> controls=${controlsOk} saved=${JSON.stringify(saved)} empty=${JSON.stringify(posted?.onebot)}`));
+  }
+
   // 门槛两端都要收口：手输 9999 不能存进去（会把"发现新人"事实上永久关掉，或一次建出上百条印象）
   {
     let posted = null;

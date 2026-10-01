@@ -778,6 +778,8 @@ function renderDesktopSection(c) {
 }
 
 function renderOnebotSection(c) {
+  const hb = ['auto', 'on', 'off'].includes(c.onebot?.wsHeartbeat) ? c.onebot.wsHeartbeat : 'auto';
+  const windowMin = Math.max(0, Math.round(Number(c.onebot?.catchupReplyWindowMs ?? 30 * 60 * 1000) / 60000));
   return `
     <h3 id="settings-onebot">外部 OneBot v11 服务</h3>
     <div class="hint" style="margin-bottom:10px">协议端由 Linux 运维独立管理。本服务只连接正向 WebSocket 和 HTTP API。</div>
@@ -798,8 +800,22 @@ function renderOnebotSection(c) {
           <button class="btn btn-small" id="cfg-obhttptoken-toggle" type="button">显示</button>
         </div></div>
     </div>
+    <div class="field-row">
+      <div class="field"><label>WebSocket 心跳策略</label>
+        <select id="cfg-wsheartbeat">
+          <option value="auto"${hb === 'auto' ? ' selected' : ''}>自动（推荐）</option>
+          <option value="on"${hb === 'on' ? ' selected' : ''}>始终发送 ping</option>
+          <option value="off"${hb === 'off' ? ' selected' : ''}>从不发送 ping</option>
+        </select>
+        <div class="hint">心跳用来发现"连接已死但事件没到"。NapCat 收到 PING 会直接断开连接（Issue #22），
+        自动模式下一次这种断开后就不再发送。</div></div>
+      <div class="field"><label>补课回复窗口（分钟）</label>
+        <input type="number" id="cfg-catchup-window" min="0" step="5" value="${windowMin}" />
+        <div class="hint">断线/重启后补回的消息，超过这个时长的只入库不回复（避免回来就刷屏回一小时前的话）；
+        填 0 = 一律只补记录。默认 30 分钟。</div></div>
+    </div>
     <div id="onebot-status-line">${onebotStatusLineHtml()}</div>
-    <div class="hint">改完 OneBot 地址或令牌后，执行 <code>manage.sh restart</code> 生效（连接只在启动时建立一次，改完不重启还是旧地址）。</div>`;
+    <div class="hint">改完 OneBot 地址、令牌或心跳策略后，执行 <code>manage.sh restart</code> 生效（连接只在启动时建立一次，改完不重启还是旧配置）。</div>`;
 }
 
 /** 选择模型：左提供商 / 右模型，点击模型后保存到当前 api 配置并关闭。 */
