@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-const { repairJsonObject, repairUnescapedStringQuotes } = await import('../src/core/json-repair.js');
+const { repairJsonObject } = await import('../src/core/json-repair.js');
 
 test('瑕疵 1：代码围栏（```json … ```）', () => {
   const raw = '```json\n{"events":[{"type":"warm_exchange"}]}\n```';

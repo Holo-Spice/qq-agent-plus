@@ -98,15 +98,6 @@ function toolResponse(decision = 'propose') {
   };
 }
 
-async function waitFor(check, timeoutMs = 2000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = check();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error('等待好友评估完成超时');
-}
 
 async function fixture(t, {
   probability = 1,

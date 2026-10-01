@@ -9,7 +9,6 @@
 // 用法：QQ_AGENT_DATA_DIR=$(mktemp -d) node test/local/test-thinking-toolchoice.mjs
 // 必须用临时数据目录，不能指向生产数据。
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 
 if (!process.env.QQ_AGENT_DATA_DIR || !fs.existsSync(process.env.QQ_AGENT_DATA_DIR)) {

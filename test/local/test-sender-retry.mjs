@@ -46,7 +46,7 @@ const store = makeStore();
 // 用例 1：第一次连接被拒（可确认未送达），第二次成功 → 应该重试并发出
 let calls1 = 0;
 const onebot1 = {
-  async sendText(kind, id, text) {
+  async sendText() {
     calls1 += 1;
     // 真实形态：undici 的网络错误 message 恒为 fetch failed，真因在 cause 上
     if (calls1 === 1) {

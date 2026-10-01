@@ -21,7 +21,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { DatabaseSync } from 'node:sqlite';
+import { openDatabase } from './core/sqlite.js';
+import { runHealthCheck } from './core/health-check.js';
+import { readOwnerUin, sendOwnerText } from './core/notify-owner.js';
 import { resolveModelPrice, modelLabel, setRemotePrices, setChannelPrices } from './pricing/model-prices.js';
 
 const REPO_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -73,11 +75,6 @@ function exists(target) {
 function formatStamp(date = new Date()) {
   const pad = (value, width = 2) => String(value).padStart(width, '0');
   return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
-}
-
-function formatCount(value) {
-  const num = Number(value);
-  return Number.isFinite(num) ? num.toLocaleString('zh-CN') : String(value);
 }
 
 function config(overrides = {}) {
@@ -241,7 +238,7 @@ function findRuntimeNode(appDir) {
 function openReadOnlyDb(file) {
   if (!exists(file)) return null;
   try {
-    return new DatabaseSync(file, { readOnly: true });
+    return openDatabase(file, { readOnly: true });
   } catch {
     return null;
   }
@@ -347,8 +344,9 @@ const KNOWN_IGNORE = [
   'Agent', 'Proxy', 'resolve', 'reject', 'task', 'fn', 'send', 'sleep', 'operation',
   'isRetryable', 'random', 'resolveAtName', 'resolveReply', 'normalizeBehaviorProfile',
   'getConfigFn', 'allowSource', 'fetchFn',
-  // 可注入的实现（测试里传假实现）：WebSocketImpl=WebSocket 构造器；nowFn=时间函数；perChunk=逐片转写回调
-  'WebSocketImpl', 'nowFn', 'perChunk'
+  // 可注入的实现（测试里传假实现）：WebSocketImpl=WebSocket 构造器；nowFn=时间函数；perChunk=逐片转写回调；
+  // fetchImpl/statfs/notify=health-check 的注入点（测试不打真实网络/磁盘；解构参数默认值超出扫描器识别范围）
+  'WebSocketImpl', 'nowFn', 'perChunk', 'fetchImpl', 'statfs', 'notify'
 ];
 
 const REGEX_PRECEDERS = new Set([...'(,=:[!&|?{};+-*%<>~^', '\n', '']);
@@ -1686,7 +1684,7 @@ async function cmdDeploy(args) {
 
 // ─────────────────────────── console 子命令（原 qq-console.bat） ───────────────────────────
 
-function sshTarget(args) {
+function sshTarget() {
   const sshSpec = envStr('QQ_AGENT_SSH');
   let host = envStr('SSHHOST');
   let user = envStr('SSHUSER', 'ubuntu');
@@ -1737,7 +1735,7 @@ function openBrowser(url) {
 
 async function cmdConsole(args) {
   if (wantsHelp(args)) { say(HELP.console); return 0; }
-  const target = sshTarget(args);
+  const target = sshTarget();
   if (!target.host) {
     ngLine('请设置 SSHHOST=user@host（或 QQ_AGENT_SSH=user@host）');
     return 1;
@@ -1808,6 +1806,35 @@ async function cmdConsole(args) {
   });
 }
 
+// ─────────────────────────── health-check 子命令（改进方案 C8/#7） ───────────────────────────
+async function cmdHealthCheck(args) {
+  if (wantsHelp(args)) { say(HELP['health-check']); return 0; }
+  // 路径口径必须与 backup / install-timers 一致（走 config()）：手写 os.homedir() 回退在
+  // systemd 定时器里会落到 ~/qq-agent/data，读不到部署的 messages.sqlite —— 2026-09-30
+  // 实机复现过（unit 首次运行即 FAILURE），已改回 config({})。
+  const cfgBase = config({});
+  const dataDir = cfgBase.dataDir;
+  const cfgFile = path.join(dataDir, 'config.json');
+  let cfg = {};
+  try { cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8')); } catch { /* 没有配置＝按默认端口探测 */ }
+  const onebotToken = String(cfg.onebot?.httpAccessToken || cfg.onebot?.accessToken || '');
+  const onebotHttpPort = Number(intEnv('QQ_AGENT_ONEBOT_HTTP_PORT', Number(cfg.onebot?.httpPort) || Number(cfgBase.onebotPort) || 3390));
+  const ownerUin = readOwnerUin(cfg);
+  const result = await runHealthCheck({
+    dataDir,
+    mode: String(cfg.runtime?.mode || 'active'),
+    consolePort: Number(cfg.server?.port) || Number(cfgBase.consolePort) || 3210,
+    onebotHttpPort,
+    onebotToken,
+    // 破坏性操作显式确认的同一口径：--confirm 才允许真的发 QQ 通知，--print/无参只巡检
+    notify: hasFlag(args, '--confirm') && ownerUin
+      ? (text) => sendOwnerText({ httpPort: onebotHttpPort, token: onebotToken, ownerUin, text })
+      : null
+  });
+  say(JSON.stringify({ healthy: result.healthy, notified: result.notified, checks: result.checks }, null, 2));
+  return result.code;
+}
+
 // ─────────────────────────── install-timers 子命令（原 ops/systemd/） ───────────────────────────
 
 function unitFiles(cfg) {
@@ -1865,11 +1892,38 @@ AccuracySec=1min
 [Install]
 WantedBy=timers.target
 `;
+  const healthService = `[Unit]
+# 每 5 分钟巡检一次 Agent 健康（改进方案 C8/#7）：控制台/OneBot/出站水位/磁盘/
+# 自动更新状态/部署中断标记/sqlite 完整性；连续 3 次失败才给管理员发 QQ 私聊。
+# 由 node src/ops.js install-timers 生成；路径按实际部署改。
+Description=QQ Agent health probe
+
+[Service]
+Type=oneshot
+# 显式带路径：ops.js 的默认值可能与本机部署不一致（本单元要在无人值守下自足）
+Environment=QQ_AGENT_DATA_DIR=${cfg.dataDir}
+Environment=QQ_AGENT_ONEBOT_HTTP_PORT=${cfg.onebotPort}
+ExecStart=${nodeBin} ${opsPath} health-check --confirm
+`;
+  const healthTimer = `[Unit]
+# 每 5 分钟巡检一次（首次在开机 5 分钟后）；关机错过会在下次开机补跑。
+Description=Run QQ Agent health probe every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
+`;
   return [
     ['qq-agent-backup.service', backupService],
     ['qq-agent-backup.timer', backupTimer],
     ['process-guard.service', guardService],
-    ['process-guard.timer', guardTimer]
+    ['process-guard.timer', guardTimer],
+    ['qq-agent-health.service', healthService],
+    ['qq-agent-health.timer', healthTimer]
   ];
 }
 
@@ -1908,8 +1962,8 @@ function cmdInstallTimers(args) {
     return 0;
   }
   if (!reload.ok) ngLine(`daemon-reload 失败: ${text(reload)}`);
-  const enable = systemctlUser(['enable', '--now', 'qq-agent-backup.timer', 'process-guard.timer'], { timeout: 60000 });
-  if (enable.ok) okLine('定时器已启用：qq-agent-backup.timer（每周日 04:10）、process-guard.timer（每 10 分钟）');
+  const enable = systemctlUser(['enable', '--now', 'qq-agent-backup.timer', 'process-guard.timer', 'qq-agent-health.timer'], { timeout: 60000 });
+  if (enable.ok) okLine('定时器已启用：qq-agent-backup.timer（每周日 04:10）、process-guard.timer（每 10 分钟）、qq-agent-health.timer（每 5 分钟巡检）');
   else ngLine(`启用定时器失败: ${text(enable)}`);
   return 0;
 }
@@ -1917,6 +1971,17 @@ function cmdInstallTimers(args) {
 // ───────────────────────────────── 帮助 ─────────────────────────────────
 
 const HELP = {
+  'health-check': `用法: node src/ops.js health-check [--confirm]
+
+一次性健康巡检并输出 JSON（退出码 0=健康 / 1=有失败项）。检查：控制台 /healthz、
+OneBot get_status、出站消息水位（observe 模式自动跳过）、磁盘余量、自动更新状态、
+部署中断标记、messages 库完整性。结果落到 data/health.json。
+
+  --confirm  允许在"连续 3 次失败"或"恢复"时给 admin.ownerUin 发 QQ 私聊
+             （不加只巡检、不发通知；状态仍会记录）。qq-agent-health.timer 用 --confirm。
+
+环境变量: QQ_AGENT_DATA_DIR / QQ_AGENT_ONEBOT_HTTP_PORT`,
+
   audit: `用法: node src/ops.js audit [--app=目录] [--data=目录] [--dir=部署根目录]
 
 服务 + 代码 + 数据体检（只读，不会改配置或重启服务）：
@@ -2087,7 +2152,8 @@ const COMMANDS = {
   'face-names': { run: cmdFaceNames, help: HELP['face-names'] },
   deploy: { run: cmdDeploy, help: HELP.deploy },
   console: { run: cmdConsole, help: HELP.console },
-  'install-timers': { run: cmdInstallTimers, help: HELP['install-timers'] }
+  'install-timers': { run: cmdInstallTimers, help: HELP['install-timers'] },
+  'health-check': { run: cmdHealthCheck, help: HELP['health-check'] }
 };
 
 async function main() {

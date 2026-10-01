@@ -5,6 +5,7 @@ import { createApp } from './console/app.js';
 import { installManualFriendReviewRoute } from './console/manual-friend-review-route.js';
 import { installExperimentalMultimodalContextPilot } from './pilots/experimental-multimodal-context.js';
 import { DATA_DIR } from './core/config.js';
+import { assertSqliteAvailable } from './core/sqlite.js';
 
 let app = null;
 process.on('unhandledRejection', (error) => {
@@ -76,6 +77,10 @@ function reportInterruptedDeploy() {
     console.warn('[部署] 中断标记检查失败（不影响启动）:', error?.message ?? error);
   }
 }
+
+// 启动最早期确认 node:sqlite 可用：缺内建模块时给人话指引，
+// 而不是等 createApp 的存储层 import 链抛加载期裸栈（改进方案 C5/#11）。
+assertSqliteAvailable();
 
 // 仅安装一次薄包装；开关关闭时 multimodal-context commit 原样委托旧实现。
 installExperimentalMultimodalContextPilot();

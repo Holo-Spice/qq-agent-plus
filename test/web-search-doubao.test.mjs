@@ -65,7 +65,7 @@ test('doubaoSearch：未配置 Key 时明确报错', async () => {
 test('doubaoSearch：Key 回退环境变量 DOUBAO_SEARCH_API_KEY', async () => {
   withoutKey();
   process.env.DOUBAO_SEARCH_API_KEY = 'env-key-456';
-  globalThis.fetch = async (url, opts = {}) => ({ ok: true, json: async () => ({ Result: { WebResults: [{ Title: 'T', Url: 'https://e', Summary: 'S' }] } }) });
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ Result: { WebResults: [{ Title: 'T', Url: 'https://e', Summary: 'S' }] } }) });
   const { doubaoSearch } = await import('../src/llm/web-search.js');
   const r = await doubaoSearch('env');
   assert.equal(r.results[0].url, 'https://e');

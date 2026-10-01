@@ -1,0 +1,24 @@
+# 依赖更新 PR：只开 PR 不自动合并（改进方案 C6/#11）。
+# 每月人工处理一次，避免攒成"不敢升"；安全补丁也走同一通道人工核。
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5

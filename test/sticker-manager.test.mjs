@@ -342,7 +342,6 @@ test('老条目链接失效时不发坏图（明确报"已失效"，而不是拿
     async call() { return []; },
     async getMsg() { throw new Error('源消息已过期'); }   // 刷新那条路走不通
   });
-  const note = manager.note ? null : null;
   manager.saveEntries([...manager.entries, {
     id: 'collected_-999', resId: 'collected_-999', url, source: 'ai', desc: '老条目',
     useCount: 0, lastUsedAt: 0, createdAt: new Date().toISOString()
@@ -356,7 +355,7 @@ test('老条目链接失效时不发坏图（明确报"已失效"，而不是拿
 
 test('收藏夹容量状态：满 500 时告诉控制台"新收藏会进本地库"', async () => {
   const manager = new StickerManager({
-    async call(action, params) {
+    async call(action) {
       assert.equal(action, 'fetch_custom_face_detail');
       return Array.from({ length: 500 }, (_, i) => ({ emojiId: `e${i}` }));
     }

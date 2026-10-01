@@ -145,7 +145,7 @@ export class OneBotClient {
       if (!event || typeof event !== 'object') return;
       try { this.onEvent(event); } catch (error) { console.error('[onebot] 事件处理出错:', error); }
     });
-    socket.on('close', (code, reason) => {
+    socket.on('close', () => {
       if (!isCurrent(socket)) return; // 旧连接的迟到 close：新连接已在处理
       clearInterval(this.heartbeatTimer);
       this.#setStatus(false);

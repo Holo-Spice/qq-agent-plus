@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
+import { openDatabase } from './sqlite.js';
 import { DATA_DIR } from './config.js';
 import { safeSlice } from './util.js';
 
@@ -68,15 +68,16 @@ export class ChatStore {
     fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     // filename 只用于测试隔离：给相对名时按 dataDir 解析，避免落到进程 CWD（2026-09-28 踩过：
     // 相对名把测试库建进了仓库根目录，残留文件让后续运行读到旧行、排查绕了一大圈）。
-    this.db = new DatabaseSync(
+    this.db = openDatabase(
       filename
         ? (path.isAbsolute(filename) ? filename : path.join(dataDir, filename))
         : path.join(dataDir, 'messages.sqlite')
     );
+    // journal_mode/synchronous 是本库既有持久化口径（WAL 会产生 -wal/-shm，manage.sh backup
+    // 对本库走一致性快照）；busy_timeout/foreign_keys 由 core/sqlite.js 统一设置
     this.db.exec(`
       PRAGMA journal_mode=WAL;
       PRAGMA synchronous=FULL;
-      PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS chats (chat_key TEXT PRIMARY KEY, next_id INTEGER NOT NULL DEFAULT 1);
       CREATE TABLE IF NOT EXISTS messages (
         chat_key TEXT NOT NULL, id INTEGER NOT NULL, mid TEXT, ts INTEGER NOT NULL,

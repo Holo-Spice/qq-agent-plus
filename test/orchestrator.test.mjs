@@ -899,7 +899,7 @@ describe('Orchestrator', () => {
   });
 
   it('deterministically wakes the same participant inside the threaded continuation window', async (t) => {
-    const { cfg, runner, store, sessions, append } = fixture(t);
+    const { cfg, runner, store, append } = fixture(t);
     cfg.conversation.mode = 'threaded';
     let calls = 0;
     globalThis.fetch = async () => {

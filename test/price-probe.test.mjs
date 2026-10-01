@@ -321,7 +321,7 @@ test('远程价格表默认地址：jsDelivr 优先、raw 兜底；填 none 关�
 });
 
 test('远程价格表：所有候选都失败时报错但不影响内置表', async () => {
-  const fake = async (url) => ({ ok: false, status: 503, json: async () => ({}) });
+  const fake = async () => ({ ok: false, status: 503, json: async () => ({}) });
   const st = await feed.refreshPriceFeed('', { fetchImpl: fake, timeoutMs: 1000 });
   assert.equal(st.ok, false);
   assert.match(st.error, /jsdelivr/);

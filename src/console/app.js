@@ -4159,7 +4159,6 @@ function priceOf(model, vendor, at = 0) {
 
 /** 对一批行计价，返回总额与峰谷拆分。 */
 function costOfRows(rows) {
-  const cfg = getConfig();
   let cost = 0, peakCost = 0, offPeakCost = 0, peakTokens = 0, offPeakTokens = 0;
   let freshCost = 0, cachedCost = 0, outputCost = 0;
   let promptTokens = 0, completionTokens = 0, cachedTokens = 0, exactCalls = 0, hasPeakModel = false;
@@ -4324,7 +4323,7 @@ function buildUsageStats({ range = '7' } = {}) {
  * 例：dim=chat&key=group:123&by=model → 该群下各模型的成本
  */
 function buildUsageBreakdown({ range = '7', dim = '', key = '', by = '' } = {}) {
-  const { rows, win } = collectUsageRows({ range });
+  const { rows } = collectUsageRows({ range });
   for (const r of rows) r.dayKey = dayKeyOf(r.at);
   // dim/by 为 model 时按复合身份匹配（模型 + 供应商）
   const fieldOf = (d) => (d === 'day' ? 'dayKey' : d === 'model' ? 'modelKey' : 'chatKey');

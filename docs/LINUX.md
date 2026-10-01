@@ -201,6 +201,17 @@ systemd validation or health checking fails, the installer restores the previous
 code, configuration and service unit before restarting the old service. Use
 `--no-backup` only when an external rollback mechanism is already in place.
 
+### 参数校验与逃生开关
+
+`deploy.sh` 在部署开始前调用 `scripts/verify-deployment-target.mjs`，把 `--install-dir` / `--data-dir` /
+`--service` / `--repository` / `--branch` 与安装记录（`.deployment.json`）比对：不一致时**打印差异并拒绝**
+（exit 2）。拒绝发生在任何改动之前 —— 服务未停、代码未动，因此没有回滚步骤，修正参数重跑即可。
+
+- 数据目录迁移是唯一合法的"不一致"：同时给 `--allow-path-change` 并设环境变量
+  `QQ_AGENT_ALLOW_PATH_CHANGE=1`（两个条件缺一不可），旧目录的历史与 Key **不会**自动复制。
+- 0.6.x 之前的老安装记录里没有 `repository` / `branch` 字段：会跳过这两项比对并提示，升级部署不受影响。
+- `--host` / `--port` 的真相源是 `config.json`：未显式传入时沿用现值；与记录不一致只提示漂移，不拦截。
+
 ### 部署被中断后怎么恢复
 
 `deploy.sh` 在停服务之前写 `DATA_DIR/.deploy-in-progress`，健康检查通过后删掉它。

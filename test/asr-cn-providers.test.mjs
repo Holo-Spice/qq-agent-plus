@@ -7,11 +7,11 @@ import http from 'node:http';
 import { test } from 'node:test';
 import WebSocket, { WebSocketServer } from 'ws';
 
-const { canonicalRequest, tc3Sign, tc3Authorization, tencentTranscribe, TENCENT_ASR_HOST } =
+const { canonicalRequest, tc3Sign, tencentTranscribe, TENCENT_ASR_HOST } =
   await import('../src/llm/asr-tencent.js');
 const { iflytekSignedUrl, iflytekFrame, iflytekTextOf, iflytekTranscribe, IFLYTEK_FRAME_BYTES } =
   await import('../src/llm/asr-iflytek.js');
-const { baiduTranscribe, baiduAccessToken, resetBaiduTokenCache, BAIDU_SPEECH_URL } =
+const { baiduTranscribe, resetBaiduTokenCache, BAIDU_SPEECH_URL } =
   await import('../src/llm/asr-baidu.js');
 const { dashscopeTranscribe, dashscopeEndpoint, DASHSCOPE_DEFAULT_MODEL } =
   await import('../src/llm/asr-dashscope.js');
@@ -277,7 +277,7 @@ test('路由与分片：百度/腾讯/阿里超过 55 秒会被切片，逐段�
   const calls = { baidu: 0, tencent: 0, aliyun: 0 };
   const realFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = realFetch; });
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = async (url) => {
     const text = String(url);
     if (text.includes('vop.baidu.com')) { calls.baidu += 1; return json({ err_no: 0, result: ['甲'] }); }
     if (text.includes('asr.tencentcloudapi.com')) { calls.tencent += 1; return json({ Response: { Result: '乙' } }); }

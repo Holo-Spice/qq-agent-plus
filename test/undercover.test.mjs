@@ -16,7 +16,7 @@ const advanceToVote = (s) => {
 };
 
 test('描述阶段提前投的票，在超时进投票时要保留（审查 P1：以前会被清空）', () => {
-  let s = advanceToVote(newGame());
+  advanceToVote(newGame());
   // 还没进投票阶段？order 里的人说完就进 vote 了——这里要测的是"发言阶段就投了票"的路径，
   // 所以重新造一局：先说一句带票的话，再等超时
   let s2 = newGame();

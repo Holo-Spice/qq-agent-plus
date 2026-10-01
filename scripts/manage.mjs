@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { backup, DatabaseSync } from 'node:sqlite';
+import { openDatabase, backup } from '../src/core/sqlite.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 function readJson(file, hint) {
@@ -77,7 +77,7 @@ if (['start', 'stop', 'restart', 'status'].includes(command)) {
   const target = process.argv[3];
   if (!target || fs.existsSync(target)) throw new Error('Provide a new backup directory');
   fs.mkdirSync(target, { recursive: true, mode: 0o700 });
-  const db = new DatabaseSync(path.join(deploy.data, 'messages.sqlite'), { readOnly: true });
+  const db = openDatabase(path.join(deploy.data, 'messages.sqlite'), { readOnly: true });
   try { await backup(db, path.join(target, 'messages.sqlite')); } finally { db.close(); }
   // 复制数据目录下的全部条目，只跳过可重建的临时物。写死清单会随功能增加而漏掉东西
   // （身份/关系/事故台账、daily-moments、群动态与主动发言状态都曾经在清单之外）。

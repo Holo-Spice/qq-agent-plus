@@ -1,0 +1,133 @@
+// 健康巡检测试（改进方案 C8/#7）：检查项分支、observe 跳过、失败连击抑制、恢复通知。
+// 全桩件化（fetch/statfs/notify 注入），不打真实网络；health.json 落盘在临时目录。
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { test } from 'node:test';
+
+const { runHealthCheck } = await import('../src/core/health-check.js');
+const { openDatabase } = await import('../src/core/sqlite.js');
+const { readOwnerUin } = await import('../src/core/notify-owner.js');
+
+function makeDataDir({ withDb = true, withUpdaterState = false, withMarker = false } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-health-'));
+  if (withDb) {
+    const db = openDatabase(path.join(dir, 'messages.sqlite'));
+    db.exec(`CREATE TABLE IF NOT EXISTS messages (
+      chat_key TEXT NOT NULL, id INTEGER NOT NULL, mid TEXT, ts INTEGER NOT NULL,
+      sender_id TEXT, sender_name TEXT, text TEXT NOT NULL, self INTEGER NOT NULL DEFAULT 0,
+      reply TEXT, media TEXT NOT NULL DEFAULT '[]', mentions_self INTEGER NOT NULL DEFAULT 0,
+      target_user_id TEXT NOT NULL DEFAULT '', event_kind TEXT NOT NULL DEFAULT 'message',
+      state TEXT NOT NULL DEFAULT 'pending', lease_id TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+      available_at INTEGER NOT NULL DEFAULT 0, error TEXT
+    )`);
+    db.prepare('INSERT INTO messages (chat_key, id, ts, text, self) VALUES (?, ?, ?, ?, 1)').run('group:1', 1, Date.now(), 'hi');
+    db.close();
+  }
+  if (withUpdaterState) {
+    fs.writeFileSync(path.join(dir, 'auto-update.json'), JSON.stringify({ status: 'failed', error: 'boom' }));
+  }
+  if (withMarker) fs.writeFileSync(path.join(dir, '.deploy-in-progress'), '{}');
+  return dir;
+}
+
+const okFetch = async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok', retcode: 0 }) });
+const badFetch = async () => { throw new Error('ECONNREFUSED'); };
+const okStatfs = () => ({ bavail: 100, bsize: 1024 * 1024 * 1024 });          // 100GB
+const lowStatfs = () => ({ bavail: 0.2, bsize: 1024 * 1024 * 1024 });          // 0.2GB
+
+test('全绿：控件/OneBot/水位/磁盘/完整性都过 → healthy，退出码 0', async () => {
+  const dir = makeDataDir();
+  const r = await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null });
+  assert.equal(r.healthy, true);
+  assert.equal(r.code, 0);
+  assert.equal(r.checks.find((c) => c.name === 'console-healthz').ok, true);
+  assert.equal(r.checks.find((c) => c.name === 'onebot-status').ok, true);
+  assert.equal(r.checks.find((c) => c.name === 'sqlite-integrity').ok, true);
+});
+
+test('控制台不可达 → 该项失败、healthy=false、退出码 1', async () => {
+  const dir = makeDataDir();
+  const r = await runHealthCheck({ dataDir: dir, fetchImpl: badFetch, statfs: okStatfs, notify: null });
+  assert.equal(r.healthy, false);
+  assert.equal(r.code, 1);
+  assert.match(r.checks.find((c) => c.name === 'console-healthz').detail, /ECONNREFUSED/);
+});
+
+test('observe 模式跳过出站水位（不发消息不算故障）', async () => {
+  const dir = makeDataDir();
+  const r = await runHealthCheck({ dataDir: dir, mode: 'observe', fetchImpl: okFetch, statfs: okStatfs, notify: null });
+  const item = r.checks.find((c) => c.name === 'outbound-freshness');
+  assert.equal(item.ok, true);
+  assert.match(item.detail, /observe/);
+});
+
+test('active 模式出站水位陈旧 → 失败；新鲜 → 通过', async () => {
+  const dir = makeDataDir();
+  const stale = await runHealthCheck({
+    dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null,
+    now: Date.now() + 7 * 60 * 60 * 1000, outboundStaleMs: 6 * 60 * 60 * 1000,
+  });
+  assert.equal(stale.checks.find((c) => c.name === 'outbound-freshness').ok, false);
+  const fresh = await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null });
+  assert.equal(fresh.checks.find((c) => c.name === 'outbound-freshness').ok, true);
+});
+
+test('磁盘余量不足 → 失败', async () => {
+  const dir = makeDataDir();
+  const r = await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: lowStatfs, notify: null });
+  assert.equal(r.checks.find((c) => c.name === 'disk-space').ok, false);
+});
+
+test('自动更新 failed 与部署中断标记 → 相应检查项失败', async () => {
+  const dir = makeDataDir({ withUpdaterState: true, withMarker: true });
+  const r = await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null });
+  assert.equal(r.checks.find((c) => c.name === 'auto-update').ok, false);
+  assert.equal(r.checks.find((c) => c.name === 'deploy-interrupted').ok, false);
+  assert.match(r.checks.find((c) => c.name === 'deploy-interrupted').detail, /LINUX\.md/);
+});
+
+test('连续 3 次失败才通知；恢复时补发一次"已恢复"', async () => {
+  const dir = makeDataDir();
+  const notes = [];
+  const notify = async (text) => { notes.push(text); };
+  // 三连失败：前两次静默，第三次告警
+  for (let i = 1; i <= 3; i++) {
+    const r = await runHealthCheck({ dataDir: dir, fetchImpl: badFetch, statfs: okStatfs, notify });
+    assert.equal(r.healthy, false);
+  }
+  // 失败源有多个检查项（console-healthz / onebot-status 都失败）：各自在第 3 次触发
+  const alerts = notes.filter((t) => t.includes('健康告警'));
+  assert.ok(alerts.length >= 1, '第 3 次应发告警');
+  assert.match(notes.at(-1), /healthz|状态|检查/);
+  // 前两次巡检（共 2 轮 × 多项）不应有任何告警
+  assert.equal(notes.filter((t) => t.includes('健康告警')).length, 2, '失败项就是 console-healthz 与 onebot-status 两项');
+  // 恢复
+  const ok = await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify });
+  assert.equal(ok.healthy, true);
+  assert.match(notes.at(-1), /健康恢复/);
+  // 恢复两次（两个失败类别各一条，与告警对称）
+  assert.equal(notes.filter((t) => t.includes('健康恢复')).length, 2);
+  // 恢复后再正常，不应重复发恢复通知
+  const before = notes.length;
+  const again = await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify });
+  assert.equal(again.healthy, true);
+  assert.equal(notes.length, before, '状态没变化就不该再发任何通知');
+});
+
+test('health.json 落盘含 streaks 与最后结果，权限 0600', async () => {
+  const dir = makeDataDir();
+  await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null });
+  const state = JSON.parse(fs.readFileSync(path.join(dir, 'health.json'), 'utf8'));
+  assert.equal(typeof state.lastRunAt, 'number');
+  assert.ok(Array.isArray(state.lastResults));
+  assert.equal(state.healthy, true);
+  assert.ok((state.streaks['console-healthz']?.count ?? 0) === 0, '全绿时该类别无连击');
+});
+
+test('readOwnerUin：admin 一节存在时是唯一真相，老字段只在无 admin 时回退', () => {
+  assert.equal(readOwnerUin({ admin: { ownerUin: '10001' }, autoUpdate: { ownerUin: '99999' } }), '10001');
+  assert.equal(readOwnerUin({ admin: { ownerUin: '' }, autoUpdate: { ownerUin: '99999' } }), '');
+  assert.equal(readOwnerUin({ autoUpdate: { ownerUin: '99999' } }), '99999');
+});

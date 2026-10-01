@@ -1852,7 +1852,7 @@ async function main() {
 
   // ── 场景 30：群名 / 存档倒序 / 表情包频率 ──
   {
-    const { buildUserPrompt, buildSystemPrompt } = await import('../src/llm/prompt.js');
+    const { buildSystemPrompt } = await import('../src/llm/prompt.js');
     const { setRuntimeConfig, getConfig } = await import('../src/core/config.js');
 
     // 群名：/api/chats 每个条目都带 chatName 字段（拿不到时为空串）
@@ -1924,8 +1924,8 @@ async function main() {
   // ── 场景 32：未命中标记已读（档位控制是否响应的核心机制）──
   {
     const { ChatStore } = await import('../src/core/store.js');
-    const fs = await import('node:fs');
-    const path = await import('node:path');
+    await import('node:fs');
+    await import('node:path');
     const store2 = new ChatStore(100);
     const KEY = 'group:__selftest_tier';
 
@@ -2059,7 +2059,7 @@ async function main() {
 
   // ── 场景 35：远程价格表（校验/规范化 + 覆盖优先级 + 接口）──
   {
-    const { normalizePriceFeed, refreshPriceFeed, priceFeedStatus } = await import('../src/pricing/price-feed.js');
+    const { normalizePriceFeed, refreshPriceFeed } = await import('../src/pricing/price-feed.js');
     const { resolveOfficialPrice, setRemotePrices, listOfficialPrices } = await import('../src/pricing/model-prices.js');
 
     // ① 四种外形都能解析

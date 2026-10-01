@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { openDatabase } from '../core/sqlite.js';
 import { DATA_DIR } from '../core/config.js';
 import { IdentityStore, identityDatabasePath } from '../identity/identity-store.js';
 import { normalizeStickerEntry } from '../onebot/stickers.js';
@@ -227,7 +227,7 @@ export function readIdentityAssets(dataDir = DATA_DIR, limit = 500, query = '') 
   }
   let db;
   try {
-    db = new DatabaseSync(file, { readOnly: true });
+    db = openDatabase(file, { readOnly: true });
     const hasOverrides = Boolean(db.prepare(`
       SELECT 1 FROM sqlite_master
       WHERE type='table' AND name='identity_asset_overrides'

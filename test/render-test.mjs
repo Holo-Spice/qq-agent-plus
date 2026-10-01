@@ -83,7 +83,7 @@ const document = {
   },
   querySelectorAll: () => [],
   getElementById: (id) => document.querySelector('#' + id),
-  createElement: (tag) => {
+  createElement: () => {
     const el = makeEl('', '');
     // 假 DOM 不解析 HTML：patchKeyedList 的 makeNode 会读 <template>.content.firstElementChild。
     // 给个空壳（firstElementChild 为 null），定时器触发的列表渲染就会安全跳过 ——
@@ -570,7 +570,7 @@ try {
     fail++;
     console.log('  FAIL  动态互动设置控件缺失或默认状态错误');
   }
-  const experimentalHtml = ctx.renderExperimentalSettingsSection(cfg);
+  ctx.renderExperimentalSettingsSection(cfg);
   const experimentalOnHtml = ctx.renderExperimentalSettingsSection({
     ...cfg,
     identityPilot: {
@@ -949,7 +949,6 @@ try {
 
   // 模式只有两个：免费本机 Whisper / API Key 托管服务（用户要求）
   const localHtml = ctx.renderAsrSection({ ...cfg, asr: { ...cfg.asr, provider: 'local' } });
-  const notInstalledHtml = localHtml;
   const installedHtml = ctx.renderAsrSection({
     ...cfg, asr: { ...cfg.asr, provider: 'local', localInstalled: true, localManagedExists: true, localBinResolved: '/x/whisper-cli', localModelResolved: '/x/ggml-small.bin' }
   });
@@ -2177,7 +2176,6 @@ try {
           models: [{ key: 'deepseek:deepseek-chat', runs: 149, promptTokens: 120000, completionTokens: 34000, cacheHitRate: 0.666, cost: 3.96 }]
         };
         const statusData = { usage: { runs: 12 }, config: DC2 };
-        const prices = { rows: [] };
 
         // ⚠️ mock 只覆盖**真实存在**的接口，其余一律 404。
         //    曾经这里把 /api/usage/prices 也 mock 成 200，而这个接口后端根本没有

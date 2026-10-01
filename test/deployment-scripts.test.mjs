@@ -301,3 +301,9 @@ test('deploy script treats linger as best-effort and never rolls back over it', 
   );
   assert.match(source, /下次开机不会自启/, '警告要说明后果与手动补救命令');
 });
+
+test('deploy.sh 调用 verify-deployment-target.mjs（C7 强校验真实接入，不是摆设）', () => {
+  const sh = fs.readFileSync(path.join(repo, 'deploy.sh'), 'utf8');
+  assert.match(sh, /verify-deployment-target[.]mjs/, 'deploy.sh 应调用校验脚本');
+  assert.match(sh, /DEPLOY_REPOSITORY/, 'deploy.sh 应支持 --repository 透传');
+});

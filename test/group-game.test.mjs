@@ -107,7 +107,7 @@ test('谁是卧底：开局私聊发词 → 依次发言 → 投票淘汰 → �
 });
 
 test('超时推进：没人描述 → 到点直接进投票（不点名、不刷"跳过"）；时长上限到点自动结束', async () => {
-  const { store, sent, mgr, setClock, getClock } = makeWorld({ rng: () => 0 });
+  const { sent, mgr, setClock, getClock } = makeWorld({ rng: () => 0 });
   await mgr.start({ chatKey: 'group:1', gameId: 'undercover' });
   setClock(getClock() + 200 * 1000);          // 超过 roundSeconds=150
   await mgr.tick();
@@ -127,7 +127,7 @@ test('超时推进：没人描述 → 到点直接进投票（不点名、不刷
 test('谁是卧底：第 2 轮没人描述也会到点进投票（轮次切换即计时，不卡在发言阶段）', async () => {
   // 回归 2026-09-29 审查 P1：nextRound 把 phaseStartedAt 置 0，onTick 里 `0 || now` 恒等 now，
   // 150 秒计时永远不开始 → 整局卡到 45 分钟上限
-  const { store, sent, mgr, setClock, getClock } = makeWorld({ rng: () => 0.6 });
+  const { store, sent, mgr, setClock } = makeWorld({ rng: () => 0.6 });
   await mgr.start({ chatKey: 'group:1', gameId: 'undercover' });
   let order = mgr.games.get('group:1').state.order;
   for (const uid of order) say(store, uid, `群友${uid.slice(1)}`, '日常用品');
@@ -472,7 +472,7 @@ test('审查回归：白天讨论/投票消息是 pending 时也要计票', asyn
   updateConfig({ groupGame: { enabled: true, chats: ['group:1'], allowPrivateInvite: true, allowGamePrivateDm: false, dailyLimitPerChat: 6, recruitSeconds: 0, discussSeconds: 0, games: ['werewolf'] } });
   const r = await w.mgr.start({ chatKey: 'group:1', gameId: 'werewolf' });
   assert.equal(r.ok, true, JSON.stringify(r));
-  const st0 = w.mgr.games.get('group:1').state;
+  w.mgr.games.get('group:1').state;
   // 发牌即夜间，而夜里群里说什么都不参与判定 → 先把第 1 夜（全员 AFK）推过去
   w.setClock(w.getClock() + 95 * 1000);
   await w.mgr.tick();

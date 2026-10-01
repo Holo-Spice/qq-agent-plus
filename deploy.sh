@@ -9,6 +9,8 @@ PORT="3210"
 HOST_SET=false
 PORT_SET=false
 SERVICE="qq-agent-linux"
+DEPLOY_REPOSITORY=""
+DEPLOY_BRANCH=""
 IMPORT_BRIDGE=""
 CREDENTIAL_FILE=""
 NODE_BIN="${NODE_BIN:-}"
@@ -29,6 +31,9 @@ Options:
   --service NAME         systemd user service name (default: qq-agent-linux)
   --node PATH            Existing Node.js >=22.13 binary
   --import-bridge PATH   Import legacy Bridge config on first install
+  --repository URL       Expected origin repository (auto-update passes it; compared
+                         against .deployment.json when provided)
+  --branch NAME          Expected source branch (compared when provided)
   --credential-file PATH Import DEEPSEEK_API_KEY on first install
   --no-backup            Skip the pre-deployment code snapshot
   -h, --help             Show this help
@@ -46,6 +51,8 @@ while (($#)); do
     --host) require_value "$@"; HOST="$2"; HOST_SET=true; shift 2 ;;
     --port) require_value "$@"; PORT="$2"; PORT_SET=true; shift 2 ;;
     --service) require_value "$@"; SERVICE="$2"; shift 2 ;;
+    --repository) require_value "$@"; DEPLOY_REPOSITORY="$2"; shift 2 ;;
+    --branch) require_value "$@"; DEPLOY_BRANCH="$2"; shift 2 ;;
     --node) require_value "$@"; NODE_BIN="$2"; shift 2 ;;
     --import-bridge) require_value "$@"; IMPORT_BRIDGE="$2"; shift 2 ;;
     --credential-file) require_value "$@"; CREDENTIAL_FILE="$2"; shift 2 ;;
@@ -148,32 +155,16 @@ NODE_BIN="$("$NODE_BIN" -p 'process.execPath')"
 [[ "$NODE_BIN" != *[[:space:]%\"]* ]] || { printf 'Node path contains unsupported characters\n' >&2; exit 2; }
 export PATH="$(dirname "$NODE_BIN"):$PATH"
 
-# 更新已有安装时，--data-dir 写错不会报错，只会把服务指向一个新的空数据目录
-# （历史记录、白名单、模型 Key 都留在旧目录，控制台看起来像"数据全丢"，而 token 也换了）。
-# 判据用安装目录里的 .deployment.json：只有"记录的就地这次安装、且记的 data 与传入的不一致"
-# 才拒绝，避免把"换个目录新装一份"误判成错误。确认要迁移就带 QQ_AGENT_ALLOW_PATH_CHANGE=1。
-if [[ -f "$INSTALL_DIR/.deployment.json" ]]; then
-  mapfile -t RECORDED_PATHS < <("$NODE_BIN" -e '
-    const fs = require("node:fs");
-    const out = ["", ""];
-    try {
-      const meta = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-      if (typeof meta?.root === "string") out[0] = meta.root;
-      if (typeof meta?.data === "string") out[1] = meta.data;
-    } catch { /* 元数据损坏：不拦，交给后面的流程 */ }
-    process.stdout.write(`${out[0]}\n${out[1]}\n`);
-  ' "$INSTALL_DIR/.deployment.json" 2>/dev/null)
-  RECORDED_ROOT="${RECORDED_PATHS[0]:-}"
-  RECORDED_DATA="${RECORDED_PATHS[1]:-}"
-  if [[ "$RECORDED_ROOT" == "$INSTALL_DIR" && -n "$RECORDED_DATA" && "$RECORDED_DATA" != "$DATA_DIR" ]]; then
-    if [[ "${QQ_AGENT_ALLOW_PATH_CHANGE:-}" == "1" ]]; then
-      printf '警告：数据目录从 %s 改为 %s（已显式授权 QQ_AGENT_ALLOW_PATH_CHANGE=1）\n' "$RECORDED_DATA" "$DATA_DIR" >&2
-    else
-      printf 'Refusing to change the data directory of an existing installation.\n  recorded: %s\n  passed:   %s\n这是更新时的常见误操作：传错 --data-dir 会让服务换用一个空的数据库（历史与 Key 都还在旧目录）。\n确需迁移请带 --data-dir %s，或显式设 QQ_AGENT_ALLOW_PATH_CHANGE=1。\n' \
-        "$RECORDED_DATA" "$DATA_DIR" "$RECORDED_DATA" >&2
-      exit 2
-    fi
-  fi
+# 部署目标与 .deployment.json 记录的一致性强校验（改进方案 C7/#3）：install-dir/data/
+# service/repository/branch 与记录不符时，在部署真正开始前拒绝退出 —— 此处 ERR trap
+# 尚未挂载，拒绝即"部署未开始"：服务未停、未 rsync、.deploy-in-progress 未落，不需要
+# 也不会走回滚。host/port 的真相源是 config.json（下方沿用逻辑保证不覆盖现值），与记录
+# 不一致仅提示漂移不拒绝，否则"控制台改监听地址后自动更新"会被误拒。
+VERIFY_ARGS=(--install-dir "$INSTALL_DIR" --data-dir "$DATA_DIR" --service "$SERVICE")
+[[ -n "$DEPLOY_REPOSITORY" ]] && VERIFY_ARGS+=(--repository "$DEPLOY_REPOSITORY")
+[[ -n "$DEPLOY_BRANCH" ]] && VERIFY_ARGS+=(--branch "$DEPLOY_BRANCH")
+if ! "$NODE_BIN" "$ROOT/scripts/verify-deployment-target.mjs" "${VERIFY_ARGS[@]}"; then
+  exit 2
 fi
 
 # 更新已有安装时，没有显式给出的 --host/--port 沿用 config.json 里的现值：用默认值覆盖会让一次

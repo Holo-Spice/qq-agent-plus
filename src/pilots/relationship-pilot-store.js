@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
+import { openDatabase } from '../core/sqlite.js';
 import { DATA_DIR } from '../core/config.js';
 
 export const RELATIONSHIP_EVALUATOR_VERSION = 'relationship-evaluator-v1';
@@ -161,7 +161,7 @@ export class RelationshipPilotStore {
   constructor({ dataDir = DATA_DIR, filename = relationshipDatabasePath(dataDir) } = {}) {
     this.filename = filename;
     fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
-    this.db = new DatabaseSync(filename);
+    this.db = openDatabase(filename);
     try { fs.chmodSync(filename, 0o600); } catch { /* best effort */ }
     this.db.exec(`
       PRAGMA journal_mode=WAL;
@@ -271,7 +271,7 @@ export class RelationshipPilotStore {
   }
 
   refreshFamiliarity(uin, stats = {}, now = Date.now()) {
-    const row = this.ensureState(uin, now);
+    this.ensureState(uin, now);
     const normalized = {
       messageCount: Math.max(0, Number(stats.messageCount) || 0),
       activeDays: Math.max(0, Number(stats.activeDays) || 0),

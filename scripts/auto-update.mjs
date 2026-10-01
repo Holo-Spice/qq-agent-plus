@@ -910,7 +910,10 @@ async function run() {
     '--host', String(cfg.server?.host || '127.0.0.1'),
     '--port', String(Number(cfg.server?.port) || 3210),
     '--service', service,
-    '--node', process.execPath
+    '--node', process.execPath,
+    // 期望的来源仓库/分支透传给部署侧：与安装记录比对，堵"在错误源码树里跑 deploy.sh"
+    '--repository', repository,
+    '--branch', branch
   ], {
     cwd: workDir,
     timeout: 20 * 60 * 1000,

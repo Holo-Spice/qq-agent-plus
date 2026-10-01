@@ -108,7 +108,7 @@ import { safeSlice } from './util.js';
 import { canRun } from './access.js';
 import { assertTimeAllowed, isTimeActive, TimeControlError, watchTimeWindow, withTimeScope } from './time-gate.js';
 import { vendorOfConfig } from '../pricing/model-prices.js';
-import { ZONE_OFFSET_MS, minuteOfDayInZone, randInt, sleep, createEventBus, todayKey } from './util.js';
+import { ZONE_OFFSET_MS, minuteOfDayInZone, randInt, createEventBus, todayKey } from './util.js';
 import { buildSystemPrompt, buildUserPrompt, resolveContextTier } from '../llm/prompt.js';
 import { chatCompletion, chatCompletionWithRetry, addUsage, isRetryableError } from '../llm/llm.js';
 import { buildToolDefs, toOpenAiTools, executeTool } from '../tools/tools.js';
@@ -1563,7 +1563,6 @@ export class Orchestrator {
     const maxRounds = runLimits.maxRounds;
     let finish = false;
     let completed = false;
-    let roundBudgetExceeded = false;   // 轮次用尽（见下方收尾逻辑，写进 session.roundBudgetStopped）
     let webSearchCount = 0;
     session.activity = '';
     session.webSearchCount = 0;
@@ -1787,7 +1786,6 @@ export class Orchestrator {
     // 不能标成可重试去重跑整轮：一条跑满 maxRounds 的会话重跑同样会跑满，成本放大且无解。
     if (!finish && !completed) {
       completed = true;
-      roundBudgetExceeded = true;
       session.roundBudgetStopped = true;
       session.finishReason ||= session.sent.length
         ? '已发送内容，因本轮模型轮数用尽安全结束'
@@ -2501,7 +2499,7 @@ export class Orchestrator {
   }
 
   /** 新建模式：从聊天记录里提炼对某人的长期印象。 */
-  #buildNewImpressionPrompt(chatKey, mem, stats) {
+  #buildNewImpressionPrompt(chatKey, mem) {
     const maxKeep = Number(getConfig().memory?.maxImpressionsPerMember) || 5;
     const uid = String(mem.userId || '');
     const sample = (this.store.recent(chatKey, { limit: 2000 }) || [])

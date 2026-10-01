@@ -69,7 +69,7 @@ it('轮数上限：很省模式 5 轮就收尾，关闭模式跑满用户设的 
   t.after(() => { globalThis.fetch = oldFetch; });
   const rounds = {};
   for (const mode of ['off', 'aggressive']) {
-    const { runner, store, sessions } = makeRunner({ mode });
+    const { runner, store } = makeRunner({ mode });
     const calls = stubToolOnly();
     store.appendIncoming('group:1', { mid: mode === 'off' ? 1 : 2, text: '在吗', senderId: '42' });
     await runner.wake('group:1');
@@ -116,7 +116,7 @@ it('私聊也吃档位上限：很省模式下 contextLimit 被夹到 40', async
   t.after(() => { globalThis.fetch = oldFetch; });
   const limits = {};
   for (const mode of ['off', 'aggressive']) {
-    const { runner, store, sessions } = makeRunner({ mode, atCount: 300 });
+    const { runner, store } = makeRunner({ mode, atCount: 300 });
     globalThis.fetch = async () => Response.json({
       choices: [{ message: { tool_calls: [{ id: 'f1', function: { name: 'finish', arguments: '{"summary":"ok"}' } }] } }],
       usage: { total_tokens: 5 }

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
+import { openDatabase } from '../core/sqlite.js';
 import { redactText } from '../core/redact.js';
 
 const DB_NAME = 'incident-pilot.sqlite';
@@ -158,7 +158,7 @@ export class IncidentPilotManager {
     if (this.config()?.incidentPilot?.enabled !== true) return this.status();
     if (this.db) return this.status();
     fs.mkdirSync(this.dataDir, { recursive: true, mode: 0o700 });
-    this.db = new DatabaseSync(incidentDatabasePath(this.dataDir));
+    this.db = openDatabase(incidentDatabasePath(this.dataDir));
     // 与 relationship-pilot-store 同一口径：库里是 safe_message/chat_key 这类隐私，收紧到 0600
     try { fs.chmodSync(incidentDatabasePath(this.dataDir), 0o600); } catch { /* 尽力而为，不阻断启动 */ }
     this.db.exec(`
@@ -231,7 +231,7 @@ export class IncidentPilotManager {
     if (this.db) return this.status();
     const file = incidentDatabasePath(this.dataDir);
     if (!fs.existsSync(file)) return this.status();
-    this.db = new DatabaseSync(file);
+    this.db = openDatabase(file);
     this.db.exec('PRAGMA busy_timeout=5000;');
     // 重开既有库时同样收敛权限（可能是旧版本按宽松 umask 建出来的）。
     for (const suffix of ['', '-wal', '-shm']) {

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { after, test } from 'node:test';
+import { test } from 'node:test';
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-tavily-search-'));
 process.env.QQ_AGENT_DATA_DIR = dataDir;

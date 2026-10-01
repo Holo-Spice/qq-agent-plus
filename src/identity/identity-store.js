@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
+import { openDatabase } from '../core/sqlite.js';
 import { DATA_DIR } from '../core/config.js';
 
 const DB_NAME = 'identity-pilot.sqlite';
@@ -260,13 +260,10 @@ export class IdentityStore {
   constructor({ dataDir = DATA_DIR, filename = identityDatabasePath(dataDir) } = {}) {
     this.filename = filename;
     fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
-    this.db = new DatabaseSync(filename);
+    this.db = openDatabase(filename);
     try { fs.chmodSync(filename, 0o600); } catch { /* best effort */ }
+    // journal_mode/synchronous 是本库既有持久化口径；busy_timeout/foreign_keys 由 core/sqlite.js 统一设置
     this.db.exec(`
-      PRAGMA journal_mode=WAL;
-      PRAGMA synchronous=FULL;
-      PRAGMA busy_timeout=5000;
-      PRAGMA foreign_keys=ON;
       CREATE TABLE IF NOT EXISTS people (
         uin TEXT PRIMARY KEY,
         primary_name TEXT NOT NULL DEFAULT '',

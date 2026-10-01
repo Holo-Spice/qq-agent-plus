@@ -74,7 +74,7 @@ Object.defineProperty(chatDetail, 'innerHTML', {
   set(v) { chatDetail._html = v; chatDetail.scrollTop = 0; }   // 浏览器行为
 });
 const tbody = document.getElementById('chat-msg-body');
-const more = document.getElementById('chat-msg-more');
+document.getElementById('chat-msg-more');
 
 const sandbox = {
   document, window: null,
@@ -110,7 +110,6 @@ vm.runInContext('state.chats = [{ key: "group:test", total: 1200 }];', ctx);
 
 console.log('=== ① 监听器只挂一次 ===');
 const renderChat = ctx.renderChatMessages;
-const updateBody = ctx.updateChatMessagesBody;
 const initLoader = ctx.initChatScrollLoader;
 
 // 首次渲染会自己调 initChatScrollLoader
@@ -137,7 +136,6 @@ check('首屏显示 500 条', (tbody.innerHTML.match(/<tr/g) || []).length === 5
 // 模拟用户滚到底部（内容 500 条 → 给一个合理的高度）
 chatDetail.scrollHeight = 8000;
 scrollToBottom();
-const beforeTop = chatDetail.scrollTop;
 const beforeHeight = chatDetail.scrollHeight;
 
 // 触发滚动（模拟加载更多）

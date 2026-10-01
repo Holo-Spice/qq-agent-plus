@@ -494,7 +494,6 @@ function renderSessionThreadTimeline(s) {
 }
 
 // ── 启动 loading 壳：页面先渲染，等服务可用后自动隐藏 ──
-const loadingOverlay = $('#loading-overlay');
 const loadingStatus = $('#loading-status');
 const loadingLogs = $('#loading-logs');
 let appReady = false;
@@ -3140,7 +3139,6 @@ function updateUsagePage(stats, st, prices) {
   const box = $('#usage-page');
   if (!box) return;
   const t = stats?.totals || {};
-  const cfg = state.config || {};
 
   // 统一存字符串：曾经这里把数字直接赋给 textContent（如 runs=0 时存的是数字 0
   // 而非 '0'）。浏览器会隐式转换所以显示没问题，但类型不一致会在别处埋雷
@@ -7130,13 +7128,8 @@ function renderMemorySettingsSection(c) {
 
 function renderExperimentalSettingsSection(c) {
   const enabled = c.identityPilot?.enabled === true;
-  const friend = c.identityPilot?.friendProposal || {};
-  const incoming = c.identityPilot?.incomingFriendRequest || {};
   const slang = c.slangPilot || {};
   const incident = c.incidentPilot || {};
-  const autoFriendEnabled = enabled
-    && friend.enabled === true
-    && incoming.enabled === true;
   return `
     <section class="experimental-settings">
       <h3 id="settings-experiments">实验功能</h3>
@@ -7763,14 +7756,13 @@ async function loadIdentityFeaturePage() {
 }
 
 function renderFriendFeaturePage(c, status) {
-  const box = $('#friend-page');
-  if (!box) return;
   const friend = c.identityPilot?.friendProposal || {};
   const incoming = c.identityPilot?.incomingFriendRequest || {};
+  const box = $('#friend-page');
+  if (!box) return;
   const triggered = friend.triggered || {};
   const proposalCounts = status.friendProposal?.counts || {};
   const opportunityCounts = status.friendProposal?.opportunityCounts || {};
-  const incomingCounts = status.incomingFriendRequest?.counts || {};
   const __html = `
     <div class="asset-head">
       <div><h2>好友管理</h2><span class="muted" id="friend-feature-state">${status.active ? '统一身份库运行中' : status.enabled ? '统一身份库启动失败' : '人物统一印象已停用'}</span></div>
@@ -9807,13 +9799,6 @@ function sliderDesc(pos) {
     + '对话模式是「参与者续接 / 完整生命周期」时，刚跟你说过话的人在活跃窗口内的消息也直接回（这两条不看概率）。</span>';
 }
 
-const TIER_NAME = { 1: '仅艾特', 2: '+关键词', 3: '+随机', 4: '全响应' };
-const TIER_HINT = {
-  1: '只有被 @ 时才响应，其余消息标记已读、不调模型（最省 token）',
-  2: '在 1 档基础上，命中关键词也响应',
-  3: '在 2 档基础上，再按概率随机响应一些消息',
-  4: '任何消息都响应（改造前的行为，最费 token）'
-};
 
 function renderConversationModePanels(conversation = {}) {
   const activeMode = ['legacy', 'threaded', 'lifecycle'].includes(conversation.mode)
@@ -9989,7 +9974,7 @@ return `
     <div class="field">
       <label>发表情包的积极程度</label>
       <select id="cfg-sticker-encourage">
-        ${STICKER_LEVELS.map(([v, label], i) =>
+        ${STICKER_LEVELS.map(([v, label]) =>
           `<option value="${v}" ${Number(c.sticker?.encourage ?? 1) === v ? 'selected' : ''}>${esc(label)}</option>`
         ).join('')}
       </select>

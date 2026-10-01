@@ -74,7 +74,7 @@ test('跨三夜：第 1 夜救人 → 第 2 夜改毒（双死）→ 第 3 夜�
   const seer = by(s, 'seer')[0];
   const guard = by(s, 'guard')[0];
   const witch = by(s, 'witch')[0];
-  const [va, vb] = by(s, 'villager');
+  const [va] = by(s, 'villager');
   // 一夜的行动：狼两只 + 守卫 + （女巫）+ 预言家（全部交齐才会立刻结算）
   const night = (st, { kill, guardTo, witchCmd, check }) => {
     let x = pm(st, w1.userId, `刀 ${idx(st, kill.userId)}`).state;

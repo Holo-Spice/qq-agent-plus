@@ -27,7 +27,6 @@ const PLAYERS = [
   { uid: '2006', name: '小六', kind: 'afk' },
   { uid: '2009', name: '七七', kind: 'normal' }
 ];
-const BYSTANDERS = [{ uid: '2007', name: '路人甲' }, { uid: '2008', name: '路人乙' }];
 
 fs.writeFileSync(path.join(tmp, 'config.json'), JSON.stringify({
   runtime: { mode: 'active', paused: false },
@@ -95,7 +94,6 @@ function makeManager(store) {
 
 let store = new ChatStore(0, { dataDir: tmp, filename: 'sim.sqlite' });
 let mgr = makeManager(store);
-const BODY = { ok: true };
 
 // 不变量：公开消息不得出现身份词/卧底的词；不得出现"没接上"
 const hasRoleWord = (t) => /预言家|守卫|女巫|平民/.test(t) || /狼人(?!杀)/.test(t);

@@ -189,11 +189,6 @@ export const MODEL_SERVICES = [
   }
 ];
 
-/** 归一化 baseUrl：小写、去首尾空白与结尾斜杠。 */
-function normUrl(raw) {
-  return String(raw || '').trim().toLowerCase().replace(/\/+$/, '');
-}
-
 /** 提取主机名（非法地址返回空串）。 */
 export function hostOf(url) {
   try { return new URL(String(url || '').trim()).host.toLowerCase(); } catch { return ''; }

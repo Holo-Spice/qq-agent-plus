@@ -100,7 +100,7 @@ test('控制台一键安装：状态流转、重复触发被拒、装完自动�
   assert.ok([202, 409].includes(rerun.status));
 });
 
-test('停服时不留孤儿安装进程（重启后不会出现两个并行的构建）', async (t) => {
+test('停服时不留孤儿安装进程（重启后不会出现两个并行的构建）', async () => {
   const port = await freePort();
   const cfg = structuredClone(DEFAULT_CONFIG);
   cfg.server = { ...cfg.server, host: '127.0.0.1', port, token: '' };
@@ -125,7 +125,7 @@ test('停服时不留孤儿安装进程（重启后不会出现两个并行的�
 
 test('停服时连"安装脚本拉起的孙进程"一起杀（否则 cmake/make 会继续写构建目录）',
   { skip: process.platform === 'win32' ? 'Windows 不支持按进程组杀（POSIX 专属行为）' : false },
-  async (t) => {
+  async () => {
     // 上一例只覆盖直接子进程。真实安装脚本是 spawnSync 拉起 git/cmake/make 的：
     // 只杀包装进程，孙进程会被 init 收养并继续写构建目录，与下一次安装并发（2026-09-26 审查）。
     const port = await freePort();

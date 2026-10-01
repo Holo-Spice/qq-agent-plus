@@ -683,7 +683,7 @@ export function onPrivateMessage(state, msg, { now = 0, rng = Math.random } = {}
   return { state: s, effects, consume: !canAck && effects.length === 0 };
 }
 
-export function onTick(state, { now = 0, deadline = 0, rng = Math.random } = {}) {
+export function onTick(state, { now = 0, rng = Math.random } = {}) {
   if (state.phase === 'ended') return { state, effects: [] };
   const started = Number(state.phaseStartedAt) || now;
   // 每个阶段各自的窗口：夜间行动/投票用 roundSeconds；**白天讨论用固定值 discussSeconds**

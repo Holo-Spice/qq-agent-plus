@@ -35,9 +35,13 @@ In particular:
   `systemctl --user`。
 - **`manage.sh` 必须在安装目录（含 `.deployment.json` 的那一层）里执行**；在源码 checkout 里跑会
   报 `Deployed Node.js runtime is unavailable` —— 那是目录不对，不要因此重跑 `deploy.sh`。
-- **更新时 `--install-dir` / `--data-dir` 必须与现有安装一致**：传错不会报错，而是把服务指向一个新的
-  空数据目录。`--host` / `--port` 可省略（沿用 `config.json` 里的现值，并打印提示），显式传入时必须
-  与首次安装相同，否则控制台会从外部失联。
+- **`install-timers` 现在装三个定时器**：backup（每周）、process-guard（每 10 分钟）、
+  health（每 5 分钟巡检；连续 3 次失败私聊 owner，恢复补发）。
+- **更新时 `--install-dir` / `--data-dir` 必须与现有安装一致**：`deploy.sh` 会在部署开始前把全部参数
+  与 `.deployment.json` 记录做强校验（`scripts/verify-deployment-target.mjs`），`--data-dir` / `--service` /
+  `--repository` / `--branch` 不符直接拒绝（此时什么都没动，无需回滚）；数据目录迁移需同时给
+  `--allow-path-change` 并设 `QQ_AGENT_ALLOW_PATH_CHANGE=1`。`--host` / `--port` 可省略（沿用
+  `config.json` 里的现值并打印提示），它们的真相源是 `config.json`，与部署记录不一致只会提示漂移。
 
 ## 发布节奏
 

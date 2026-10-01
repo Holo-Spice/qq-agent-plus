@@ -74,7 +74,6 @@ async function stickerLookupHint(ctx, key) {
 
 import { normalizeMessageList, safeSlice, sanitizeUserText, textWithQuote, unquoteJsonString } from '../core/util.js';
 import { repairUnescapedStringQuotes } from '../core/json-repair.js';
-import { formatStickerList } from '../onebot/stickers.js';
 import { validateImageUrl, safeFetchBinary } from '../llm/safe-fetch.js';
 import { webSearch, webFetch } from '../llm/web-search.js';
 import { expandForwardNodes, extractMediaFromSegments } from '../onebot/onebot.js';

@@ -8,7 +8,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-update-notice-'));
 process.env.QQ_AGENT_DATA_DIR = root;
 
 const {
-  parseGithubRepo, checkForUpdate, ignoreVersion, fetchLatestRelease, githubApiBase
+  parseGithubRepo, checkForUpdate, ignoreVersion, githubApiBase
 } = await import('../src/update-notice.js');
 const { readAutoUpdateState } = await import('../src/auto-update.js');
 
