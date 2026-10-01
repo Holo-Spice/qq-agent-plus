@@ -40,6 +40,9 @@
 4. **契约冻死**：`test/ui-contract.test.mjs` 断言外挂文件引用的每个跨文件全局都在
    `eslint.config.mjs` 的 `uiSharedGlobals` 里、清单里每个名字都还有定义且确实被别的文件用到；
    同一文件还断言再没有 `window[...] =` / 裸赋值的改写。新增耦合必须显式改清单，会当场红。
+   （2026-10-01 更新：`test/ui-contract.test.mjs` 与 `uiSharedGlobals` 已随 ESM 化删除，契约升级为
+   `test/ui-module-graph.test.mjs`，详见文末补记与 [ADR 0005](0005-ui-es-modules.md)；
+   "契约冻死"这条决策本身继续有效。）
 
 ## 后果
 
@@ -62,7 +65,7 @@
 按调用方分域才对**。
 
 拆剩 5 个声明（`triggerKindOf`/`triggerKindLabel`/`lifecycleStateOf`/`lifecycleRemainingText`/
-`lifecycleRunsFor`）放进新的 `ui/core/lifecycle-labels.js`（40 行）。**它不违反本 ADR 的决策 1**，
+`lifecycleRunsFor`）放进新的 `ui/core/lifecycle-labels.js`（40 行；2026-10-01 ESM 化后 56 行）。**它不违反本 ADR 的决策 1**，
 按本 ADR 自己给的判据重新量过（声明级引用闭包，2026-10-01，全 ui 379 个顶层声明）：
 
 | 种子 | 闭包规模 |

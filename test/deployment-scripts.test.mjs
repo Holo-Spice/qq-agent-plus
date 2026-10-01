@@ -32,6 +32,19 @@ test('deploy script verifies and rolls back the update service and timer', () =>
   assert.match(source, /QQ_AGENT_SOURCE_REVISION/);
 });
 
+// 2026-10-01 审查：接管陈旧锁的判据曾经整个反了（写成 -z），后果是 SIGKILL 之后
+// 无人值守的更新永久卡在"Another deployment is running"，而刚 mkdir 还没写 pid 的
+// 并发锁反被抢走。这条断言盯住 `-mmin +5` 的判定方向（find 命中才输出 = 必须 -n）。
+test('deploy.sh：只有"属主已死且锁确实超过 5 分钟"才接管陈旧锁', () => {
+  const source = fs.readFileSync(path.join(repo, 'deploy.sh'), 'utf8');
+  assert.match(
+    source,
+    /if ! lock_owner_alive && \[\[ -n "\$\(find "\$LOCK_DIR" -maxdepth 0 -mmin \+5/,
+    '判据必须是 -n（find 的 -mmin +5 命中时才打印路径）；写成 -z 会把语义反过来'
+  );
+  assert.doesNotMatch(source, /lock_owner_alive && \[\[ -z "\$\(find/, '不许再用 -z 判陈旧');
+});
+
 // Issue #5（2026-09-22）：国内服务器拉不到 Docker Hub，脚本只报「after 3 attempts」就退出，
 // 用户不知道还能换镜像站。这组断言守住三件事：认用户指定的镜像站、不替用户默认选第三方镜像站、
 // 失败时给可操作的指引。

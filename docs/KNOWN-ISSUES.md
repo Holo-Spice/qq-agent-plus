@@ -61,8 +61,8 @@ v0.6.0..v0.6.4 之间复审成本口径时记录的 6 项“不影响主链路�
 
 ## 环境相关（不属于项目问题）
 
-在 Windows 上执行 `npm run test:unit` 会有约 42 个用例失败（2026-09-28 基线；主要是更新器与
-deploy-all preflight 用例的 shell 桩在 Windows 上无法以 shebang 执行、临时目录清理 EPERM 等）；
+在 Windows 上执行 `npm run test:unit` 会有 43 个用例失败（2026-10-01 实测基线，仅 Windows 本机特有：
+docker/systemd/linux 集成类）；
 在 Linux 服务器与 CI（ubuntu-latest）上全量通过。判断"有没有新增失败"的办法：把 `✖` 用例名
 （去掉耗时）排序后与上一份日志做差集，失败集合逐条一致 = 零回归。
 

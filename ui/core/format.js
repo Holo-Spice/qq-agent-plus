@@ -1,5 +1,5 @@
 // 由 ui/app.js 机械拆出（2026-10-01，改进方案 §11「UI 结构治理」）。
-// classic script：顶层声明仍处全局词法环境、跨脚本共享；本文件在 app.js **之前**加载。
+// 跨文件引用一律走 import（模块作用域，不往全局词法环境里放东西）；可变状态挂 state，见 AGENTS.md。
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（test/ui-modules.test.mjs 的守恒断言盯住）。
 'use strict';
 
@@ -149,7 +149,7 @@ function fmtRate(rate, available) {
 /**
  * 在内置价格表里匹配模型（前端版）。
  *
- * 前端是无模块单文件，拿不到 src/pricing/model-prices.js 的导出，所以这里实现一份
+ * 前端拿不到 src/pricing/model-prices.js 的导出（那是 Node 端模块），所以这里实现一份
  * 与后端 matchModelId 完全相同的逻辑（改后端时这里要一起改）：
  *   候选名（原样 → 去渠道前缀 → 去叫法后缀/日期后缀 → 点号归并）
  *   → 别名 → 表内精确 → 前缀匹配（取最长）
@@ -500,7 +500,7 @@ function memThreshold(rawValue, current, max, fallback) {
  * ⚠️ 必须与 src/core/tier-slider.js 保持完全一致 —— 后端保存配置时会用它
  *    **重新权威换算**档位与概率，所以前端即使算错也不会影响实际行为；
  *    但两边不一致会让"界面显示的档位"和"实际生效的档位"对不上，造成困惑。
- *    ui/app.js 是普通 script（非 ES module），无法 import，只能镜像一份。
+ *    ui/ 与 src/ 是两套模块作用域，那边导不进来，只能镜像一份。
  */
 /** 概率取值（与后端 tier-slider.js 的 clampProbability 同一套规则）。 */
 function clampProbabilityUI(value, fallback = 100) {

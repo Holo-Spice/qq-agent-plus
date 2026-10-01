@@ -13,7 +13,11 @@ import { toClassicScript } from './helpers/ui-module-source.mjs';
 let WindowClass = null;
 try {
   ({ Window: WindowClass } = await import('happy-dom'));
-} catch { /* devDeps 未装（生产/更新器环境）—— 走 skip */ }
+} catch (e) {
+  // 只有"依赖确实没装"才跳过（生产/更新器环境是 npm ci --omit=dev）；装了却加载失败
+  // （版本与 Node 不兼容 / 包损坏）必须抛出去 —— 否则这层门禁静默消失，CI 照样绿（2026-10-01 审查）。
+  if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e;
+}
 const SKIP = WindowClass ? false : 'happy-dom 未安装（devDependencies；--omit=dev 环境按约定跳过）';
 
 const UI = path.resolve('ui');

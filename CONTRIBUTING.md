@@ -19,7 +19,7 @@
 
 ```bash
 npm ci                    # 首次
-npm run lint              # ESLint：0 error（warn 允许，清单在案）
+npm run lint              # ESLint：0 error（含 ui/ 的体积闸门 max-lines 1800）
 npm run test:unit         # 单元测试
 npm run test:local        # 本地回归
 node src/ops.js scan --strict   # 未定义调用扫描

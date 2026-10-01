@@ -53,7 +53,14 @@ jobs:
           echo "语法检查通过（${#files[@]} 个文件）"
 
       - name: Shell 脚本语法检查
-        run: bash -n deploy.sh deploy-all.sh manage.sh
+        run: |
+          set -e
+          # 全仓库的 .sh 都检：写死文件名时，新加的脚本不会被检查（2026-10-01 审查）。
+          # bash -n 只处理第一个位置参数（其余会当成 $1/$2），所以逐个跑。
+          mapfile -t shells < <(find . -maxdepth 2 -name '*.sh' -not -path './node_modules/*' | sort)
+          [[ ${#shells[@]} -gt 0 ]] || { echo "没有找到任何 .sh"; exit 1; }
+          for f in "${shells[@]}"; do bash -n "$f"; done
+          echo "Shell 语法检查通过（${#shells[@]} 个）"
 
       - name: 未定义调用扫描（严格模式）
         run: node src/ops.js scan --strict

@@ -75,7 +75,7 @@ $ node src/ops.js audit
   [正常] qq-agent-linux.service  active
   [正常] qq-agent-linux-update.timer  enabled
 ===== 3. 源码语法（全部 js） =====
-  [正常] 所有 js 文件语法通过（75 个）
+  [正常] 所有 js 文件语法通过（132 个）
 ===== 4. 未定义调用扫描 =====
   [正常] 可疑未定义调用点: 0
 ===== 8. 运行态 =====
@@ -329,7 +329,7 @@ node src/ops.js audit                    # service + code + data health check (r
 node src/ops.js audit-host               # host health check (read-only)
 node src/ops.js scan                     # undefined-call scan
 node src/ops.js backup --confirm         # stop/start the service, archive data, keep the last 4
-node src/ops.js install-timers --print   # show the two systemd user timers
+node src/ops.js install-timers --print   # show the four systemd user timers (backup / process-guard / health / audit-prune)
 node src/ops.js console --open           # open an SSH tunnel and the console
 ```
 

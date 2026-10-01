@@ -3,7 +3,7 @@
 // 所以留在 core 层；原来的文件名 widgets 名不副实（里面混装了 chat/usage 的整块渲染），故改名。
 // ⚠ 这不是 ADR 0004 否掉的那个 core/lifecycle.js：那批 18 个符号的闭包 329/379，这 5 个叶子只有
 // 8/379（符合该 ADR 的"< 50 才成立"判据，见 docs/adr/0004 的 2026-10-01 补记）。**别再往这里加东西。**
-// classic script：顶层声明仍处全局词法环境、跨脚本共享；只切不改。
+// 从 widgets.js 机械拆出的叶子件（只切不改）；跨文件引用走 import。
 
 import { TRIGGER_KIND_LABEL } from './constants.js';
 import { fmtRemainingMs } from './format.js';

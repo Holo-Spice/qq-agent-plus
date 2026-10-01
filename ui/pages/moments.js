@@ -1,5 +1,5 @@
 // 由 ui/app.js 机械拆出（2026-10-01，改进方案 §11「UI 结构治理」）。
-// classic script：顶层声明仍处全局词法环境、跨脚本共享；本文件在 app.js **之前**加载。
+// 跨文件引用一律走 import（模块作用域，不往全局词法环境里放东西）；可变状态挂 state，见 AGENTS.md。
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（test/ui-modules.test.mjs 的守恒断言盯住）。
 'use strict';
 
@@ -509,7 +509,7 @@ async function renderGroupChecklist(boxId, selected) {
 }
 
 // 由 ui/core/widgets.js 机械拆出（2026-10-01，同一次「UI 结构治理」：把混装的叶子按域归位）。
-// classic script：顶层声明仍在全局词法环境、跨脚本共享；只切不改，语句逐字节一致。
+// 从 app.js 机械切出（只切不改，语句逐字节一致）；跨文件引用走 import，可变状态挂 state。
 
 const momentStatusLabel = (record) => record?.status === 'preview' && record.decision === 'skip'
   ? '预览：决定不发布' : (MOMENT_STATUS_LABELS[record?.status] || record?.status || '-');

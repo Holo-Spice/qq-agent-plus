@@ -114,8 +114,38 @@
 - `probability`：每次判定开口的概率。
 - 冷场判定（`idleThresholdMs`）的时间会落盘：重启后不足一个间隔会跳过（避免"重启一次多一次判定"）。
   补话的 20 分钟节流**只在内存里**，重启后从零算，可能比预期多补一次（2026-09-26 审查发现文档与实现不一致）。
-- 上面示例里的数值是**示例**、不是出厂默认：出厂 `idleThresholdMs` 1800000（30 分钟）、`maxIdleThresholdMs` 5400000、
-  `probability` 0.25；照抄示例会改变行为。
+- 上面示例里的数值是**示例**、不是出厂默认：出厂 `checkIntervalMinMs` 1800000（30 分钟）、
+  `checkIntervalMaxMs` 5400000（90 分钟）、`idleThresholdMs` 1800000（30 分钟）、`probability` 0.25；
+  照抄示例会改变行为。
+
+## webSearch：联网搜索（9 家 provider + 聚合）
+
+
+```json
+{
+  "webSearch": {
+    "enabled": true,
+    "provider": "bing",
+    "maxResults": 6,
+    "tavily": {
+      "apiKey": "", "baseUrl": "https://api.tavily.com/search",
+      "count": 5, "searchDepth": "basic", "timeoutMs": 20000
+    },
+    "aggregate": { "sources": ["tavily", "doubao", "bing"], "count": 4 }
+  }
+}
+```
+
+- `provider` 可选：`bing`（默认，抓 `cn.bing.com` 页面，不需要 Key）、`deepseek`、`zhipu`、`bocha`、
+  `baidu`、`metaso`、`doubao`、`tavily`、`aggregate`（控制台「设置 → 搜索」里选）。
+- 每家一套 `{ apiKey, baseUrl, count, timeoutMs }`（`deepseek` 另有 `model`、`zhipu` 另有 `engine`）；
+  `apiKey` 留空时回退各自的环境变量：`DEEPSEEK_API_KEY` / `ZHIPU_API_KEY` / `BOCHA_API_KEY` /
+  `BAIDU_SEARCH_API_KEY` / `METASO_API_KEY` / `DOUBAO_SEARCH_API_KEY` / `TAVILY_API_KEY`。
+- `tavily`：tavily.com 的搜索 API（免费档 1000 次/月，专为 LLM 设计），另有 `searchDepth`（默认 `basic`）。
+- `aggregate`（聚合搜索）：并发跑 `sources` 里的多个源，URL 去重、每条结果带 `source` 标注；
+  `sources` 顺序就是结果优先级，单个源失败不影响整体，全部失败才报错。
+- 还能在控制台「搜索提供方」里自己加提供商（`type: 'openai'` 走 POST JSON 搜索接口、`type: 'bing'` 抓页面解析），
+  在下拉框里以 `custom:<id>` 的形式出现。
 
 ## sticker：表情包
 
@@ -171,7 +201,7 @@
   滑动 1 小时窗口、进程内计数、重启归零（按量计费场景够用，不是精确对账）。
 - 控制台里「用哪种方式」只有两项：**API Key · 托管服务（推荐：更快、不用下模型，硅基流动/Groq 有免费额度）**
   或 **免费 · 本机安装的 Whisper（不联网、不要 Key，转写较慢）**；
-  选了前者再由「服务预设」挑具体哪家（硅基流动 / Groq / 火山引擎 / 阿里云百炼 / 讯飞 / 腾讯云 / 百度 / 自定义自建）。
+  选了前者再由「服务预设」挑具体哪家（硅基流动 / 火山引擎 / 阿里云百炼 / 讯飞 / 腾讯云 / 百度 / Groq / OpenAI 官方 / 自定义自建）。
   模型**从服务商官网拉**（「获取模型列表」按钮打 `{baseUrl}/models`）—— 预设里写死模型名会过时，
   比如硅基流动新上免费模型时，列表跟着官网走才看得到。与「搜索服务」完全独立，不必是同一家、同一个账号：
 
@@ -276,7 +306,8 @@
 
 - **四种适配器**（按 `provider` 分发，`src/llm/tts.js`）：
   `openai`（兼容 `POST {baseUrl}/audio/speech`，硅基流动/OpenAI/自建，**已实测**）、
-  `volc`（火山引擎语音合成 **v1** HTTP，需要数字 `appId` + `apiKey`=Access Token，`cluster` 固定 `volcano_tts`，
+  `volc`（火山引擎语音合成 **v1** HTTP，需要数字 `appId` + `apiKey`=Access Token，`cluster` 默认 `volcano_tts`、
+  复刻音色自动切 `volcano_icl`（见下文「火山的两套凭据不一样，别混」），
   音色如 `BV001_streaming`；老接口，账号没开通 v1 服务时会固定报 3001）、
   `doubao`（火山引擎**豆包大模型语音合成 2.0**，`https://openspeech.bytedance.com/api/v3/tts/unidirectional`，
   只填 `apiKey`（控制台密钥，走 `X-Api-Key`）与 `voice`，`resourceId` 默认 `seed-tts-2.0`；
@@ -492,3 +523,20 @@
 - 控制台 Token 可在 `设置 -> 系统 -> 控制台安全` 中轮换；
 - 换模型时先确认 `vision`、`contextWindowTokens`、`maxRunTokens` 三项与模型能力一致，
   否则会出现"图片被当成文本"或"上下文被过早裁剪"。
+
+### 安全规则在哪里改（常被问）
+
+系统提示里的**【安全规则（最高优先级，不可违反）】**是**写死在源码里的**：
+`src/llm/prompt.js` 的 `securityRules()`（约 29-40 行），由 `buildSystemPrompt` 注入，
+优先级声明在同文件约 308 行 —— **安全规则 ＞ 管理员附加规则 ＞ 角色卡正文 ＞ 平台默认风格**。
+控制台**没有**、也不打算开一个改安全规则的口子：那是"群友忽悠模型放开限制"的第一道防线。
+
+要给这台机器人加自己的规矩，走**管理员附加规则**：控制台 `设置 -> 人设` 里的那个文本框
+（`persona.customRules`，上限 4000 字；人设卡库里的每张卡也可以各带一份）。
+它排在安全规则**之下**、角色卡正文**之上** —— 想压过平台默认风格（反 AI 味、发言节奏那些）
+就写在这里。好友动态/说说另有自己的一套【安全边界】，在
+`src/llm/qzone-interaction-prompt.js`。
+
+改安全规则本身只能改源码，并且要同步两处用例：`test/personas.test.mjs` 断言每张内置卡的
+提示词里都有【安全规则（最高优先级，不可违反）】这一段，`test/admin-identity.test.mjs`
+断言它排在【优先级】说明之后。改完跑 `npm run lint` 与 `node --test test/*.test.mjs`。

@@ -85,6 +85,21 @@ test('queryAudit：新→旧分页、before 游标、limit 硬上限 500', () =>
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('queryAudit：同一毫秒的多条记录不会因 ts 游标被整组跳过（2026-10-01 审查）', () => {
+  const dir = tmp();
+  const at = Date.UTC(2026, 9, 1, 3);
+  // 游标就是 ts 本身，翻页时 `ts === nextBefore` 会被跳过 —— 所以边界那一组必须整组返回。
+  // 旧实现按 limit 截断，组里靠后的记录下一页会被游标整组跳过、永远查不到。
+  for (const action of ['first', 'second', 'third']) appendAudit({ dir, action, ok: true, at });
+  const p1 = queryAudit({ dir, limit: 2 });
+  assert.deepEqual(p1.entries.map((e) => e.action), ['third', 'second', 'first'], '同一毫秒整组一并返回');
+  assert.equal(p1.nextBefore, at);
+  const p2 = queryAudit({ dir, limit: 2, beforeTs: p1.nextBefore });
+  assert.deepEqual(p2.entries, [], '整组已取完：下一页既不该重复，也不该还有落下的');
+  assert.equal(p2.nextBefore, null);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('单字段超 4KB 截断并标 truncated；未超的字段原样', () => {
   const dir = tmp();
   appendAudit({

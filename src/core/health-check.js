@@ -29,7 +29,7 @@ function saveState(dataDir, state) {
 /**
  * 跑一轮巡检。
  * @param {object} opts
- *   dataDir / mode(observe|active) / consolePort / consoleToken / onebotHttpPort / onebotToken
+ *   dataDir / mode(observe|active) / consolePort / onebotHttpPort / onebotToken
  *   notify: async (text) => void|null   通知通道（ops.js 里接 core/notify-owner）
  *   fetchImpl / statfs                  注入点（测试）
  * @returns {{ healthy: boolean, checks: Array, notified: string[], code: number }}

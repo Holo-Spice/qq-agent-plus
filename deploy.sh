@@ -106,7 +106,10 @@ lock_owner_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  if ! lock_owner_alive && [[ -z "$(find "$LOCK_DIR" -maxdepth 0 -mmin +5 2>/dev/null)" ]]; then
+  # find 的 -mmin +5 命中时才打印路径：判"锁已超过 5 分钟"要的是**输出非空**（-n）。
+  # 2026-10-01 审查：原先写成 -z，语义整个反过来 —— 属主已死且确实过期的锁走 else 直接 exit 1
+  # （SIGKILL 之后无人值守的更新就永久卡死），而"刚 mkdir 还没写 pid"的并发锁反被抢走 rm -rf。
+  if ! lock_owner_alive && [[ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +5 2>/dev/null)" ]]; then
     printf 'Stale deployment lock (owner process is gone for over 5 minutes): taking it over\n' >&2
     rm -rf -- "$LOCK_DIR"
     mkdir "$LOCK_DIR" 2>/dev/null || { printf 'Another deployment may be running.\n' >&2; exit 1; }

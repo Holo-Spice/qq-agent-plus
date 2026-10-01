@@ -70,7 +70,7 @@
 
 ## 5. 改完 UI 之后
 
-- [ ] `npm run lint`（0 error / 0 warning；`max-lines` 对**整个 ui/** 生效，阈值 1800）
+- [ ] `npm run lint`（0 error；含 `ui/` 的体积闸门 `max-lines` 1800）
 - [ ] `node test/render-test.mjs` → ALL PASSED 178
 - [ ] `node test/scroll-test.mjs` → ALL PASSED 19
 - [ ] `node test/usage-e2e.mjs` → ALL PASSED 31

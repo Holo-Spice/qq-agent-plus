@@ -1045,7 +1045,8 @@ function clampMemberNotes(value) {
   return out;
 }
 
-/** 更新并持久化配置（浅合并到当前值；patch 里传对象字段则整体替换该字段）。 */
+/** 更新并持久化配置（深合并到当前值：对象字段递归合并、数组整体替换；
+ *  映射型字段（如 api.modelPrices）要"删掉旧键"时传 `{ __replace__: X }` 整体替换）。 */
 export function updateConfig(patch) {
   // 人设段传了 null / 数组 / 标量（手写 API 调用、坏客户端）时当"没改人设"处理：
   // 直接把这个键从 patch 里摘掉，免得它在合并/迁移里被当成"恢复默认人设"，甚至抛错。

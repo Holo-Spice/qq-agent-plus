@@ -71,7 +71,7 @@ for c in rsync curl tar xz sha256sum; do
 done
 ```
 
-`deploy.sh:77-79` 在执行部署前即要求 `systemctl`、`systemctl --user` 与 `rsync` 三者可用，
+`deploy.sh:92-94` 在执行部署前即要求 `systemctl`、`systemctl --user` 与 `rsync` 三者可用，
 缺少任何一项都会打印具体原因后退出；**本脚本不会安装系统包**。全栈安装额外需要 `realpath`
 与 `ss`（iproute2）。
 
@@ -246,9 +246,9 @@ bash manage.sh backup /path/to/backup-dir
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | `Failed to connect to bus` / 提到 `XDG_RUNTIME_DIR` | 在非登录会话（宝塔网页终端）中调用 `systemctl --user` | 改用 SSH 登录；或采用文末的 root 方案 |
-| `deploy.sh` 刚开始即退出 | `deploy.sh:77-79` 的 `systemctl` / `systemctl --user` / `rsync` 检查未通过（脚本会打印缺哪一项） | 按提示安装 `rsync`，或改用 SSH 登录会话 |
+| `deploy.sh` 刚开始即退出 | `deploy.sh:92-94` 的 `systemctl` / `systemctl --user` / `rsync` 检查未通过（脚本会打印缺哪一项） | 按提示安装 `rsync`，或改用 SSH 登录会话 |
 | `Deployed Node.js runtime is unavailable` | 在源码目录而非安装目录执行了 `manage.sh`（该目录下没有 `.deployment-node`） | 切到安装目录执行；**不要**因此重跑 `deploy.sh` |
-| `Run as the service user, not root` | `deploy-all.sh:385` | 执行 `su - qqagent` 后重新运行 |
+| `Run as the service user, not root` | `deploy-all.sh:411` | 执行 `su - qqagent` 后重新运行 |
 | 解压 Node 失败、提示 `xz` | 缺少 `xz-utils` | 执行 `apt install -y xz-utils` |
 | 控制台打开正常但数据不刷新 | 反向代理缓冲了 SSE | 在反向代理配置中加入 `proxy_buffering off;` |
 | 机器人不回复 | 仍处于 `observe` 模式，或白名单为空 | 执行 `manage.sh activate --confirm-exclusive`，并在控制台配置白名单 |

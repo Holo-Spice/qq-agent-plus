@@ -30,7 +30,11 @@ try {
   espree = require('espree');
   eslintScope = require('eslint-scope');
   globalsPkg = require('globals');
-} catch { /* devDeps 未装（生产/更新器环境）—— 走 skip */ }
+} catch (e) {
+  // 只放过"确实没装"；装了却加载失败（依赖升级后不再 hoist、包损坏）必须抛出
+  // —— 否则这条最关键的模块图契约会静默跳过（2026-10-01 审查）。
+  if (e?.code !== 'MODULE_NOT_FOUND') throw e;
+}
 const SKIP = espree && eslintScope && globalsPkg
   ? false
   : 'espree / eslint-scope / globals 未安装（devDependencies；--omit=dev 环境按约定跳过）';

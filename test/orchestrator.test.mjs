@@ -10,6 +10,7 @@ const {
   Orchestrator,
   estimateNextPromptTokens,
   followUpPlan,
+  proactiveProbability,
   randomWakeDelay,
   triggerKindForTier
 } = await import('../src/core/orchestrator.js');
@@ -1581,6 +1582,19 @@ it('换卡后 24 小时内，历史与交接口径会说明"旧口癖不作数"'
     assert.ok(modelCalls >= 1, '有 @ 时应运行');
   });
 
+});
+
+describe('proactiveProbability（冷场开话题的发言概率）', () => {
+  it('0 是合法取值，不能被默认值吞掉；越界夹到 [0,1]；非数字才回落 0.25', () => {
+    // 旧实现是 `Number(p) || 0.25`：手写配置里填 0（= 不再随机开话题）被读成 25%。
+    assert.equal(proactiveProbability(0), 0);
+    assert.equal(proactiveProbability('0'), 0);
+    assert.equal(proactiveProbability(1), 1);
+    assert.equal(proactiveProbability(2), 1, '越界夹到 1');
+    assert.equal(proactiveProbability(-3), 0, '负值夹到 0');
+    assert.equal(proactiveProbability(undefined), 0.25, '没配置才用默认 0.25');
+    assert.equal(proactiveProbability('abc'), 0.25);
+  });
 });
 
 process.on('exit', () => fs.rmSync(root, { recursive: true, force: true }));

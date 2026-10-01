@@ -1,5 +1,5 @@
 // 由 ui/app.js 机械拆出（2026-10-01，改进方案 §11「UI 结构治理」）。
-// classic script：顶层声明仍处全局词法环境、跨脚本共享；本文件在 app.js **之前**加载。
+// 跨文件引用一律走 import（模块作用域，不往全局词法环境里放东西）；可变状态挂 state，见 AGENTS.md。
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（test/ui-modules.test.mjs 的守恒断言盯住）。
 'use strict';
 
@@ -253,7 +253,6 @@ async function refreshStatusImpl() {
     setStatusLabel('#usage-label', `今日：${u.runs} 次运行 · ${fmtTokens(u.totalTokens)}${rateTxt}${costTxt}${modeTxt}${unpricedTxt}`);
     setStatusLabel('#search-count-label', `搜索：${s.webSearchCount ?? u.webSearchCount ?? 0} 次`);
     state.paused = s.paused;
-    state.pauseReason = s.pauseReason;
     $('#pause-btn').textContent = state.paused ? '恢复' : '暂停';
     // 首次状态到达后放开运行模式下拉（此前禁用，避免把"还没加载"看成"观察模式"）
     const runtimeMode = $('#runtime-mode');

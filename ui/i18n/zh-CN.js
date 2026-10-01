@@ -1,4 +1,4 @@
-// 控制台文案框架（改进方案 #12-4）：classic script 形态，挂 window.QAText。
+// 控制台文案框架（改进方案 #12-4）：ES module；同时把表挂到 window.QAText 供裸标识符取用。
 // 约定：**新代码必须走 QAText.t(key)**，旧文案每批迁移一部分（先搬设置页 sidebar 做样板）。
 // 未登记的 key 原样返回（便于发现漏登记），支持 {var} 插值。
 (function () {

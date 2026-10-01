@@ -9,21 +9,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const CASES = [
-  'test-inline-fallback.mjs',
-  'test-sender-retry.mjs',
-  'test-qzone-backoff.mjs',
-  'test-qzone-intervals.mjs',
-  'test-qzone-reply-fallback.mjs',
-  'test-sticker-lookup.mjs',
-  'test-send-tools.mjs',
-  'test-thinking-toolchoice.mjs',
-  'test-card-segments.mjs',
-  'game-drive.mjs',
-  'game-sim.mjs'
-];
-
 const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+
+// 目录即清单：以前这里是手写数组，新加的用例不改数组就静默不跑（2026-10-01 审查）。
+const CASES = fs.readdirSync(here).filter((f) => f.endsWith('.mjs') && f !== 'run.mjs').sort();
+if (!CASES.length) {
+  console.error('test/local 下没找到任何用例');
+  process.exit(1);
+}
 let failed = 0;
 
 // 每个用例一个全新的临时数据目录：用例之间互不污染，也保证单个用例重跑时的行为可预期。

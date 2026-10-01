@@ -233,6 +233,15 @@ export function randomWakeDelay(config = getConfig(), random = Math.random) {
   return Math.round(min + (max - min) * ratio);
 }
 
+/**
+ * 「冷场开话题」每轮真的发言的概率：0 是合法取值（= 不再随机开话题），别用 `|| 默认值` 把它吞掉；
+ * 越界值夹到 [0,1]，非数字才回落到默认 0.25（2026-10-01 审查）。
+ */
+export function proactiveProbability(raw) {
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0.25;
+}
+
 export function triggerKindForTier(result = {}, {
   manual = false,
   proactive = false,
@@ -2089,7 +2098,7 @@ export class Orchestrator {
         log.info('[proactive] 跳过：并发任务已满');
         return;
       }
-      if (Math.random() > (Number(cfg.proactive?.probability) || 0.25)) {
+      if (Math.random() > proactiveProbability(cfg.proactive?.probability)) {
         log.info('[proactive] 跳过：这次摇到了不发言');
         // 摇了不发言也算把这一轮用掉
         writeProactiveLastAttempt(nowTick);

@@ -68,6 +68,8 @@ For the current modules:
 | Person impressions | `identityPilot.enabled` | `identityPilot.graduated` | `identity` / 旧印象 |
 | Automatic friend handling | retired 2026-09-25（整体退役，见 docs/KNOWN-ISSUES.md） | retired | `friends` / 好友管理（仅入站审批） |
 | Slang research | retired | retired | 黑话资产并入观测页 |
+| Incident handling | `incidentPilot.enabled` | `incidentPilot.graduated` | `incidents` / 异常处理 |
+| Group games | `groupGame.enabled`（默认关） | —（无固化开关） | `moments` / 每日动态页的实验功能区 |
 
 ## 4. API And Persistence
 

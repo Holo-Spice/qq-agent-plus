@@ -40,7 +40,7 @@ node src/ops.js health-check --confirm  # 允许在"连续 3 次失败"或"恢�
 
 ```bash
 node src/ops.js install-timers --print     # 预演，看将要写入的单元
-node src/ops.js install-timers --confirm   # 写入并启用 backup / process-guard / health 三个 timer
+node src/ops.js install-timers --confirm   # 写入并启用 backup / process-guard / health / audit-prune 四个 timer
 ```
 
 
@@ -52,7 +52,7 @@ node src/ops.js install-timers --confirm   # 写入并启用 backup / process-gu
 | `audit-host` | `ops/audit-host.sh` | 主机只读体检：失败单元、内存/磁盘/journald、Docker 容器与重启次数、监听端口、SSH 安全、防火墙、定时任务、可升级包、TLS 证书到期、备份现状 | 接手机器后的检查、例行巡检 |
 | `audit-prune` | —（改进方案 #5 新增） | 删除 `data/audit-log/` 下超过保留月数的 `audit-YYYYMM.jsonl`（控制台写操作的审计留痕）；默认保留 6 个月，先 `--dry-run` 预演 | 每月定时执行（`qq-agent-audit-prune.timer`）；磁盘吃紧时手动执行 |
 | `backup` | `ops/backup-qq-agent-data.sh` | 停止服务数秒 → tar.gz 打包数据目录 → 启动服务 → 仅保留最近 N 份；任何失败路径都会重新启动服务 | 每周定时执行（配合 `.timer`）；重大变更前手动执行 |
-| `scan` | `ops/scan-undefined-calls.py` + `ops/check-undefined-calls.sh` | 将注释/字符串/正则/模板串抹白后，查找「已调用但本文件既未定义也未 import」的函数名；只记录、不阻断（退出码恒为 0） | 修改 `src/*.js` 后；也可挂载到服务 `ExecStartPost` |
+| `scan` | `ops/scan-undefined-calls.py` + `ops/check-undefined-calls.sh` | 将注释/字符串/正则/模板串抹白后，查找「已调用但本文件既未定义也未 import」的函数名；默认只记录、不阻断（退出码恒为 0）；`--strict` 下有可疑调用则退出 1 | 修改 `src/*.js` 后；也可挂载到服务 `ExecStartPost` |
 | `watch-send` | `ops/watch-send.py` | 监视 outbox 表的 rowid 水位线：基线之后新增 failed 行报 SEND_FAIL，新增成功行报 SEND_OK；同时检查是否再次出现未定义函数事故 | 修复发送链路后的线上验证 |
 | `watch-login` | `ops/watch-login.py` | 每 15 秒轮询协议端 HTTP 端口，直至 QQ 登录成功，随后打印登录信息 / 控制台状态 / 最近日志 | 重启协议端容器或掉线重登后确认恢复 |
 | `guard` | `ops/guard-process-explosion.sh` | 用户进程数超过阈值时清理失控的 bash/grep/tr/sh/sleep 进程树并记录现场（仅 Linux） | 配合 `process-guard.timer` 每 10 分钟执行 |
@@ -180,7 +180,7 @@ node src/ops.js install-timers --confirm
 
 | 子命令 | 退出码 |
 | --- | --- |
-| `scan` | 恒为 0（只记录、不阻断） |
+| `scan` | 默认恒为 0（只记录、不阻断）；`--strict` 下有可疑调用则退出 1 |
 | `watch-send` | 0 = 工具层成功发出消息；1 = 发送失败或再次出现未定义函数；2 = 超时 |
 | `watch-login` | 0 = 已登录；1 = 超时或缺少令牌 |
 | `backup` / `deploy` / `install-timers` / `audit-prune` | 0 = 成功；1 = 参数或执行失败（缺少 `--confirm` 亦返回 1） |

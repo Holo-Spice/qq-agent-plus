@@ -131,7 +131,7 @@ export function queryAudit(options = {}) {
 
   const entries = [];
   let nextBefore = null;
-  for (const name of files) {
+  scan: for (const name of files) {
     let lines;
     try { lines = fs.readFileSync(path.join(dir, name), 'utf8').split('\n'); } catch { continue; }
     for (let i = lines.length - 1; i >= 0; i--) {
@@ -141,12 +141,14 @@ export function queryAudit(options = {}) {
       try { rec = JSON.parse(line); } catch { continue; }
       if (!rec || typeof rec.ts !== 'number') continue;
       if (rec.ts >= beforeTs) continue;
+      // 游标就是 ts 本身，下一页会把 `ts === nextBefore` 的记录整组跳过 —— 所以同一毫秒的
+      // 记录必须在这一页全部取完（这一页可能比 limit 多几条），否则组内靠后的记录永远查不到
+      // （2026-10-01 审查）。前提是日志按 ts 单调追加、跨月文件新的在前 —— 与游标法本身同一前提。
+      if (nextBefore !== null && rec.ts < nextBefore) break scan;
       entries.push(rec);
-      if (entries.length >= limit) { nextBefore = rec.ts; break; }
+      if (nextBefore === null && entries.length >= limit) nextBefore = rec.ts;
     }
-    if (entries.length >= limit) break;
   }
-  if (entries.length < limit) nextBefore = null;
   return { entries, nextBefore };
 }
 

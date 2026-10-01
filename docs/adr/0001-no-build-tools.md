@@ -5,8 +5,9 @@
 
 ## 背景
 
-控制台前端是 `ui/index.html` + 12 个 classic script（`i18n` → `core/*` → `app.js` → 8 个外挂），
-没有打包器、没有框架、没有类型系统。`ui/app.js` 单文件约 13,000 行。
+控制台前端是 `ui/index.html` + 30 个 ES module（`i18n` → `core/*` → `pages/*` → 外挂；
+2026-10-01 之前是 12 个 classic script，见 [ADR 0005](0005-ui-es-modules.md)），
+没有打包器、没有框架、没有类型系统。`ui/app.js` 单文件约 13,000 行（决策当时；拆分经过见 ADR 0004/0005 的补记）。
 
 ## 决策
 
@@ -33,10 +34,10 @@
 
 ## 后果
 
-- `ui/` 的模块化只能靠 ES module 原生能力与 classic script 的作用域规则 ——
-  跨文件共享必须显式（见 [ADR 0004](0004-ui-classic-script-and-registry.md)）。
+- `ui/` 的模块化靠 ES module 原生能力（classic script 时期只能靠其作用域规则）——
+  跨文件共享必须显式（见 [ADR 0004](0004-ui-classic-script-and-registry.md)、[ADR 0005](0005-ui-es-modules.md)）。
 - 需要类型信息的规则（如 `no-floating-promises`）用不了，改用人工评审 + 自研扫描兜底。
-- `ui/app.js` 的体积只能靠约定控制（`max-lines` 对新增目录 1800 行、新页新文件），
+- `ui/app.js` 的体积只能靠约定控制（`max-lines` 对整个 `ui/` 1800 行、新页新文件），
   不靠工具自动拆分。
 - *（2026-10-01）* 静态资源的缓存与"版本令牌"在**服务端下发时**处理，仍然没有构建步骤：
   见下。
@@ -62,7 +63,7 @@ ADR 原文"静态资源已经解决了缓存问题"在这一点上不成立。
 
 **代价**：HTML 每次请求都要过一遍 ~15KB 的正则改写（按 `(size,mtime)` 记忆的令牌计算，
 实际很轻）；换来的是首屏之后资产零请求。测试见 `test/static-cache.test.mjs`
-（5 例 + 6 条变异：不改写 / 令牌改用体积+时间 / 不校验令牌一律 immutable / 去掉 304 /
+（6 例 + 6 条变异：不改写 / 令牌改用体积+时间 / 不校验令牌一律 immutable / 去掉 304 /
 HTML 也认 If-Modified-Since / HTML 的 ETag 改成体积+时间 —— 逐条都会红）。
 
 **同一次改动还更正了两处文档漂移（2026-10-01）**：
@@ -72,12 +73,16 @@ HTML 也认 If-Modified-Since / HTML 的 ETag 改成体积+时间 —— 逐条�
   出来就 1606 行；那一桶随后按调用方拆开了，但设置页绑定的四段合计 1536 行 > 1500，
   再切只能是任意切分，故保留 1800（仍在 13k 量级之下）。**这个改动当时只写在提交信息里，
   现在补记在此**：阈值沿革 = 方案 1500 → 拆分时 1800（原因如上），当前最长文件
-  `ui/pages/settings-bind.js` 1756 行，在限内。
-- `eslint.config.mjs` 里"ui/app.js（骨架，5000+ 行）…… 豁免"已经过期：app.js 现在 1019 行，
+  `ui/pages/settings-bind.js` 1787 行，离上限只剩 13 行 —— 再往它里面加代码得先拆。
+  （教训：这类"当前最长/当前行数"是**派生数字**，本轮就发生过写注释时用的是改动前量的值，
+  同一个提交里就旧了 2 行；每次改完要重量，别手抄。）
+- `eslint.config.mjs` 里"ui/app.js（骨架，5000+ 行）…… 豁免"已经过期：app.js 现在 1079 行，
   按那句"缩到阈值以内后才纳入约束"自己的规矩，`max-lines` 的作用域已从
-  `core/pages/i18n` 扩到**整个 `ui/`**（含 app.js 与 8 个外挂插件，最大的 `global-memory.js` 372 行）。
+  `core/pages/i18n` 扩到**整个 `ui/`**（含 app.js 与 8 个外挂插件，最大的 `global-memory.js` 377 行）。
   同时把 eslint 的两条覆盖拆开：`no-unused-vars: off` 仍只给 `core/pages/i18n`（它们的定义
   是给别的 script 用的），别把 app.js 与插件并进去——那会让业务/插件代码的未用变量失守。
+  *（2026-10-01 补：ESM 化后这条 `no-unused-vars: off` 覆盖已整体删除 —— 跨文件引用改为 `import`，
+  不再有"定义是给别的 script 用的"这回事，`no-unused-vars` 对 `ui/**` 整体是硬门禁。）*
 
 **补记（2026-10-01）：ui/ 转 ES module 之后，js 不再走 URL 令牌（模块身份优先于缓存命中）**
 

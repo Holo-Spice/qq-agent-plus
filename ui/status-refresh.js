@@ -64,7 +64,6 @@ QARegistry.override('refreshStatus', async function refreshStatus() {
     setStatusLabel('#usage-label', `今日：${u.runs} 次运行 · ${fmtTokens(u.totalTokens)}${rateTxt}${costTxt}${modeTxt}${unpricedTxt}`);
     setStatusLabel('#search-count-label', `搜索：${s.webSearchCount ?? u.webSearchCount ?? 0} 次`);
     state.paused = s.paused;
-    state.pauseReason = s.pauseReason;
     $('#pause-btn').textContent = state.paused ? '恢复' : '暂停';
     // 与 app.js 的状态处理同一语义：首次状态到达后放开运行模式下拉
     // （index.html 初始为 disabled，避免把"还没加载"看成"观察模式"）

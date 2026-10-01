@@ -24,7 +24,11 @@ import { test } from 'node:test';
 let WindowClass = null;
 try {
   ({ Window: WindowClass } = await import('happy-dom'));
-} catch { /* devDeps 未装（生产/更新器环境）—— 走 skip */ }
+} catch (e) {
+  // 只有"依赖确实没装"才跳过（生产/更新器环境是 npm ci --omit=dev）；装了却加载失败
+  // （版本与 Node 不兼容 / 包损坏）必须抛出去 —— 否则这层门禁静默消失，CI 照样绿（2026-10-01 审查）。
+  if (e?.code !== 'ERR_MODULE_NOT_FOUND') throw e;
+}
 const SKIP = WindowClass ? false : 'happy-dom 未安装（devDependencies；--omit=dev 环境按约定跳过）';
 
 const UI = path.resolve('ui');
@@ -145,6 +149,41 @@ test('真 ESM：整棵树能按真模块语义加载，且 DOMContentLoaded 之�
     const theme = ctx.window.document.documentElement.getAttribute('data-theme');
     assert.ok(theme === 'light' || theme === 'dark', `init 应把主题写进 data-theme，实际 ${theme}`);
     assert.ok(ctx.fetchLog.some((u) => u.includes('/api/config')), `init 应该去拉配置，实际请求：${ctx.fetchLog.join(', ')}`);
+  } finally {
+    process.off('unhandledRejection', ctx.onRejection);
+    ctx.window.happyDOM?.abort?.();
+  }
+});
+
+// 回归用例（2026-10-01 审查）：renderChatList 的空状态提示曾经直接写 box.innerHTML —— 那层节点
+// 没有 data-key，patchKeyedList 既不把它算进 existing、也不会删它，列表重新有内容后它就被新行
+// 顶到最底部一直留着（只有刷新页面能清）。这条用例把"空 → 有 → 空"跑一遍，盯住提示的来去。
+test('真 ESM：存档页的空状态提示会随数据回来消失', { skip: SKIP }, async () => {
+  const ctx = await loadForReal();
+  try {
+    const { loadChats } = await import(pathToFileURL(path.join(UI, 'pages/chat.js')).href);
+    const box = ctx.window.document.querySelector('#chat-items');
+    assert.ok(box, 'index.html 里应该有 #chat-items（存档列表容器）');
+
+    let chats = [];
+    globalThis.fetch = async (url) => ({
+      ok: true,
+      status: 200,
+      json: async () => (String(url).includes('/api/chats') ? { chats } : {})
+    });
+
+    await loadChats();                        // ① 空列表 → 出现空状态提示
+    assert.match(box.textContent, /还没有消息存档/, '空列表应给出空状态提示');
+    assert.equal(box.querySelectorAll('.chat-item').length, 0);
+
+    chats = [{ key: 'group:1', lastText: 'hi', total: 1, failed: 0, held: 0, lastTs: Date.now(), unread: 0 }];
+    await loadChats();                        // ② 来了消息 → 提示必须被清掉（这条就是回归判据）
+    assert.equal(box.querySelectorAll('.chat-item').length, 1, '来消息后应渲染出一行');
+    assert.equal(box.querySelectorAll('.list-head').length, 0, '空状态提示必须随数据回来消失');
+
+    chats = [];
+    await loadChats();                        // ③ 又空了 → 提示还要能回来
+    assert.equal(box.querySelectorAll('.list-head').length, 1, '重新为空时提示要能再出现');
   } finally {
     process.off('unhandledRejection', ctx.onRejection);
     ctx.window.happyDOM?.abort?.();

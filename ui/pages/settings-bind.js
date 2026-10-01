@@ -1,6 +1,6 @@
 // 由 ui/app.js 机械拆出（2026-10-01，改进方案 §11「UI 结构治理」第二轮：设置域）。
 // 设置页事件绑定（bindSettingsEvents 及其专用小件）
-// classic script：顶层声明仍处全局词法环境、跨脚本共享；本文件在 app.js **之前**加载。
+// 跨文件引用一律走 import（模块作用域，不往全局词法环境里放东西）；可变状态挂 state，见 AGENTS.md。
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（脚本内已核对，勿手改缩进）。
 'use strict';
 
@@ -1057,10 +1057,8 @@ function bindSettingsListsAndGroups(c) {
     // 开关一变，当前模型的可用单价来源就变了，重刷卡片
     refreshModelPriceCard();
   });
-  // 直接在模型输入框里改模型时也要刷新 —— 只有从目录里选才会走另一条路径。
-  // 用 input 而非 change：边打字边更新，避免"点了别处才变"的迟滞感。
-  const modelInput = $('#cfg-model');
-  if (modelInput) modelInput.addEventListener('input', () => refreshModelPriceCard());
+  // #cfg-model 是 hidden input（模型只能从选择器里改，选完 loadSettings() 重渲染 → 这里会重跑），
+  // 所以不挂 input 监听 —— 挂在 hidden input 上的 input 事件永远不会触发（2026-10-01 审查）。
   refreshModelPriceCard();
 
   // 批量自定义价格编辑

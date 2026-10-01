@@ -192,7 +192,10 @@ try {
   for (const name of sections) {
     const fn = ctx[name] || sandbox[name];
     if (typeof fn !== 'function') {
-      console.log('  SKIP  ' + name + '（非函数或未导出）');
+      // 渲染入口改名/删掉就是真回归：以前这里记成 SKIP，既不计 pass 也不计 fail，
+      // harness 照样打印 ALL PASSED（2026-10-01 审查）。
+      fail++;
+      console.log('  FAIL  ' + name + '（渲染入口不存在或未导出）');
       continue;
     }
     try {

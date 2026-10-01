@@ -6,7 +6,7 @@
 // 裸赋值 `refreshStatus = ...`）。那只在"脚本顺序刚好、且双方都还是 classic script"时成立：
 // ES module 的绑定只读、模块作用域也不挂 window，任何一步模块化都会让覆盖**静默失效**
 // （页面看着正常，只是那段改造不再生效）。改为显式注册：由这里分发，顺序错了当场可见。
-// 名字仍留在全局（classic script 的跨文件作用域不变），只是不再被谁改写。
+// 名字现在都在模块作用域里（不再挂全局），对外只有 QARegistry 一个出口，谁都不能背着底座改写。
 // 底座一律带 `Impl` 后缀，插件可用 QARegistry.base(name) 取回原实现（避免自递归）。
 
 import { api } from './core/api.js';
@@ -25,7 +25,7 @@ import {
   onebotIssueText, serviceTileState, serviceUrl, uiServiceOfUrl
 } from './core/format.js';
 import { QARegistry } from './core/registry.js';
-import { pendingSessionDetail, startUpdateProgressTicker, state } from './core/state.js';
+import { pendingSessionDetail, refreshIntervalMs, startUpdateProgressTicker, state } from './core/state.js';
 import { loadChats } from './pages/chat.js';
 import {
   loadAssetObservatory, loadExperimentalFeatureStatuses, loadFriendOpportunities, loadFriendProposals,
@@ -135,8 +135,6 @@ function renderBanner() {
         <button class="btn btn-small btn-danger" id="banner-resume-read-btn" title="恢复运行，并把暂停期间积压的所有未读消息直接标记为已读（不再处理）">恢复并全部标为已读</button>`;
     }
     banner.innerHTML = html;
-    const link = $('#banner-goto-settings');
-    if (link) link.addEventListener('click', (e) => { e.preventDefault(); switchTab('settings'); });
     const resumeBtn = $('#banner-resume-btn');
     if (resumeBtn) resumeBtn.addEventListener('click', () => resumePause({ skipBacklog: false }));
     const resumeReadBtn = $('#banner-resume-read-btn');
@@ -1046,12 +1044,12 @@ async function init() {
       switchTab('settings');
       connectSSE();
       refreshStatus();
-      setInterval(refreshStatus, 15000);
+      setInterval(refreshStatus, refreshIntervalMs(15000));
       return;
     }
   } catch { /* 按默认流程走 */ }
   refreshStatus();
-  setInterval(refreshStatus, 15000);
+  setInterval(refreshStatus, refreshIntervalMs(15000));
   connectSSE();
   // 首次 startListPoller() 在配置加载前执行，会落到 4000ms 兜底值，导致会话列表每 4 秒重建一次（界面闪烁）；
   // 配置就绪后重新校准一次轮询间隔

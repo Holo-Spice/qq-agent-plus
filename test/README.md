@@ -46,5 +46,5 @@ test/local/test-*.mjs     # 发送/贴纸/空间互动/内联兜底等回归
 - 用例自己造临时目录（`mkdtemp`），跑完清理；不要依赖仓库里的 `data/`。
 - 不要在用例里读真实凭据或碰网络：需要网络的一律注入 `fetchImpl` 桩件。
 - 改完 `src/` 下的相对路径或移动文件，先跑 `layout.test.mjs` 与 `npm run test:local`。
-- 在 Windows 上跑 `npm run test:unit` 会有约 46 个用例失败（需要 docker / systemd /
-  Unix 路径与权限位），这是环境差异不是回归；CI（ubuntu-latest）上全量通过。
+- 在 Windows 上跑 `npm run test:unit` 会有 43 个用例失败（2026-10-01 实测基线，仅 Windows 本机特有：
+  docker/systemd/linux 集成类），这是环境差异不是回归；CI（ubuntu-latest）上全量通过。

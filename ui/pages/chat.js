@@ -1,5 +1,5 @@
 // 由 ui/app.js 机械拆出（2026-10-01，改进方案 §11「UI 结构治理」）。
-// classic script：顶层声明仍处全局词法环境、跨脚本共享；本文件在 app.js **之前**加载。
+// 跨文件引用一律走 import（模块作用域，不往全局词法环境里放东西）；可变状态挂 state，见 AGENTS.md。
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（test/ui-modules.test.mjs 的守恒断言盯住）。
 'use strict';
 
@@ -281,7 +281,7 @@ return `
 }
 
 // 由 ui/core/widgets.js 机械拆出（2026-10-01，同一次「UI 结构治理」：把混装的叶子按域归位）。
-// classic script：顶层声明仍在全局词法环境、跨脚本共享；只切不改，语句逐字节一致。
+// 从 app.js 机械切出（只切不改，语句逐字节一致）；跨文件引用走 import，可变状态挂 state。
 
 // ── 存档视图 ──
 async function loadChats({ quiet = false } = {}) {
@@ -434,7 +434,7 @@ function renderChatList() {
     const showIncidentControl = c.key.startsWith('group:')
       && state.config?.incidentPilot?.enabled === true;
     return `
-      <div class="chat-item ${c.key === state.currentChatKey ? 'selected' : ''} ${c.unread ? 'unread-row' : ''} ${isNew ? 'new-item' : ''}" data-key="${c.key}">
+      <div class="chat-item ${c.key === state.currentChatKey ? 'selected' : ''} ${c.unread ? 'unread-row' : ''} ${isNew ? 'new-item' : ''}" data-key="${esc(c.key)}">
         <div class="chat-item-title">
           <span class="session-chat">${esc(name)}</span>
           ${c.timeControl?.enabled ? `<span class="thread-pill">${c.timeControl.active ? '活跃时段' : '仅记录'}</span>` : ''}
@@ -446,8 +446,13 @@ function renderChatList() {
         <div class="session-meta"><span>${c.total} 条 · 失败 ${c.failed || 0} · 待确认 ${c.held || 0}${c.thread ? ` · 线程 v${c.thread.version}` : ''}</span><span>${fmtTime(c.lastTs)}</span></div>
       </div>`;
   }).map((html, index) => ({ key: String(visibleChats[index].key), html }));
-  patchKeyedList(box, chatRows, 'data-key');
-  if (!visibleChats.length) box.innerHTML = `<div class="list-head muted">${state.chats.length ? '没有匹配筛选条件的会话' : '还没有消息存档（等白名单里的群/好友来消息）'}</div>`;
+  // 空状态也必须作为"带 key 的行"交给 patchKeyedList：这层提示没有 data-key，直接写
+  // box.innerHTML 的话既不进 existing、也永远不会被删，列表重新有内容时会沉到最底部一直留着
+  // （新行走 insertBefore(node, firstChild) 插到它前面；2026-10-01 审查）。
+  const rows = visibleChats.length
+    ? chatRows
+    : [{ key: '__empty__', html: `<div class="list-head muted">${state.chats.length ? '没有匹配筛选条件的会话' : '还没有消息存档（等白名单里的群/好友来消息）'}</div>` }];
+  patchKeyedList(box, rows, 'data-key');
   for (const c of state.chats) state.seenChatKeys.add(c.key);
   $$('.chat-item', box).forEach((el) => {
     if (el.__bound) return;      // 增量更新会保留旧行，别重复绑定
@@ -632,7 +637,7 @@ function chatMessagesNewestFirst() {
 /** 单行消息 HTML（全量渲染与滚动追加共用同一个模板，保证两处长得一样）。 */
 function chatMsgRowHtml(m) {
   return `
-    <tr class="${m.read ? '' : 'unread'}" data-midrow="${m.id}">
+    <tr class="${m.read ? '' : 'unread'}">
       <td class="t">${fmtTime(m.ts)}</td>
       <td class="w ${m.self ? 'self' : ''}">${m.self ? '我' : esc(m.senderName)}</td>
       <td class="text">${esc(m.text)}${m.read ? '' : ' <span class="unread-pill">未读</span>'}</td>

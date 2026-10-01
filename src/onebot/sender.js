@@ -82,11 +82,7 @@ function muteUntilMs(raw, nowSec) {
   const shut = muteMark(raw, nowSec);
   if (shut === 'flag') return 0;              // 标志位没有解禁时间，交给下面单独判定
   if (!shut) return 0;
-  if (shut > nowSec + MUTE_MAX_AHEAD_SEC) {
-    log.warn('[send] 禁言时间戳超出常识范围（>365 天），按未禁言处理:', raw);
-    return 0;
-  }
-  return shut * 1000;
+  return shut * 1000;                         // 超限值由 muteMark 一处兜住（超限即返回 0）
 }
 
 export class SendQueue {
