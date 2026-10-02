@@ -10,8 +10,17 @@ const { runHealthCheck } = await import('../src/core/health-check.js');
 const { openDatabase } = await import('../src/core/sqlite.js');
 const { readOwnerUin } = await import('../src/core/notify-owner.js');
 
-function makeDataDir({ withDb = true, withUpdaterState = false, withMarker = false, outboundAgoMs = 0, inboundAgoMs = 0, inboundState = 'pending', inboundAvailableInMs = null } = {}) {
+function makeDataDir({ withDb = true, withUpdaterState = false, withMarker = false, outboundAgoMs = 0, inboundAgoMs = 0, inboundState = 'pending', inboundAvailableInMs = null, runtimePaused = false, budgetDegraded = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-health-'));
+  if (runtimePaused || budgetDegraded) {
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+      runtime: { mode: 'active', paused: runtimePaused },
+      api: { budget: budgetDegraded ? { enabled: true, dailyYuan: 1, onExceed: 'degrade' } : {} }
+    }));
+  }
+  if (budgetDegraded) {
+    fs.writeFileSync(path.join(dir, 'usage-today.json'), JSON.stringify({ dayKey: 'test', estimatedYuan: 2, unpricedRuns: 0 }));
+  }
   if (withDb) {
     const db = openDatabase(path.join(dir, 'messages.sqlite'));
     db.exec(`CREATE TABLE IF NOT EXISTS messages (
@@ -72,9 +81,9 @@ test('observe 模式跳过出站水位（不发消息不算故障）', async () 
 });
 
 test('active 模式：入站到期未处理（管道停滞）→ 失败；已处理 → 通过', async () => {
-  // 判据（2026-10-02 修订）：看的不是"出站多新"，而是"**到期的入站有没有被处理**"。
-  // 入站 40 分钟前到达、仍停在 pending（到期超过 30 分钟宽限）＝ 管道停滞 → 失败。
-  const stale = makeDataDir({ outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 40 * 60 * 1000 });
+  // 判据（2026-10-02 修订，宽限 60 分钟）：看的不是"出站多新"，而是"**到期的入站有没有被处理**"。
+  // 入站 70 分钟前到达、仍停在 pending（到期超过 60 分钟宽限）＝ 管道停滞 → 失败。
+  const stale = makeDataDir({ outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 70 * 60 * 1000 });
   const staleRun = await runHealthCheck({
     dataDir: stale, fetchImpl: okFetch, statfs: okStatfs, notify: null,
     outboundStaleMs: 6 * 60 * 60 * 1000,
@@ -85,14 +94,42 @@ test('active 模式：入站到期未处理（管道停滞）→ 失败；已处
 
   // 同样的出站水位，入站已经评估过（acked：回了，或按概率决定不回）→ 不是故障。
   // 这条就是 2026-10-02 08:15 那次误报的回归用例：旧判据（入站新 → 出站必须新）在这里必红。
-  const handled = makeDataDir({ outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 40 * 60 * 1000, inboundState: 'acked' });
+  const handled = makeDataDir({ outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 70 * 60 * 1000, inboundState: 'acked' });
   const handledRun = await runHealthCheck({
     dataDir: handled, fetchImpl: okFetch, statfs: okStatfs, notify: null,
     outboundStaleMs: 6 * 60 * 60 * 1000,
   });
   const handledItem = handledRun.checks.find((c) => c.name === 'outbound-freshness');
   assert.equal(handledItem.ok, true);
-  assert.match(handledItem.detail, /均已处理/);
+  assert.match(handledItem.detail, /没有到期未处理的/);
+});
+
+test('active 模式：pacing 窗口内的 pending（55 分钟）→ 不算故障', async () => {
+  // 自主节奏下消息按设计可等 maxSilence（默认上限 45 分钟）才统一处理 ——
+  // 宽限必须大于它，否则 paced 消息会被误判成停滞（2026-10-02 复审）。
+  const dir = makeDataDir({ outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 55 * 60 * 1000 });
+  const r = await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null });
+  assert.equal(r.checks.find((c) => c.name === 'outbound-freshness').ok, true);
+});
+
+test('active 模式：Agent 已暂停 → 跳过本项（消息按设计留在未读）', async () => {
+  const dir = makeDataDir({
+    outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 70 * 60 * 1000, runtimePaused: true,
+  });
+  const r = await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null });
+  const item = r.checks.find((c) => c.name === 'outbound-freshness');
+  assert.equal(item.ok, true);
+  assert.match(item.detail, /暂停/);
+});
+
+test('active 模式：当日预算用尽且 degrade → 跳过本项（保留未读是设计行为）', async () => {
+  const dir = makeDataDir({
+    outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 70 * 60 * 1000, budgetDegraded: true,
+  });
+  const r = await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null });
+  const item = r.checks.find((c) => c.name === 'outbound-freshness');
+  assert.equal(item.ok, true);
+  assert.match(item.detail, /预算/);
 });
 
 test('active 模式：入站刚到还在处理窗口内（pending 未满宽限）→ 不算故障', async () => {

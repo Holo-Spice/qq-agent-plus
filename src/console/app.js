@@ -1304,9 +1304,16 @@ export function createApp({
       'cache-control': 'no-store',
       vary: 'Accept-Encoding'
     };
-    const accept = String(res.req?.headers?.['accept-encoding'] || '');
-    if (body.length >= 1024 && /\bgzip\b/.test(accept)) {
+    const accept = String(res.req?.headers?.['accept-encoding'] || '').toLowerCase();
+    // gzip 协商：忽略大小写、显式 q=0 视为拒绝（RFC 9110 最小正确子集，
+    // 覆盖浏览器与常见代理的实际写法）。
+    const gzipWanted = /(^|[\s,])gzip([\s,;]|$)/.test(accept)
+      && !/gzip\s*;\s*q=0(?:\.0*)?\s*(?:,|$)/.test(accept);
+    if (body.length >= 1024 && gzipWanted) {
       zlib.gzip(body, (error, packed) => {
+        // 防御：回调可能晚于连接生命周期（客户端断开属安全 no-op；headers 已被
+        // 兜底处理器写过时再 writeHead 会抛 —— 回调里的异常没人接得住，故先检查）。
+        if (res.headersSent || res.destroyed) return;
         if (error) {
           res.writeHead(code, { ...headers, 'content-length': body.length });
           res.end(body);
@@ -4139,16 +4146,19 @@ function buildSessionView(s, store, options = {}) {
 // ── 用量行缓存 ──
 // collectUsageRows 要遍历并 JSON.parse 全部会话文件。实测 300 个文件 / 25MB 时
 // 单次约 200ms，而前端每 15 秒轮询一次、stats 与 breakdown 还各扫一遍。
-// 会话文件是"结束写一次、之后不再改"，所以缓存很安全。
+// 注意：会话文件在运行期会被节流重写（sessions.js #persistThrottled），不是"写一次就不动"，
+// 所以可靠性绑定在下面两条失效策略上，别把它当不可变数据用。
 //
 // 失效策略（双保险，任一条命中就重算）：
 //   1. 目录快照变化：文件数或目录 mtime 变了（新增/删除会话）
-//   2. TTL 到期：20 秒。兜住"内容被改写但目录快照不变"这类边缘情况。
-//      原来是 5 秒，但轮询间隔 4 秒、用户切页签的时机又很随机，
-//      导致切过去时缓存经常刚好过期 → 每次都走 200ms 的冷启动（"黑一下"）。
-//      用量统计不是实时数据，20 秒的新鲜度完全够用。
+//   2. TTL 到期：60 秒（见 USAGE_CACHE_TTL_MS）。兜住"内容被改写但目录快照不变"这类边缘情况。
+//      用量统计不是实时数据，1 分钟的新鲜度完全够用。
 //      另外前端还有一层：切过去先用上次数据立即渲染，不等网络。
-const usageRowsCache = { key: '', at: 0, rows: null, win: null };
+// 2026-10-02 复审：缓存改成**按 range 分槽的 Map** —— 单槽时 /api/status 每 15 秒用
+// range='today' 调一次（它要日统计），与用量页的 range='7' 交替覆盖同一个槽，导致 key
+// 永远对不上、缓存实际从未命中（用量页每次打开仍全量扫）。分槽后各自的 TTL 独立生效。
+const usageRowsCache = new Map();
+const USAGE_CACHE_MAX_KEYS = 8;
 const USAGE_CACHE_TTL_MS = 60000;   // 2026-10-02：20 秒 → 60 秒，打开用量页大多命中缓存；
                                     // 新会话最多晚 1 分钟进统计，换来不再每次打开都全量扫描
 
@@ -4168,13 +4178,13 @@ function collectUsageRows({ range }) {
   const win = resolveRange(range);
   // 命中缓存就直接返回（注意 rows 会被调用方改写字段，所以必须给副本）
   const sig = sessionsDirSignature() + '@' + String(range);
-  if (usageRowsCache.rows && usageRowsCache.key === sig
-      && (Date.now() - usageRowsCache.at) < USAGE_CACHE_TTL_MS) {
+  const hit = usageRowsCache.get(sig);
+  if (hit && (Date.now() - hit.at) < USAGE_CACHE_TTL_MS) {
     return {
-      rows: usageRowsCache.rows.slice(),
-      win: win || usageRowsCache.win,
-      searchCount: usageRowsCache.searchCount || 0,
-      toolCounts: { ...(usageRowsCache.toolCounts || {}) }
+      rows: hit.rows.slice(),
+      win: win || hit.win,
+      searchCount: hit.searchCount || 0,
+      toolCounts: { ...(hit.toolCounts || {}) }
     };
   }
 
@@ -4219,12 +4229,21 @@ function collectUsageRows({ range }) {
     }
   }
   // 写缓存：存的是"清洗完的 rows"，取用时给副本避免调用方污染
-  usageRowsCache.key = sig;
-  usageRowsCache.at = Date.now();
-  usageRowsCache.rows = rows.slice();
-  usageRowsCache.win = win;
-  usageRowsCache.searchCount = searchCount;
-  usageRowsCache.toolCounts = { ...toolCounts };
+  usageRowsCache.set(sig, {
+    rows: rows.slice(),
+    win,
+    searchCount,
+    toolCounts: { ...toolCounts },
+    at: Date.now()
+  });
+  if (usageRowsCache.size > USAGE_CACHE_MAX_KEYS) {
+    let oldestKey = null;
+    let oldestAt = Infinity;
+    for (const [key, entry] of usageRowsCache) {
+      if (entry.at < oldestAt) { oldestAt = entry.at; oldestKey = key; }
+    }
+    if (oldestKey !== null) usageRowsCache.delete(oldestKey);
+  }
   return { rows, win, searchCount, toolCounts };
 }
 

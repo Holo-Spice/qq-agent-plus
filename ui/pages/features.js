@@ -544,17 +544,24 @@ async function deleteAsset(kind, entry, cardEl = null) {
       // 其余类别维持重拉路径。
       const scrollY = window.scrollY ?? 0;
       if (kind === 'stickers') {
+        let removed = false;
         if (state.assetDetail && Array.isArray(state.assetDetail.entries)) {
           const deletedKey = String(entry.id ?? '');
+          const before = state.assetDetail.entries.length;
           state.assetDetail = {
             ...state.assetDetail,
             entries: state.assetDetail.entries.filter((item) => String(item.id ?? '') !== deletedKey),
           };
+          removed = state.assetDetail.entries.length !== before;
         }
-        if (state.assetOverview?.stickers && typeof state.assetOverview.stickers.total === 'number') {
+        // 只在确实从本地列表里摘掉了这条时才减计数：并发删另一张 / 中途刷新过时，条目可能
+        // 已不在列表，而 SSE 的路径已经处理过计数，再减一次会少 1（2026-10-02 复审）。
+        if (removed && state.assetOverview?.stickers && typeof state.assetOverview.stickers.total === 'number') {
           state.assetOverview.stickers.total = Math.max(0, state.assetOverview.stickers.total - 1);
         }
-        if (cardEl && typeof cardEl.remove === 'function') {
+        // 卡片节点可能已被后续重渲染替换（脱离文档）——此时 remove() 只会删到旧节点、
+        // 新卡片成残影；用 isConnected 判活，拿不准就退回重渲染（2026-10-02 复审）。
+        if (cardEl && typeof cardEl.remove === 'function' && cardEl.isConnected !== false) {
           cardEl.remove();
           const countEl = document.querySelector('.asset-summary-item[data-asset-kind="stickers"] strong');
           if (countEl) countEl.textContent = fmtTok(state.assetOverview?.stickers?.total ?? 0);

@@ -80,6 +80,13 @@ test('大 JSON 走 gzip，小 JSON 不压，二者都带 Vary', async (t) => {
   const small = await req(port, '/api/memory', { headers: { 'accept-encoding': 'gzip' } });
   assert.ok(small.body.length < 1024, '该响应本就小于 1KB');
   assert.equal(small.headers['content-encoding'], undefined, '小响应不该压');
+  assert.equal(small.headers.vary, 'Accept-Encoding', '小响应也要带 Vary（缓存协商正确性）');
+
+  // 显式拒绝（q=0）不应被压缩；大小写不敏感
+  const refuses = await req(port, '/api/status', { headers: { 'accept-encoding': 'gzip;q=0' } });
+  assert.equal(refuses.headers['content-encoding'], undefined, 'q=0 视为拒绝');
+  const upper = await req(port, '/api/status', { headers: { 'accept-encoding': 'GZIP' } });
+  assert.equal(upper.headers['content-encoding'], 'gzip', '大小写不敏感');
 });
 
 test('贴纸图片：长缓存 + 强 ETag，重复请求 304 空体', async (t) => {

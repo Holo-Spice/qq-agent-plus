@@ -5,10 +5,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { openDatabase } from './sqlite.js';
+import { budgetStatus } from './budget.js';
 
-const OUTBOUND_STALE_MS = 6 * 60 * 60 * 1000;   // 出站水位：6 小时没有任何自己发的消息＝可疑
-const STUCK_INBOUND_MS = 30 * 60 * 1000;        // 入站到期未处理的宽限：一轮会话运行只要几分钟，
-                                                // 到期 30 分钟还停在 pending 就是管道死了
+const OUTBOUND_STALE_MS = 6 * 60 * 60 * 1000;   // 入站静默窗口：6 小时没人说话＝静默期（原名出站水位，
+                                                // 2026-10-02 判据改版后只用于比较入站时间）
+const STUCK_INBOUND_MS = 60 * 60 * 1000;        // 入站到期未处理的宽限：pacing（自主节奏）下消息
+                                                // 按设计可等 maxSilence（默认上限 45 分钟）才统一处理，
+                                                // 60 分钟覆盖它之后仍停在 pending 才是管道死了
 const DISK_MIN_BYTES = 1024 * 1024 * 1024;       // 磁盘余量：< 1GB 报警
 const NOTIFY_AFTER_STREAK = 3;                   // 连续失败到第 3 次才通知
 // 两个本机探测必须带超时（2026-10-01 审查）：原来一次 fetch 用 undici 的默认上限（约 5 分钟），
@@ -30,6 +33,28 @@ function saveState(dataDir, state) {
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, file);
+}
+
+/** Agent 是否处于暂停态（runtime.paused 持久化在 config.json；读不到按未暂停）。 */
+function readRuntimePaused(dataDir) {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(dataDir, 'config.json'), 'utf8'));
+    return cfg?.runtime?.paused === true;
+  } catch {
+    return false;
+  }
+}
+
+/** 当日预算是否"已用尽且策略为 degrade"（此时编排器按设计保留未读，不该报停滞）。 */
+function readBudgetDegraded(dataDir) {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(dataDir, 'config.json'), 'utf8'));
+    const usage = JSON.parse(fs.readFileSync(path.join(dataDir, 'usage-today.json'), 'utf8'));
+    const status = budgetStatus(cfg, usage);
+    return status.exceeded && status.onExceed === 'degrade';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -92,9 +117,20 @@ export async function runHealthCheck(opts = {}) {
   //   要么决定不回并标记已读（state='acked'），补课窗口外的入库时更是直接 acked —— 两者都算
   //   "处理过"。time-gate 的 held（故意延迟）和发送失败重试的 backoff（available_at 在未来）
   //   也都不是卡住。所以真正的故障信号只剩一个：**有消息到期了却一直停在 pending**——管道死掉
-  //   才会出现这种堆积（STUCK_INBOUND_MS 宽限覆盖一轮正常运行与一次退避重试）。
+  //   才会出现这种堆积。
+  // - 三种"故意不处理"要显式豁免（2026-10-02 复审补）：① 观察模式；② Agent 已暂停
+  //   （orchestrator 在 paused 时直接 return，消息留在 pending）；③ 当日预算用尽且
+  //   onExceed='degrade'（文档化行为："保留未读，被 @ 或跨日再处理"）。没有这三条豁免，
+  //   暂停一天或预算超限的部署会被误报成"收发停滞"。
+  // - STUCK_INBOUND_MS 取 60 分钟：pacing（自主节奏）下消息被设计为等待
+  //   minWake~maxSilence 分钟（默认 20、上限 45）才统一处理，30 分钟宽限会把 paced 消息
+  //   误判成卡住；60 分钟覆盖 pacing 上限 + 一轮宽限。
   if (mode === 'observe') {
     add('outbound-freshness', true, '跳过（observe 模式不发消息）');
+  } else if (readRuntimePaused(dataDir)) {
+    add('outbound-freshness', true, '跳过（Agent 已暂停，消息按设计留在未读）');
+  } else if (readBudgetDegraded(dataDir)) {
+    add('outbound-freshness', true, '跳过（当日预算已用尽且策略为 degrade：保留未读是设计行为）');
   } else {
     try {
       const db = openDatabase(path.join(dataDir, 'messages.sqlite'), { readOnly: true });
@@ -126,12 +162,12 @@ export async function runHealthCheck(opts = {}) {
               `最近入站处理中（${Math.round(inAge / 60000)} 分钟前收到；出站距今 ${Math.round(outAge / 60000)} 分钟）`);
           } else {
             add('outbound-freshness', true,
-              `最近入站均已处理（最后一条距今 ${Math.round(inAge / 60000)} 分钟；出站距今 ${Math.round(outAge / 60000)} 分钟）`);
+              `最近入站没有到期未处理的（最后一条距今 ${Math.round(inAge / 60000)} 分钟；出站距今 ${Math.round(outAge / 60000)} 分钟）`);
           }
         }
       } finally { db.close(); }
     } catch (error) {
-      add('outbound-freshness', false, `出站水位读不了: ${error?.message ?? error}`);
+      add('outbound-freshness', false, `入站处理水位读不了: ${error?.message ?? error}`);
     }
   }
 

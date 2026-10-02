@@ -1809,6 +1809,17 @@ try {
   console.log('  ' + (cardRemoved ? 'OK   ' : 'FAIL ')
     + '传入卡片节点时直接摘除节点（不整页重渲染）');
 
+  // 摘除守卫：条目已不在本地列表时（并发删除 / 中途刷新过）不再减计数 ——
+  // 防与 SSE 路径双重扣减（2026-10-02 复审）。
+  vm.runInContext('state.assetOverview = { stickers: { total: 5 } }; state.assetDetail = { entries: [{ id: "other-1" }] };', ctx);
+  const pendingGuard = ctx.deleteAsset('stickers', { id: 'ghost-1' }, { remove: () => {} });
+  await answerLatestConfirmation(true);
+  await pendingGuard;
+  const noDoubleDec = vm.runInContext('state.assetOverview.stickers.total === 5', ctx);
+  noDoubleDec ? pass++ : fail++;
+  console.log('  ' + (noDoubleDec ? 'OK   ' : 'FAIL ')
+    + '条目不在本地列表时不再减计数（防双重扣减）');
+
   // SSE 广播的 delete 事件必须就地过滤（幂等）：自己的删除本地已处理过，SSE 再来一条
   // 同样的 delete 不能把状态清空重拉 —— 那是"整页刷新"的另一半根因（2026-10-02）。
   ctx.connectSSE();

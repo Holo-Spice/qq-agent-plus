@@ -1899,7 +1899,7 @@ AccuracySec=1min
 WantedBy=timers.target
 `;
   const healthService = `[Unit]
-# 每 5 分钟巡检一次 Agent 健康（改进方案 C8/#7）：控制台/OneBot/出站水位/磁盘/
+# 每 5 分钟巡检一次 Agent 健康（改进方案 C8/#7）：控制台/OneBot/入站处理水位/磁盘/
 # 自动更新状态/部署中断标记/sqlite 完整性；连续 3 次失败才给管理员发 QQ 私聊。
 # 由 node src/ops.js install-timers 生成；路径按实际部署改。
 Description=QQ Agent health probe
