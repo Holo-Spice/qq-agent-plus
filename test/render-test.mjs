@@ -1732,6 +1732,8 @@ try {
   };
   const guardPins = wrapCount >= 5 && wrapCount === finishCount
     && featuresSrc.includes("const inFlight = { kind, id: String(entry.id ?? entry.userId ?? '') };")
+    && featuresSrc.includes('state.assetDeleteInFlight = inFlight;')
+    && featuresSrc.includes('if (state.assetDeleteInFlight === inFlight) state.assetDeleteInFlight = null;')
     && guardHit('asset-update') && guardHit('identity-pilot-update');
   guardPins ? pass++ : fail++;
   console.log('  ' + (guardPins ? 'OK   ' : 'FAIL ')
@@ -1887,6 +1889,20 @@ try {
   remoteOk ? pass++ : fail++;
   console.log('  ' + (remoteOk ? 'OK   ' : 'FAIL ')
     + '清掉在途标记后同一事件正常就地摘除（别人的删除仍然同步）');
+
+  // 别人的黑话删除：条目就地摘除的同时概览计数也要减一（2026-10-02 复审：原先只减 stickers，
+  // 黑话列表少一条而汇总卡的数字还挂着旧的）
+  vm.runInContext(
+    'state.tab = "assets"; state.assetDetail = { entries: [{ id: "slang-1" }, { id: "slang-2" }] };'
+    + 'state.assetOverview = { slang: { total: 7 } };', ctx);
+  for (const fn of sseRegistry['asset-update'] || []) {
+    await fn({ data: JSON.stringify({ kind: 'slang', action: 'delete', id: 'slang-1' }) });
+  }
+  const slangSync = vm.runInContext(
+    'state.assetOverview.slang.total === 6 && state.assetDetail.entries.length === 1', ctx);
+  slangSync ? pass++ : fail++;
+  console.log('  ' + (slangSync ? 'OK   ' : 'FAIL ')
+    + 'SSE 黑话删除就地过滤并同步概览计数（汇总卡不留旧数字）');
 
   // 本地写入在途（编辑/新增保存）时，asset-update 回声一律跳过 —— 防"保存后双重重渲染"
   vm.runInContext(

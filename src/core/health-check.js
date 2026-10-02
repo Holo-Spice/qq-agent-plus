@@ -124,7 +124,18 @@ export async function runHealthCheck(opts = {}) {
   //   暂停一天或预算超限的部署会被误报成"收发停滞"。
   // - STUCK_INBOUND_MS 取 60 分钟：pacing（自主节奏）下消息被设计为等待
   //   minWake~maxSilence 分钟（默认 20、上限 45）才统一处理，30 分钟宽限会把 paced 消息
-  //   误判成卡住；60 分钟覆盖 pacing 上限 + 一轮宽限。
+  //   误判成卡住；60 分钟覆盖 pacing 上限 + 一轮宽限。注意：maxSilenceMinutes 若手工改到
+  //   > 60，这里要同步调大，否则 paced 消息会被误报（控制台不暴露该键）。
+  // - 2026-10-02 复审补 P1：**failed（重试耗尽）也算"没被处理"**。模型网关整体打挂时，
+  //   消息会在十几秒内被三次重试耗尽、全部转 failed（这类行只有控制台手动 retry-failed 才会
+  //   复活），出站随之中断 —— 只看 pending 会把这种"进程活着但完全答不了话"静默漏报。
+  //   failed 只认**发生在最后一次成功出站之后**的：偶发单条失败而 bot 之后还能正常说话，
+  //   不算链路停滞；生产库里两周前的旧 failed 也落在观察窗口外，不追打。
+  //   已知边界：发送结果待确认（held / outbox sending|unknown）的批次不在判据内 ——
+  //   那条链路由控制台的"待核对"流程人工兜底，暂不并入自动告警（避免与 time-gate 的
+  //   故意延迟混淆）。
+  // - 也因此不再用"还没有出站记录"提前放行：从未成功发过消息的部署，只要入站到期未处理
+  //   同样要报（原先这条早退会让"模型没配/从未发出"的部署永远绿）。
   if (mode === 'observe') {
     add('outbound-freshness', true, '跳过（observe 模式不发消息）');
   } else if (readRuntimePaused(dataDir)) {
@@ -139,30 +150,38 @@ export async function runHealthCheck(opts = {}) {
         const inbound = db.prepare('SELECT max(ts) AS m FROM messages WHERE self=0').get();
         const outAge = out === undefined || out.m === null ? null : now - Number(out.m);
         const inAge = inbound === undefined || inbound.m === null ? null : now - Number(inbound.m);
-        if (outAge === null) {
-          add('outbound-freshness', true, '跳过（还没有出站消息记录）');
-        } else if (inAge === null) {
+        if (inAge === null) {
           add('outbound-freshness', true, '静默期：还没有入站消息记录（没有人在说话，出站为空属正常）');
         } else if (inAge > outboundStaleMs) {
           add('outbound-freshness', true, `静默期：最近一次入站距今 ${Math.round(inAge / 60000)} 分钟（超过 ${Math.round(outboundStaleMs / 60000)} 分钟没人说话，出站为空属正常）`);
         } else {
-          // 卡住的判据：self=0、仍停在 pending、**已到期**（max(ts, available_at) 已过宽限线
-          // —— available_at 在未来的是显式排期/退避重试，不是卡住）、且落在观察窗口内
-          // （窗口外的历史遗留 pending 不追打）。held 不在 pending 里，天然不算。
+          // 卡住的入站 = 到期仍未处理，两类：① pending 且已到期（max(ts, available_at) 过
+          // 宽限线 —— available_at 在未来的是显式排期/退避重试，不是卡住；held 天然不算）；
+          // ② failed（重试耗尽）且发生在最后一次成功出站之后（见上方注释的取舍）。
+          // 两类都限定在观察窗口内：窗口外的历史遗留不追打。
+          const lastOutTs = outAge === null ? 0 : now - outAge;
           const stuck = db.prepare(
-            "SELECT count(*) AS c, min(ts) AS oldest FROM messages" +
-            " WHERE self=0 AND state='pending' AND max(ts, available_at) <= ? AND ts > ?"
-          ).get(now - STUCK_INBOUND_MS, now - outboundStaleMs);
-          if (stuck.c > 0) {
+            "SELECT" +
+            " COALESCE(SUM(state='pending'),0) AS pendingCount," +
+            " COALESCE(SUM(state='failed' AND ts > ?),0) AS failedCount," +
+            " min(ts) AS oldest" +
+            " FROM messages" +
+            " WHERE self=0 AND ts > ? AND max(ts, available_at) <= ?" +
+            "   AND (state='pending' OR (state='failed' AND ts > ?))"
+          ).get(lastOutTs, now - outboundStaleMs, now - STUCK_INBOUND_MS, lastOutTs);
+          const stuckCount = Number(stuck.pendingCount || 0) + Number(stuck.failedCount || 0);
+          const outDetail = outAge === null ? '；还没有出站记录' : `；出站距今 ${Math.round(outAge / 60000)} 分钟`;
+          if (stuckCount > 0) {
             add('outbound-freshness', false,
-              `有 ${stuck.c} 条入站消息到期超过 ${Math.round(STUCK_INBOUND_MS / 60000)} 分钟未被处理` +
+              `有 ${stuckCount} 条入站消息到期超过 ${Math.round(STUCK_INBOUND_MS / 60000)} 分钟未被处理` +
+              (Number(stuck.failedCount) > 0 ? `（其中 ${stuck.failedCount} 条重试已耗尽）` : '') +
               `（最早一条距今 ${Math.round((now - Number(stuck.oldest)) / 60000)} 分钟）—— 收发链路可能停滞`);
           } else if (inAge < STUCK_INBOUND_MS) {
             add('outbound-freshness', true,
-              `最近入站处理中（${Math.round(inAge / 60000)} 分钟前收到；出站距今 ${Math.round(outAge / 60000)} 分钟）`);
+              `最近入站处理中（${Math.round(inAge / 60000)} 分钟前收到${outDetail}）`);
           } else {
             add('outbound-freshness', true,
-              `最近入站没有到期未处理的（最后一条距今 ${Math.round(inAge / 60000)} 分钟；出站距今 ${Math.round(outAge / 60000)} 分钟）`);
+              `最近入站没有到期未处理的（最后一条距今 ${Math.round(inAge / 60000)} 分钟${outDetail}）`);
           }
         }
       } finally { db.close(); }

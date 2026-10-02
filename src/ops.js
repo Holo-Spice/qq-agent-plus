@@ -2031,8 +2031,9 @@ const HELP = {
   'health-check': `用法: node src/ops.js health-check [--confirm]
 
 一次性健康巡检并输出 JSON（退出码 0=健康 / 1=有失败项）。检查：控制台 /healthz、
-OneBot get_status、出站消息水位（observe 模式自动跳过）、磁盘余量、自动更新状态、
-部署中断标记、messages 库完整性。结果落到 data/health.json。
+OneBot get_status、入站处理水位（到期未处理/重试耗尽的入站消息；observe / 暂停 /
+预算降级自动跳过）、磁盘余量、自动更新状态、部署中断标记、messages 库完整性。
+结果落到 data/health.json。
 
   --confirm  允许在"连续 3 次失败"或"恢复"时给 admin.ownerUin 发 QQ 私聊
              （不加只巡检、不发通知；状态仍会记录）。qq-agent-health.timer 用 --confirm。

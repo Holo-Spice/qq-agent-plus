@@ -48,3 +48,12 @@ test('deploy.sh 的 Node 低限与 package.json 的 engines 一致', () => {
   assert.ok(Number.isFinite(enginesMinor), `engines.node 应写 22.x：${pkg.engines?.node}`);
   assert.equal(Number(m[1]), enginesMinor, 'deploy.sh 的 Node 低限要与 package.json 的 engines 同步');
 });
+
+test('package-lock.json 根条目的 engines 与 package.json 一致', () => {
+  // 2026-10-02 复审：地板从 22.13 抬到 22.19 时漏了 lockfile 的根条目（npm ci 不校验根
+  // engines，CI 不会报；但两边元数据对账必须一致，否则下次 npm install 重写时又会漂）。
+  const lock = JSON.parse(fs.readFileSync(path.join(repo, 'package-lock.json'), 'utf8'));
+  const lockFloor = lock?.packages?.['']?.engines?.node;
+  assert.ok(lockFloor, 'package-lock 根条目应有 engines.node（结构变了就更新这条用例）');
+  assert.equal(lockFloor, pkg.engines?.node, 'lockfile 根 engines 要与 package.json 保持一致');
+});

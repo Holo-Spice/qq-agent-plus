@@ -799,11 +799,15 @@ function connectSSE() {
         };
         removed = state.assetDetail.entries.length !== before;
       }
-      if (removed && payload.kind === 'stickers'
-        && state.assetOverview?.stickers && typeof state.assetOverview.stickers.total === 'number') {
-        state.assetOverview.stickers.total = Math.max(0, state.assetOverview.stickers.total - 1);
+      if (removed) {
+        // 概览计数就地减一：汇总卡渲染的是 stickers.total / slang.total，不跟着减的话
+        // 列表少一条而卡片还挂着旧数字（2026-10-02 复审：原先只减 stickers）。
+        const bucket = state.assetOverview?.[payload.kind];
+        if (bucket && typeof bucket.total === 'number') {
+          bucket.total = Math.max(0, bucket.total - 1);
+        }
+        renderAssetObservatory();
       }
-      if (removed) renderAssetObservatory();
       return;
     }
     state.assetOverview = null;

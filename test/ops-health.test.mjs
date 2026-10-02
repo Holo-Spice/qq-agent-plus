@@ -10,7 +10,7 @@ const { runHealthCheck } = await import('../src/core/health-check.js');
 const { openDatabase } = await import('../src/core/sqlite.js');
 const { readOwnerUin } = await import('../src/core/notify-owner.js');
 
-function makeDataDir({ withDb = true, withUpdaterState = false, withMarker = false, outboundAgoMs = 0, inboundAgoMs = 0, inboundState = 'pending', inboundAvailableInMs = null, runtimePaused = false, budgetDegraded = false } = {}) {
+function makeDataDir({ withDb = true, withUpdaterState = false, withMarker = false, outboundAgoMs = 0, inboundAgoMs = 0, inboundState = 'pending', inboundAvailableInMs = null, runtimePaused = false, budgetDegraded = false, extraInbound = null } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-health-'));
   if (runtimePaused || budgetDegraded) {
     fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
@@ -32,13 +32,21 @@ function makeDataDir({ withDb = true, withUpdaterState = false, withMarker = fal
       available_at INTEGER NOT NULL DEFAULT 0, error TEXT
     )`);
     const now = Date.now();
-    db.prepare('INSERT INTO messages (chat_key, id, ts, text, self) VALUES (?, ?, ?, ?, 1)').run('group:1', 1, now - outboundAgoMs, 'hi');
+    // outboundAgoMs = null 表示"库里从来没有出站记录"（模型未配/从未成功发出的部署）
+    if (outboundAgoMs !== null) {
+      db.prepare('INSERT INTO messages (chat_key, id, ts, text, self) VALUES (?, ?, ?, ?, 1)').run('group:1', 1, now - outboundAgoMs, 'hi');
+    }
     // inboundAgoMs = null 表示"库里从来没有入站记录"；
     // inboundAvailableInMs = null 表示 available_at=0（真实入库的默认值：立即到期）
     if (inboundAgoMs !== null) {
       const availableAt = inboundAvailableInMs === null ? 0 : now + inboundAvailableInMs;
       db.prepare('INSERT INTO messages (chat_key, id, ts, text, self, state, available_at) VALUES (?, ?, ?, ?, 0, ?, ?)')
         .run('group:1', 2, now - inboundAgoMs, '有人吗', inboundState, availableAt);
+    }
+    // 额外的历史入站行（例如"窗口外的旧 failed 不追打"用例）
+    if (extraInbound) {
+      db.prepare('INSERT INTO messages (chat_key, id, ts, text, self, state, available_at) VALUES (?, ?, ?, ?, 0, ?, ?)')
+        .run('group:1', 3, now - extraInbound.agoMs, '旧消息', extraInbound.state, 0);
     }
     db.close();
   }
@@ -110,6 +118,62 @@ test('active 模式：pacing 窗口内的 pending（55 分钟）→ 不算故障
   const dir = makeDataDir({ outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 55 * 60 * 1000 });
   const r = await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null });
   assert.equal(r.checks.find((c) => c.name === 'outbound-freshness').ok, true);
+});
+
+test('active 模式：重试耗尽的 failed 入站（末次成功出站之前）→ 失败（模型网关全挂的漏报回归）', async () => {
+  // 2026-10-02 复审 P1：网关整体打挂时消息在十几秒内被三次重试耗尽 → state='failed'
+  // （这类行只有控制台手动 retry-failed 才复活），出站随之中断；只数 pending 的判据会静默漏报。
+  const dir = makeDataDir({ outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 70 * 60 * 1000, inboundState: 'failed' });
+  const r = await runHealthCheck({
+    dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null,
+    outboundStaleMs: 6 * 60 * 60 * 1000,
+  });
+  const item = r.checks.find((c) => c.name === 'outbound-freshness');
+  assert.equal(item.ok, false, 'failed 的入站到期未处理必须判失败');
+  assert.match(item.detail, /未被处理/);
+  assert.match(item.detail, /重试已耗尽/);
+});
+
+test('active 模式：failed 之后仍有成功出站 → 不算故障（偶发单条失败不告警）', async () => {
+  const dir = makeDataDir({ outboundAgoMs: 10 * 60 * 1000, inboundAgoMs: 70 * 60 * 1000, inboundState: 'failed' });
+  const r = await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null });
+  assert.equal(r.checks.find((c) => c.name === 'outbound-freshness').ok, true);
+});
+
+test('active 模式：观察窗口外的旧 failed 不追打', async () => {
+  // 生产库里真有 2026-09-17 的 failed 旧账（从未人工重试）—— 观察窗口 6 小时，旧账不参与判据
+  const dir = makeDataDir({
+    outboundAgoMs: 8 * 60 * 60 * 1000, inboundAgoMs: 10 * 60 * 1000, inboundState: 'acked',
+    extraInbound: { agoMs: 7 * 60 * 60 * 1000, state: 'failed' },
+  });
+  const r = await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null });
+  assert.equal(r.checks.find((c) => c.name === 'outbound-freshness').ok, true);
+});
+
+test('active 模式：从未有出站记录 → 到期未处理照报、新鲜入站不误报、无入站仍是静默期', async () => {
+  // 2026-10-02 复审 P2：原先 outAge===null 直接放行（"跳过（还没有出站消息记录）"），
+  // 模型未配 / 从未成功发出的部署会永远绿。
+  const stuck = makeDataDir({ outboundAgoMs: null, inboundAgoMs: 70 * 60 * 1000 });
+  const stuckRun = await runHealthCheck({
+    dataDir: stuck, fetchImpl: okFetch, statfs: okStatfs, notify: null,
+    outboundStaleMs: 6 * 60 * 60 * 1000,
+  });
+  const stuckItem = stuckRun.checks.find((c) => c.name === 'outbound-freshness');
+  assert.equal(stuckItem.ok, false);
+  assert.match(stuckItem.detail, /未被处理/);
+
+  const fresh = makeDataDir({ outboundAgoMs: null, inboundAgoMs: 10 * 60 * 1000 });
+  const freshRun = await runHealthCheck({ dataDir: fresh, fetchImpl: okFetch, statfs: okStatfs, notify: null });
+  const freshItem = freshRun.checks.find((c) => c.name === 'outbound-freshness');
+  assert.equal(freshItem.ok, true);
+  assert.match(freshItem.detail, /处理中/);
+  assert.match(freshItem.detail, /还没有出站记录/);
+
+  const empty = makeDataDir({ outboundAgoMs: null, inboundAgoMs: null });
+  const emptyRun = await runHealthCheck({ dataDir: empty, fetchImpl: okFetch, statfs: okStatfs, notify: null });
+  const emptyItem = emptyRun.checks.find((c) => c.name === 'outbound-freshness');
+  assert.equal(emptyItem.ok, true);
+  assert.match(emptyItem.detail, /静默期/);
 });
 
 test('active 模式：Agent 已暂停 → 跳过本项（消息按设计留在未读）', async () => {

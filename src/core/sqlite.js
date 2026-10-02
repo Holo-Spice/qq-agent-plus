@@ -19,7 +19,7 @@ export function assertSqliteAvailable() {
   if (nodeSqlite) return;
   const reason = loadError?.message ?? loadError;
   throw new Error(
-    '当前 Node 不支持 node:sqlite（需要 >= 22.13 且未禁用实验 API）。'
+    '当前 Node 不支持 node:sqlite（需要 >= 22.19 且未禁用实验 API）。'
     + `加载失败原因：${reason ?? '未知'}。请升级 Node，或改用 deploy.sh 安装的 .runtime 运行时。`
   );
 }
