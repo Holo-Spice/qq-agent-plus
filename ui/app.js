@@ -29,7 +29,7 @@ import { pendingSessionDetail, refreshIntervalMs, startUpdateProgressTicker, sta
 import { loadChats } from './pages/chat.js';
 import {
   loadAssetObservatory, loadExperimentalFeatureStatuses, loadFriendOpportunities, loadFriendProposals,
-  loadIncomingFriendRequests, loadSlangFeaturePage, renderFriendFeaturePageImpl,
+  loadIncomingFriendRequests, loadSlangFeaturePage, renderAssetObservatory, renderFriendFeaturePageImpl,
   renderIdentityFeaturePageImpl, renderIncidentFeaturePageImpl
 } from './pages/features.js';
 import { loadMemoryView, renderMemoryList } from './pages/memory.js';
@@ -770,8 +770,38 @@ function connectSSE() {
   es.addEventListener('onebot-status', () => {
     refreshStatus();
   });
-  es.addEventListener('asset-update', () => {
+  es.addEventListener('asset-update', (event) => {
     if (state.tab !== 'assets') return;
+    // delete 事件就地摘除（2026-10-02）：deleteAsset 已经在本地把条目和卡片摘掉了，
+    // 这里若再走"清空 + 重拉"，整格缩略图会重闪一遍、滚动位置丢失 —— 用户看到的
+    // 就是"删一张图整页刷新"。就地过滤是幂等的：自己的删除过滤后一无所获（不重渲染、
+    // 不重复减计数），别人的删除才真的摘掉一条并重渲染。
+    let payload = {};
+    try { payload = JSON.parse(event.data || '{}'); } catch { /* 兼容空载荷 */ }
+    // 在途守卫：服务端先广播 SSE、后回 DELETE 响应，自己的删除事件会比本地摘除先到。
+    // 这条必须跳过，交给 deleteAsset 的本地流程收尾 —— 否则会提前整格重渲染（缩略图全部
+    // 重闪、看起来像整页刷新）并把概览计数减两次（2026-10-02 用户实测「等好久才消失」）。
+    if (payload.action === 'delete' && state.assetDeleteInFlight
+      && state.assetDeleteInFlight.kind === payload.kind
+      && state.assetDeleteInFlight.id === String(payload.id ?? '')) return;
+    if (payload.action === 'delete' && (payload.kind === 'stickers' || payload.kind === 'slang')) {
+      let removed = false;
+      if (state.assetDetail && Array.isArray(state.assetDetail.entries)) {
+        const key = String(payload.id ?? '');
+        const before = state.assetDetail.entries.length;
+        state.assetDetail = {
+          ...state.assetDetail,
+          entries: state.assetDetail.entries.filter((item) => String(item.id ?? '') !== key),
+        };
+        removed = state.assetDetail.entries.length !== before;
+      }
+      if (removed && payload.kind === 'stickers'
+        && state.assetOverview?.stickers && typeof state.assetOverview.stickers.total === 'number') {
+        state.assetOverview.stickers.total = Math.max(0, state.assetOverview.stickers.total - 1);
+      }
+      if (removed) renderAssetObservatory();
+      return;
+    }
     state.assetOverview = null;
     state.assetDetail = null;
     loadAssetObservatory();

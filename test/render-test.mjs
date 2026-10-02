@@ -1808,6 +1808,55 @@ try {
   cardRemoved ? pass++ : fail++;
   console.log('  ' + (cardRemoved ? 'OK   ' : 'FAIL ')
     + '传入卡片节点时直接摘除节点（不整页重渲染）');
+
+  // SSE 广播的 delete 事件必须就地过滤（幂等）：自己的删除本地已处理过，SSE 再来一条
+  // 同样的 delete 不能把状态清空重拉 —— 那是"整页刷新"的另一半根因（2026-10-02）。
+  ctx.connectSSE();
+  vm.runInContext('state.tab = "assets"; state.assetDetail = { entries: [{ id: "sticker-1" }, { id: "sticker-2" }] };', ctx);
+  for (const fn of sseRegistry['asset-update'] || []) {
+    await fn({ data: JSON.stringify({ kind: 'stickers', action: 'delete', id: 'sticker-1' }) });
+  }
+  const sseState = vm.runInContext(
+    '({ overview: !!state.assetOverview, ids: state.assetDetail.entries.map((e) => e.id).join(",") })', ctx);
+  const sseOk = sseState.overview && sseState.ids === 'sticker-2';
+  sseOk ? pass++ : fail++;
+  console.log('  ' + (sseOk ? 'OK   ' : 'FAIL ')
+    + `SSE delete 事件就地过滤（概览保留=${sseState.overview}，剩余=${sseState.ids || '空'}，不整页重拉）`);
+  for (const fn of sseRegistry['asset-update'] || []) {
+    await fn({ data: JSON.stringify({ kind: 'stickers', action: 'delete', id: 'sticker-1' }) });
+  }
+  // 空值保护：旧行为会把 assetDetail 清成 null，这里要让断言明确变红而不是让整个
+  // 测试进程崩溃（崩了反而看不清是哪条行为被改坏）。
+  const sseIdempotent = vm.runInContext(
+    '!state.assetDetail || (state.assetDetail.entries.map((e) => e.id).join(",") === "sticker-2" && !!state.assetOverview)', ctx);
+  sseIdempotent ? pass++ : fail++;
+  console.log('  ' + (sseIdempotent ? 'OK   ' : 'FAIL ')
+    + 'SSE delete 重复派发幂等（自己的删除不会被二次处理）');
+
+  // SSE 先于 DELETE 响应到达的竞态：自己正在删除的条目，SSE 事件必须被在途守卫跳过
+  // （否则本地摘除前就整格重渲染 + 概览计数减两次 ——「等好久才消失」，2026-10-02 实测）。
+  vm.runInContext(
+    'state.assetDeleteInFlight = { kind: "stickers", id: "sticker-9" };'
+    + 'state.assetDetail = { entries: [{ id: "sticker-9" }] };'
+    + 'state.assetOverview = { stickers: { total: 10 } };', ctx);
+  for (const fn of sseRegistry['asset-update'] || []) {
+    await fn({ data: JSON.stringify({ kind: 'stickers', action: 'delete', id: 'sticker-9' }) });
+  }
+  const raceOk = vm.runInContext(
+    'state.assetOverview.stickers.total === 10 && state.assetDetail.entries.length === 1', ctx);
+  raceOk ? pass++ : fail++;
+  console.log('  ' + (raceOk ? 'OK   ' : 'FAIL ')
+    + 'SSE delete 撞上在途删除被跳过（不提前重渲染、不重复减计数）');
+  // 清掉在途标记后，同一事件应正常就地摘除（别人的删除同步路径仍然有效）
+  vm.runInContext('state.assetDeleteInFlight = null;', ctx);
+  for (const fn of sseRegistry['asset-update'] || []) {
+    await fn({ data: JSON.stringify({ kind: 'stickers', action: 'delete', id: 'sticker-9' }) });
+  }
+  const remoteOk = vm.runInContext(
+    'state.assetOverview.stickers.total === 9 && state.assetDetail.entries.length === 0', ctx);
+  remoteOk ? pass++ : fail++;
+  console.log('  ' + (remoteOk ? 'OK   ' : 'FAIL ')
+    + '清掉在途标记后同一事件正常就地摘除（别人的删除仍然同步）');
   sandbox.fetch = originalFetch;
 
   vm.runInContext(`state.autoUpdateStatus = ${JSON.stringify({

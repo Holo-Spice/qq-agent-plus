@@ -529,46 +529,55 @@ async function deleteAsset(kind, entry, cardEl = null) {
     path = '/api/assets/memory';
     body = { ...body, chatKey: entry.chatKey, userId: entry.userId };
   }
+  // 删除在途标记：服务端是「先广播 SSE、后回 HTTP 响应」，SSE 的 delete 事件会比
+  // 本响应先到 —— 若不挡住，asset-update 监听器会在这里的本地摘除完成前触发
+  // 整格重渲染（缩略图全部重闪）并把概览计数减两次（2026-10-02 用户实测「等好久才消失」）。
+  const inFlight = (kind === 'stickers' || kind === 'slang')
+    ? { kind, id: String(entry.id ?? '') }
+    : null;
+  state.assetDeleteInFlight = inFlight;
   try {
     const result = await api(path, { method: 'DELETE', body: JSON.stringify(body) });
-    // 就地摘除（2026-10-02 用户反馈）：重拉整页会把缩略图全部重闪一遍、滚动位置被顶回去，
-    // 看起来就像整页刷新。stickers 改为：本地状态摘掉这一条 + 概览计数就地减一 + 直接移除
-    // 卡片节点 —— 不重拉接口、不重渲染网格，剩下的图纹丝不动；拿不到卡片节点才退回重渲染。
-    // 其余类别维持重拉路径。
-    const scrollY = window.scrollY ?? 0;
-    if (kind === 'stickers') {
-      if (state.assetDetail && Array.isArray(state.assetDetail.entries)) {
-        const deletedKey = String(entry.id ?? '');
-        state.assetDetail = {
-          ...state.assetDetail,
-          entries: state.assetDetail.entries.filter((item) => String(item.id ?? '') !== deletedKey),
-        };
-      }
-      if (state.assetOverview?.stickers && typeof state.assetOverview.stickers.total === 'number') {
-        state.assetOverview.stickers.total = Math.max(0, state.assetOverview.stickers.total - 1);
-      }
-      if (cardEl && typeof cardEl.remove === 'function') {
-        cardEl.remove();
-        const countEl = document.querySelector('.asset-summary-item[data-asset-kind="stickers"] strong');
-        if (countEl) countEl.textContent = fmtTok(state.assetOverview?.stickers?.total ?? 0);
+      // 就地摘除（2026-10-02 用户反馈）：重拉整页会把缩略图全部重闪一遍、滚动位置被顶回去，
+      // 看起来就像整页刷新。stickers 改为：本地状态摘掉这一条 + 概览计数就地减一 + 直接移除
+      // 卡片节点 —— 不重拉接口、不重渲染网格，剩下的图纹丝不动；拿不到卡片节点才退回重渲染。
+      // 其余类别维持重拉路径。
+      const scrollY = window.scrollY ?? 0;
+      if (kind === 'stickers') {
+        if (state.assetDetail && Array.isArray(state.assetDetail.entries)) {
+          const deletedKey = String(entry.id ?? '');
+          state.assetDetail = {
+            ...state.assetDetail,
+            entries: state.assetDetail.entries.filter((item) => String(item.id ?? '') !== deletedKey),
+          };
+        }
+        if (state.assetOverview?.stickers && typeof state.assetOverview.stickers.total === 'number') {
+          state.assetOverview.stickers.total = Math.max(0, state.assetOverview.stickers.total - 1);
+        }
+        if (cardEl && typeof cardEl.remove === 'function') {
+          cardEl.remove();
+          const countEl = document.querySelector('.asset-summary-item[data-asset-kind="stickers"] strong');
+          if (countEl) countEl.textContent = fmtTok(state.assetOverview?.stickers?.total ?? 0);
+        } else {
+          renderAssetObservatory();
+        }
+      } else if (state.tab === 'identity') {
+        state.assetOverview = null;
+        state.assetDetail = null;
+        await loadIdentityFeaturePage();
       } else {
-        renderAssetObservatory();
+        await loadAssetObservatory();
       }
-    } else if (state.tab === 'identity') {
-      state.assetOverview = null;
-      state.assetDetail = null;
-      await loadIdentityFeaturePage();
-    } else {
-      await loadAssetObservatory();
+      window.scrollTo?.(0, scrollY);
+      if (result?.cleanupPending) {
+        alert(result.warning || '资产已删除，但图片文件仍待清理');
+      }
+    } catch (error) {
+      alert(`删除失败：${error.message}`);
+    } finally {
+      if (state.assetDeleteInFlight === inFlight) state.assetDeleteInFlight = null;
     }
-    window.scrollTo?.(0, scrollY);
-    if (result?.cleanupPending) {
-      alert(result.warning || '资产已删除，但图片文件仍待清理');
-    }
-  } catch (error) {
-    alert(`删除失败：${error.message}`);
   }
-}
 
 function renderAssetObservatory() {
   const box = $('#asset-page');
@@ -1449,6 +1458,6 @@ async function loadExperimentalFeatureStatuses() {
 
 export {
   loadAssetObservatory, loadExperimentalFeatureStatuses, loadFriendOpportunities, loadFriendProposals,
-  loadIncomingFriendRequests, loadSlangFeaturePage, renderFriendFeaturePageImpl,
+  loadIncomingFriendRequests, loadSlangFeaturePage, renderAssetObservatory, renderFriendFeaturePageImpl,
   renderIdentityFeaturePageImpl, renderIncidentFeaturePageImpl
 };
