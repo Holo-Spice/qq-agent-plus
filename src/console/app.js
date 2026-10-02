@@ -4149,7 +4149,8 @@ function buildSessionView(s, store, options = {}) {
 //      用量统计不是实时数据，20 秒的新鲜度完全够用。
 //      另外前端还有一层：切过去先用上次数据立即渲染，不等网络。
 const usageRowsCache = { key: '', at: 0, rows: null, win: null };
-const USAGE_CACHE_TTL_MS = 20000;
+const USAGE_CACHE_TTL_MS = 60000;   // 2026-10-02：20 秒 → 60 秒，打开用量页大多命中缓存；
+                                    // 新会话最多晚 1 分钟进统计，换来不再每次打开都全量扫描
 
 /** 目录快照：文件数 + 目录 mtime。成本低（一次 stat），足以捕捉增删。 */
 function sessionsDirSignature() {
@@ -4180,6 +4181,10 @@ function collectUsageRows({ range }) {
   const dir = path.join(DATA_DIR, 'sessions');
   let files = [];
   try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { return { rows: [], win, searchCount: 0, toolCounts: {} }; }
+  // mtime 预筛（2026-10-02）：窗口外的会话文件不必读 —— 749 个文件全读 + parse 约 1 秒，
+  // 是"用量页打开要等一秒"的主因。会话文件的写入发生在运行期内/之后，mtime 只会晚于
+  // startedAt，留 6 小时余量后按 mtime 跳过窗口外文件是安全的。
+  const mtimeFloor = Number(win.start) > 0 ? Number(win.start) - 6 * 60 * 60 * 1000 : 0;
 
   const rows = [];
   // 会话级计数：搜索次数、各工具的调用次数。
@@ -4190,8 +4195,12 @@ function collectUsageRows({ range }) {
   const toolCounts = Object.create(null);
 
   for (const f of files) {
+    const filePath = path.join(dir, f);
+    if (mtimeFloor > 0) {
+      try { if (fs.statSync(filePath).mtimeMs < mtimeFloor) continue; } catch { continue; }
+    }
     let s;
-    try { s = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch { continue; }
+    try { s = JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch { continue; }
     const started = Number(s.startedAt) || 0;
     if (!started) continue;
 
