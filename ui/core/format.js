@@ -7,7 +7,7 @@
 // 控制台标识头：证明请求来自本控制台页面，而非外部网页冒用浏览器。
 // 带自定义头的请求必须过 CORS 预检，天然挡住跨站脚本/表单的静默读取。
 
-import { ASR_SERVICES, MODEL_SERVICES_UI, STICKER_MAX_CHOICES } from './constants.js';
+import { ASR_SERVICES, MODEL_SERVICES_UI, STICKER_COLLECT_MAX_CHOICES, STICKER_MAX_CHOICES } from './constants.js';
 import { esc } from './dom.js';
 import { state } from './state.js';
 /** 数字加千分位（token 计数用）。 */
@@ -411,6 +411,23 @@ function stickerMaxSelectOptions(current) {
   return choices.map((n) => `<option value="${n}" ${n === value ? 'selected' : ''}>${n} 条</option>`).join('');
 }
 
+/**
+ * 每小时收藏上限归一化，与运行时读法一致（sticker-manager 是 max(1, n||10)：非正/坏值实际按 10）。
+ * 手改成 0 或 -1 时界面必须显示 10，否则保存一下就把用户的值改成别的。
+ */
+function normalizeStickerCollectMax(current) {
+  const n = Number(current);
+  if (!Number.isFinite(n) || n <= 0) return 10;
+  return Math.min(60, Math.max(1, Math.round(n)));
+}
+
+/** 收藏上限下拉项：固定档位 + 存量自定义值时补一项。 */
+function stickerCollectMaxSelectOptions(current) {
+  const value = normalizeStickerCollectMax(current);
+  const choices = [...new Set([...STICKER_COLLECT_MAX_CHOICES, value])].sort((a, b) => a - b);
+  return choices.map((n) => `<option value="${n}" ${n === value ? 'selected' : ''}>${n} 张/小时</option>`).join('');
+}
+
 /** 服务预设下方的初始说明：与默认选中项一致（能认出当前地址就显示那家的说明）。 */
 function initialServiceNote(c) {
   const matched = uiServiceOfUrl(c.api?.baseUrl);
@@ -607,7 +624,8 @@ export {
   fmtRemainingMs, fmtTime, fmtTok, fmtTokens, fmtWaitRemain, fmtYuan, formatChatTitle, formatElapsed,
   formatReleaseNotes, formatRevision, groupSliderPosForUi, hasOwnPrice, hostOfUrl, initialServiceNote,
   legacyServiceDeployed, matchPriceTable, memThreshold, mulOf, normalizeAsrMax, normalizeStickerMax,
+  normalizeStickerCollectMax,
   onebotIssueText, onebotStatusLineHtml, paramActiveForProbability, parseList, priceTxt, segOfProbability,
   serviceTileState, serviceUrl, sliderDesc, sliderToTierUI, sliderToTierUI_tierToSlider,
-  stickerMaxSelectOptions, uiServiceOfUrl, versionWithRevision
+  stickerCollectMaxSelectOptions, stickerMaxSelectOptions, uiServiceOfUrl, versionWithRevision
 };

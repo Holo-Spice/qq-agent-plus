@@ -908,7 +908,7 @@ try {
   const chatHtml = ctx.renderChatSection({
     ...cfg,
     proactive: { ...cfg.proactive, followUpEnabled: false, selfWakeEnabled: false },
-    sticker: { ...cfg.sticker, promptMaxStickers: 24 }
+    sticker: { ...cfg.sticker, promptMaxStickers: 24, collectEnabled: false, autoCollect: false, maxCollectPerHour: 5 }
   });
   const openSwitchesOk = chatHtml.includes('id="cfg-proactive"')
     && chatHtml.includes('id="cfg-pro-followup"') && chatHtml.includes('id="cfg-pro-selfwake"')
@@ -929,6 +929,20 @@ try {
     && !/id="cfg-sticker-max"[^>]*type="number"/.test(defaultHtml);
   defaultOnOk ? pass++ : fail++;
   console.log('  ' + (defaultOnOk ? 'OK   ' : 'FAIL ') + '设置页：缺省开关勾选、清单条数默认 10 档且不再是输入框');
+  // 收藏三件套（2026-10-02 用户反馈"乱收藏"）：总闸/自动收藏默认勾选、上限默认 10 档；
+  // 关掉/自定义的存量值如实回显（不勾选、5 被选中）
+  const collectSelect = (html) => /<select id="cfg-sticker-collect-max">([\s\S]*?)<\/select>/.exec(html)?.[1] || '';
+  const collectUiOk = /id="cfg-sticker-collect"/.test(defaultHtml)
+    && /id="cfg-sticker-autocollect"/.test(defaultHtml)
+    && /id="cfg-sticker-collect"\s+checked/.test(defaultHtml)
+    && /id="cfg-sticker-autocollect"\s+checked/.test(defaultHtml)
+    && /<option value="10" selected>/.test(collectSelect(defaultHtml))
+    && !/id="cfg-sticker-collect"\s+checked/.test(chatHtml)
+    && !/id="cfg-sticker-autocollect"\s+checked/.test(chatHtml)
+    && /<option value="5" selected>/.test(collectSelect(chatHtml));
+  collectUiOk ? pass++ : fail++;
+  console.log('  ' + (collectUiOk ? 'OK   ' : 'FAIL ')
+    + '设置页：收藏总闸/自动收藏开关 + 每小时上限档位（存量值如实回显）');
   // 存量的超范围值（手改过 config.json 的 500）落到 60 档，不会渲染出 500 这种选项
   const overHtml = ctx.renderChatSection({ ...cfg, sticker: { ...cfg.sticker, promptMaxStickers: 500 } });
   const overOk = /<option value="60" selected>/.test(overHtml)
@@ -2986,7 +3000,11 @@ try {
       ['experiments', ['groupGame']],
       ['groupGame', ['groupGame']],
       ['moments', ['groupDigest']],
-      ['reminders', ['reminders']]
+      ['reminders', ['reminders']],
+      // 闲聊页（chat）是"控件最多的那页"：新加的收藏三件套就走这一段构造，
+      // 列全它写出的键，顺手把"贴纸键从 chat 段写出去"钉住。
+      ['chat', ['wakeDelayMinMs', 'wakeDelayMaxMs', 'wakeDelayMs', 'drainDelayMs', 'maxConcurrentRuns',
+        'conversation', 'send', 'proactive', 'sticker', 'store']]
     ];
     const allKeys = [...new Set(cases.flatMap(([, keys]) => keys))];
     const results = [];
@@ -3003,8 +3021,34 @@ try {
     const okBranch = results.every(([, , ok, leaked]) => ok && !leaked);
     okBranch ? pass++ : fail++;
     console.log('  ' + (okBranch ? 'OK   ' : 'FAIL ')
-      + '保存分支：asr→tts+imageGen / experiments→groupGame / moments→groupDigest'
+      + '保存分支：asr→tts+imageGen / experiments→groupGame / moments→groupDigest / chat→10 键'
       + (okBranch ? '' : ' -> ' + JSON.stringify(results)));
+  }
+
+  // 收藏三件套（2026-10-02 用户反馈）：控件状态要原样写进 sticker 配置 —— 只钉"sticker 键存在"
+  // 不够（分支用例里它本来就在），这里连值一起钉：总闸 false、自动收藏 true、上限 5。
+  {
+    const posts = [];
+    sandbox.fetch = async (path, opts = {}) => {
+      if (String(path).includes('/api/config') && String(opts.method || '').toUpperCase() === 'POST') {
+        try { posts.push(JSON.parse(opts.body || '{}')); } catch { /* 忽略 */ }
+      }
+      const cfgNow = JSON.parse(vm.runInContext('JSON.stringify(state.config || {})', ctx));
+      return { ok: true, status: 200, json: async () => ({ ok: true, config: cfgNow }), text: async () => '{}' };
+    };
+    vm.runInContext(
+      'state.settingsSection = "chat";'
+      + 'document.querySelector("#cfg-sticker-collect").checked = false;'
+      + 'document.querySelector("#cfg-sticker-autocollect").checked = true;'
+      + 'document.querySelector("#cfg-sticker-collect-max").value = "5";', ctx);
+    await vm.runInContext('saveConfig({ quiet: true })', ctx);
+    const body = posts.length ? posts[posts.length - 1] : {};
+    const sk = body.sticker || {};
+    const collectSaveOk = sk.collectEnabled === false && sk.autoCollect === true && sk.maxCollectPerHour === 5;
+    collectSaveOk ? pass++ : fail++;
+    console.log('  ' + (collectSaveOk ? 'OK   ' : 'FAIL ')
+      + '保存：收藏总闸/自动收藏/上限按控件状态写入 sticker 配置'
+      + (collectSaveOk ? '' : ` -> ${JSON.stringify(sk)}`));
   }
 
   // ── 群勾选列表的"没读完别覆盖"守卫 ──

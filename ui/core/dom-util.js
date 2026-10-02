@@ -15,7 +15,7 @@ import {
 } from './constants.js';
 import { $, esc } from './dom.js';
 import {
-  normalizeAsrMax, normalizeStickerMax, onebotIssueText, onebotStatusLineHtml, uiServiceOfUrl
+  normalizeAsrMax, normalizeStickerCollectMax, normalizeStickerMax, onebotIssueText, onebotStatusLineHtml, uiServiceOfUrl
 } from './format.js';
 import { QARegistry } from './registry.js';
 import { loadingLogs, loadingStatus, pendingSessionDetail, state } from './state.js';
@@ -537,6 +537,10 @@ function syncClampedInputs() {
   const stickerMax = $('#cfg-sticker-max');
   if (stickerMax) {
     stickerMax.value = String(normalizeStickerMax(state.config?.sticker?.promptMaxStickers));
+  }
+  const stickerCollectMax = $('#cfg-sticker-collect-max');
+  if (stickerCollectMax) {
+    stickerCollectMax.value = String(normalizeStickerCollectMax(state.config?.sticker?.maxCollectPerHour));
   }
   const asrMax = $('#cfg-asr-max');
   if (asrMax) {

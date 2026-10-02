@@ -673,6 +673,12 @@ async function saveConfig({ quiet = false } = {}) {
     patch.sticker = {
       ...c.sticker,
       enabled: chk('#cfg-sticker', c.sticker?.enabled !== false),
+      // 收藏相关（2026-10-02 用户反馈"乱收藏"）：三个键各自独立 —— collectEnabled 是总闸
+      // （自动收与聊天里主动收都过它），autoCollect 只管"扫群友发的图"。老配置缺键按默认
+      // （true/true/10）回退；控件不存在（旧页面缓存）时也退回已保存配置，不会把值抹掉。
+      collectEnabled: chk('#cfg-sticker-collect', c.sticker?.collectEnabled !== false),
+      autoCollect: chk('#cfg-sticker-autocollect', c.sticker?.autoCollect !== false),
+      maxCollectPerHour: clampInt(val('#cfg-sticker-collect-max', c.sticker?.maxCollectPerHour), 1, 60, 10),
       // 先取界面实时值（没这个控件时才退回已保存配置），再钳到 0~3
       encourage: Math.min(3, Math.max(0, Number(
         $('#cfg-sticker-encourage') ? $('#cfg-sticker-encourage').value : (c.sticker?.encourage ?? 1)

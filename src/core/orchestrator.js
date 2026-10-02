@@ -1416,9 +1416,11 @@ export class Orchestrator {
       return all.length ? all[all.length - 1].ts : Date.now();
     })();
 
+    // 表情包总开关：关掉时连动作类工具带清单一起摘（见下方 toolDefs 过滤，2026-10-02 用户反馈）
+    const stickerEnabled = cfg.sticker?.enabled !== false;
     // 表情库快照（提示词用）
     let stickerEntries = [];
-    if (cfg.sticker?.enabled !== false) {
+    if (stickerEnabled) {
       try { stickerEntries = (await this.stickers.sync(false)).entries ?? []; } catch { stickerEntries = []; }
     }
     const slangContext = slangPilotEnabled(cfg)
@@ -1445,6 +1447,12 @@ export class Orchestrator {
     const imageGenEnabled = imageGenAvailable(cfg);
     const toolDefs = this.toolDefs.filter((d) => {
       if (!canSeeImages && (d.name === 'get_message_images' || d.name === 'get_sticker_image')) return false;
+      // 表情包总开关关掉：发送/列表/看图/收藏四个工具一并摘掉。原先只撤了提示词里的清单，
+      // 工具还留着 —— 模型仍会发旧库里的表情，而【可用表情包】已被抽走、没有新选项，
+      // 只能反复用记得的那一个（2026-10-02 用户反馈："不开那个按钮，它就一直发一个表情"）。
+      // 与 schedule_wake / generate_image 是同一口径：开关关掉就连工具带提示词一起撤。
+      if (!stickerEnabled && (d.name === 'send_sticker' || d.name === 'list_stickers'
+        || d.name === 'get_sticker_image' || d.name === 'collect_sticker')) return false;
       if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
       if (!selfWakeEnabled && d.name === 'schedule_wake') return false;
       // ASR 按量计费：开关关掉或没配 key 就不注入，避免模型调用必失败；也防误配置导致意外计费

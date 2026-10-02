@@ -655,6 +655,45 @@ describe('Orchestrator', () => {
     assert.ok(bodies[0].tools.some((tool) => tool.function.name === 'schedule_wake'));
   });
 
+  it('removes the sticker tools when the sticker switch is off (2026-10-02 用户反馈)', async (t) => {
+    // 用户反馈：关掉「启用表情包」后机器人照样在发同一个表情 —— 那个开关只撤了提示词里的
+    // 清单，四个贴纸工具还留着，模型没有新选项、只能反复用记得的那一个。修法与
+    // schedule_wake / generate_image 同口径：开关关掉，工具与清单一起撤。
+    const { cfg, runner, append } = fixture(t);
+    cfg.sticker.enabled = false;   // fixture 默认就是关的，写明意图（防以后 fixture 改默认值）
+    setRuntimeConfig(cfg);
+    const bodies = [];
+    globalThis.fetch = async (_url, options) => {
+      bodies.push(JSON.parse(options.body));
+      return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
+    };
+    append(1, '在吗', '42');
+    await runner.wake('group:1');
+    const names = bodies[0].tools.map((tool) => tool.function.name);
+    for (const name of ['send_sticker', 'list_stickers', 'get_sticker_image', 'collect_sticker']) {
+      assert.ok(!names.includes(name), `总开关关闭时不应再注入 ${name}`);
+    }
+    // 不断言提示词里没有"【可用表情包】"字样：角色卡是管理员内容，正文里就写着这几个字
+    // （同 vision 那条用例的注释）。清单本身在 entries 为空时就不会注入，这里钉的是工具。
+  });
+
+  it('keeps the sticker tools by default (升级前后行为一致)', async (t) => {
+    const { cfg, runner, append } = fixture(t);
+    cfg.sticker.enabled = true;
+    setRuntimeConfig(cfg);
+    const bodies = [];
+    globalThis.fetch = async (_url, options) => {
+      bodies.push(JSON.parse(options.body));
+      return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
+    };
+    append(1, '在吗', '42');
+    await runner.wake('group:1');
+    const names = bodies[0].tools.map((tool) => tool.function.name);
+    for (const name of ['send_sticker', 'list_stickers', 'get_sticker_image', 'collect_sticker']) {
+      assert.ok(names.includes(name), `默认配置（总开关开着）下 ${name} 应该在`);
+    }
+  });
+
   it('feeds both familiar and unused stickers into the system prompt', async (t) => {
     const { cfg, runner, append } = fixture(t);
     cfg.sticker.enabled = true;
