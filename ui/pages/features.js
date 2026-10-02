@@ -531,10 +531,19 @@ async function deleteAsset(kind, entry) {
   }
   try {
     const result = await api(path, { method: 'DELETE', body: JSON.stringify(body) });
-    state.assetOverview = null;
-    state.assetDetail = null;
-    if (state.tab === 'identity') await loadIdentityFeaturePage();
-    else await loadAssetObservatory();
+    // 就地更新（2026-10-02 用户反馈）：原先删除成功后清空 overview/detail 再重拉整页，
+    // 页面先塌成一行"加载中…"，滚动位置被浏览器顶回顶部 —— 删一张图就得重新划半天。
+    // 现在保留资产状态直接重拉列表数据（overview 非空时不会走"加载中…"塌缩分支），
+    // 重渲染后把滚动位置还原；identity 页有自己的加载函数，维持原路径。
+    const scrollY = window.scrollY ?? 0;
+    if (state.tab === 'identity') {
+      state.assetOverview = null;
+      state.assetDetail = null;
+      await loadIdentityFeaturePage();
+    } else {
+      await loadAssetObservatory();
+    }
+    window.scrollTo?.(0, scrollY);
     if (result?.cleanupPending) {
       alert(result.warning || '资产已删除，但图片文件仍待清理');
     }

@@ -1779,6 +1779,25 @@ try {
   assetConfirmSafe ? pass++ : fail++;
   console.log('  ' + (assetConfirmSafe ? 'OK   ' : 'FAIL ')
     + '确认弹窗通过后四类资产各发送一次带显式确认的 DELETE');
+
+  // 删除成功后不得清空资产状态再整页重拉 —— 那会把页面塌成"加载中…"、把滚动位置
+  // 顶回顶部，删一张图就要重新划半天（2026-10-02 用户反馈）。
+  vm.runInContext(
+    'if (!state.assetOverview) state.assetOverview = { generatedAt: "test" };'
+    + 'window.__scrollCalls = []; window.scrollY = 4242;'
+    + 'window.scrollTo = (x, y) => { window.__scrollCalls.push(y); };', ctx);
+  const pendingScroll = ctx.deleteAsset('stickers', { id: 'sticker-1', desc: '测试表情' });
+  await answerLatestConfirmation(true);
+  await pendingScroll;
+  const overviewKept = vm.runInContext('state.assetOverview != null', ctx);
+  overviewKept ? pass++ : fail++;
+  console.log('  ' + (overviewKept ? 'OK   ' : 'FAIL ')
+    + '删除资产后概览状态保留（不再清空整页重拉）');
+  const restoredY = vm.runInContext('window.__scrollCalls[window.__scrollCalls.length - 1]', ctx);
+  const scrollRestored = restoredY === 4242;
+  scrollRestored ? pass++ : fail++;
+  console.log('  ' + (scrollRestored ? 'OK   ' : 'FAIL ')
+    + '删除资产后滚动位置还原（回到删除前的 4242）');
   sandbox.fetch = originalFetch;
 
   vm.runInContext(`state.autoUpdateStatus = ${JSON.stringify({
