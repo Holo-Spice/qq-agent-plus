@@ -1868,6 +1868,23 @@ try {
   remoteOk ? pass++ : fail++;
   console.log('  ' + (remoteOk ? 'OK   ' : 'FAIL ')
     + '清掉在途标记后同一事件正常就地摘除（别人的删除仍然同步）');
+
+  // 本地写入在途（编辑/新增保存）时，asset-update 回声一律跳过 —— 防"保存后双重重渲染"
+  vm.runInContext(
+    'state.tab = "assets"; state.assetWriteInFlight = true;'
+    + 'state.assetDetail = { entries: [{ id: "sticker-7" }] };'
+    + 'state.assetOverview = { stickers: { total: 3 } };', ctx);
+  for (const fn of sseRegistry['asset-update'] || []) {
+    await fn({ data: JSON.stringify({ kind: 'stickers', action: 'update', id: 'sticker-7' }) });
+  }
+  const writeSkip = vm.runInContext(
+    '(state.assetOverview && state.assetOverview.stickers && state.assetOverview.stickers.total === 3)'
+    + ' && Array.isArray(state.assetDetail && state.assetDetail.entries)'
+    + ' && state.assetDetail.entries.length === 1', ctx);
+  writeSkip ? pass++ : fail++;
+  console.log('  ' + (writeSkip ? 'OK   ' : 'FAIL ')
+    + '本地写入在途时 asset-update 回声被跳过（防保存后双重重渲染）');
+  vm.runInContext('state.assetWriteInFlight = false;', ctx);
   sandbox.fetch = originalFetch;
 
   vm.runInContext(`state.autoUpdateStatus = ${JSON.stringify({

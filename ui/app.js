@@ -772,6 +772,10 @@ function connectSSE() {
   });
   es.addEventListener('asset-update', (event) => {
     if (state.tab !== 'assets') return;
+    // 本地资产写入（编辑/新增/收录保存）在途：回声一律跳过 —— 保存流程自己会用
+    // finishAssetMutation 重拉收尾，不挡的话会再触发一次"清空+重拉"
+    // （双重重渲染 + 滚动被顶回顶部，2026-10-02 复审）。
+    if (state.assetWriteInFlight) return;
     // delete 事件就地摘除（2026-10-02）：deleteAsset 已经在本地把条目和卡片摘掉了，
     // 这里若再走"清空 + 重拉"，整格缩略图会重闪一遍、滚动位置丢失 —— 用户看到的
     // 就是"删一张图整页刷新"。就地过滤是幂等的：自己的删除过滤后一无所获（不重渲染、

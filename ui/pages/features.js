@@ -233,24 +233,26 @@ function openSlangAdmissionEditor(entry) {
     const button = event.currentTarget;
     button.disabled = true;
     try {
-      await api(
-        `/api/slang-pilot/discoveries/${encodeURIComponent(entry.id)}/admission-decision`,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            decision: 'approve',
-            edits: {
-              content: overlay.querySelector('#slang-admit-content').value,
-              meaning: overlay.querySelector('#slang-admit-meaning').value,
-              usage: overlay.querySelector('#slang-admit-usage').value,
-              example: overlay.querySelector('#slang-admit-example').value,
-              risk: overlay.querySelector('#slang-admit-risk').value,
-              scope: overlay.querySelector('#slang-admit-scope').value
-            }
-          })
-        }
-      );
-      await finishAssetMutation(overlay);
+      await withAssetWrite(async () => {
+        await api(
+          `/api/slang-pilot/discoveries/${encodeURIComponent(entry.id)}/admission-decision`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              decision: 'approve',
+              edits: {
+                content: overlay.querySelector('#slang-admit-content').value,
+                meaning: overlay.querySelector('#slang-admit-meaning').value,
+                usage: overlay.querySelector('#slang-admit-usage').value,
+                example: overlay.querySelector('#slang-admit-example').value,
+                risk: overlay.querySelector('#slang-admit-risk').value,
+                scope: overlay.querySelector('#slang-admit-scope').value
+              }
+            })
+          }
+        );
+        await finishAssetMutation(overlay);
+      });
     } catch (error) {
       alert(`收录失败：${error.message}`);
       button.disabled = false;
@@ -315,13 +317,25 @@ function assetChatOptions(selected = '') {
   ).join('');
 }
 
+/** 本地资产写入在途（编辑/新增/收录保存）：期间到达的 asset-update SSE 回声一律跳过 ——
+ *  保存流程自己会用 finishAssetMutation 重拉收尾；不挡的话回声会再触发一次"清空+重拉"，
+ *  表现为保存后整格重渲染两次、滚动被顶回顶部（2026-10-02 复审）。 */
+async function withAssetWrite(fn) {
+  state.assetWriteInFlight = true;
+  try { return await fn(); } finally { state.assetWriteInFlight = false; }
+}
+
 function finishAssetMutation(overlay) {
   closeModelModal(overlay);
-  state.assetOverview = null;
-  state.assetDetail = null;
-  return state.tab === 'identity'
-    ? loadIdentityFeaturePage()
-    : loadAssetObservatory();
+  if (state.tab === 'identity') {
+    state.assetOverview = null;
+    state.assetDetail = null;
+    return loadIdentityFeaturePage();
+  }
+  // 不清空 overview/detail（清空会让页面先塌成"加载中…"、滚动位置被顶回顶部）；
+  // 就地重拉后把手动滚动位置还原（与删图同一口径，2026-10-02 复审）。
+  const scrollY = window.scrollY ?? 0;
+  return loadAssetObservatory().finally(() => { window.scrollTo?.(0, scrollY); });
 }
 
 function openStickerAssetEditor(entry = null) {
@@ -356,13 +370,15 @@ function openStickerAssetEditor(entry = null) {
           overlay.querySelector('#asset-sticker-file').files?.[0]
         );
       }
-      await api(
-        editing
-          ? `/api/assets/stickers/${encodeURIComponent(entry.id)}`
-          : '/api/assets/stickers',
-        { method: editing ? 'PUT' : 'POST', body: JSON.stringify(body) }
-      );
-      await finishAssetMutation(overlay);
+      await withAssetWrite(async () => {
+        await api(
+          editing
+            ? `/api/assets/stickers/${encodeURIComponent(entry.id)}`
+            : '/api/assets/stickers',
+          { method: editing ? 'PUT' : 'POST', body: JSON.stringify(body) }
+        );
+        await finishAssetMutation(overlay);
+      });
     } catch (error) {
       alert(`保存失败：${error.message}`);
       button.disabled = false;
@@ -411,13 +427,15 @@ function openSlangAssetEditor(entry = null) {
         scope: overlay.querySelector('#asset-slang-scope').value,
         scopeChatKey: overlay.querySelector('#asset-slang-chat').value.trim()
       };
-      await api(
-        editing
-          ? `/api/assets/slang/${encodeURIComponent(entry.id)}`
-          : '/api/assets/slang',
-        { method: editing ? 'PUT' : 'POST', body: JSON.stringify(body) }
-      );
-      await finishAssetMutation(overlay);
+      await withAssetWrite(async () => {
+        await api(
+          editing
+            ? `/api/assets/slang/${encodeURIComponent(entry.id)}`
+            : '/api/assets/slang',
+          { method: editing ? 'PUT' : 'POST', body: JSON.stringify(body) }
+        );
+        await finishAssetMutation(overlay);
+      });
     } catch (error) {
       alert(`保存失败：${error.message}`);
       button.disabled = false;
@@ -452,13 +470,15 @@ function openIdentityAssetEditor(entry = null) {
         profileNote: overlay.querySelector('#asset-person-note').value,
         isFriend: overlay.querySelector('#asset-person-friend').checked
       };
-      await api(
-        editing
-          ? `/api/assets/identities/${encodeURIComponent(entry.userId)}`
-          : '/api/assets/identities',
-        { method: editing ? 'PUT' : 'POST', body: JSON.stringify(body) }
-      );
-      await finishAssetMutation(overlay);
+      await withAssetWrite(async () => {
+        await api(
+          editing
+            ? `/api/assets/identities/${encodeURIComponent(entry.userId)}`
+            : '/api/assets/identities',
+          { method: editing ? 'PUT' : 'POST', body: JSON.stringify(body) }
+        );
+        await finishAssetMutation(overlay);
+      });
     } catch (error) {
       alert(`保存失败：${error.message}`);
       button.disabled = false;
@@ -492,11 +512,13 @@ function openMemoryAssetEditor(entry = null) {
       };
       if (editing) body.impressions = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
       else body.content = content;
-      await api('/api/assets/memory', {
-        method: editing ? 'PUT' : 'POST',
-        body: JSON.stringify(body)
+      await withAssetWrite(async () => {
+        await api('/api/assets/memory', {
+          method: editing ? 'PUT' : 'POST',
+          body: JSON.stringify(body)
+        });
+        await finishAssetMutation(overlay);
       });
-      await finishAssetMutation(overlay);
     } catch (error) {
       alert(`保存失败：${error.message}`);
       button.disabled = false;
