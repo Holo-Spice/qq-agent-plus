@@ -914,9 +914,10 @@ try {
     && chatHtml.includes('id="cfg-pro-followup"') && chatHtml.includes('id="cfg-pro-selfwake"')
     && !/id="cfg-pro-followup"[^>]*checked/.test(chatHtml)
     && !/id="cfg-pro-selfwake"[^>]*checked/.test(chatHtml)
-    // 清单条数是滑条（用户 2026-10-02 要求"做移动条"）：范围 1~60、存量值 24 如实回显
-    && /<input type="range" id="cfg-sticker-max"[^>]*min="1" max="60"[^>]*value="24"/.test(chatHtml)
-    && /<span id="cfg-sticker-max-now">24<\/span>/.test(chatHtml)
+    // 清单条数是滑条（用户 2026-10-02 要求"做移动条"）：范围 1~60、细步长 0.1（拖动手感）、
+    // 存量值 24 如实回显
+    && /<input type="range" id="cfg-sticker-max"[^>]*min="1" max="60" step="0\.1"[^>]*value="24"/.test(chatHtml)
+    && /<span class="slider-now" id="cfg-sticker-max-now">24<\/span>/.test(chatHtml)
     && !/<select id="cfg-sticker-max"/.test(chatHtml);
   openSwitchesOk ? pass++ : fail++;
   console.log('  ' + (openSwitchesOk ? 'OK   ' : 'FAIL ') + '设置页：主动开口三个开关 + 表情清单条数滑条');
@@ -937,7 +938,7 @@ try {
     && /<input type="range" id="cfg-sticker-collect-max"[^>]*value="10"/.test(defaultHtml)
     && !/id="cfg-sticker-collect"\s+checked/.test(chatHtml)
     && /<input type="range" id="cfg-sticker-collect-max"[^>]*value="5"/.test(chatHtml)
-    && /<span id="cfg-sticker-collect-max-now">5<\/span>/.test(chatHtml)
+    && /<span class="slider-now" id="cfg-sticker-collect-max-now">5<\/span>/.test(chatHtml)
     && !/id="cfg-sticker-collect"\s+checked/.test(mixedCollectHtml);
   collectUiOk ? pass++ : fail++;
   console.log('  ' + (collectUiOk ? 'OK   ' : 'FAIL ')
@@ -1751,6 +1752,21 @@ try {
   guardPins ? pass++ : fail++;
   console.log('  ' + (guardPins ? 'OK   ' : 'FAIL ')
     + `写入/删除在途守卫的源码约定保持（保存点包裹 ${wrapCount}/${finishCount}）`);
+
+  // 滑条填充色不能靠 background transition 动画（2026-10-02 用户反馈"一卡一卡"）：
+  // 线性渐变之间无法插值，浏览器会在过渡结束才整段切换 —— 拖动时填充追不上滑块、
+  // 看起来一格一格跳。钉住 .tier-slider 基础块里没有 background 过渡，
+  // 且读数 span 有 .slider-now（等宽数字，拖动时文字宽度不跳）。
+  const cssSrc = fs.readFileSync(path.join(ROOT, 'ui', 'style.css'), 'utf8');
+  // 先剥掉注释再查：注释里会同时出现 background / transition 两个词，不剥会误报
+  const tierSliderBlock = (/\.tier-slider\s*\{([\s\S]*?)\}/.exec(cssSrc)?.[1] || '')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+  const sliderCssPin = tierSliderBlock.length > 0
+    && !/transition\s*:[^;]*background/.test(tierSliderBlock)
+    && /\.slider-now\s*\{/.test(cssSrc);
+  sliderCssPin ? pass++ : fail++;
+  console.log('  ' + (sliderCssPin ? 'OK   ' : 'FAIL ')
+    + '滑条填充不做 background 过渡（渐变无法插值，拖动会一格一格跳）');
 
   const originalFetch = sandbox.fetch;
   const assetDeleteCalls = [];

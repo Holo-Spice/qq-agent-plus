@@ -190,9 +190,9 @@ return `
       <label for="cfg-sticker-collect">允许机器人自己收藏表情包（关掉后不再自动收，也不会在聊天里主动收；手动添加不受影响）</label></div>
 
     <div class="field">
-      <label for="cfg-sticker-collect-max">每小时最多收藏（<span id="cfg-sticker-collect-max-now">${normalizeStickerCollectMax(c.sticker?.maxCollectPerHour)}</span> 张）</label>
+      <label for="cfg-sticker-collect-max">每小时最多收藏（<span class="slider-now" id="cfg-sticker-collect-max-now">${normalizeStickerCollectMax(c.sticker?.maxCollectPerHour)}</span> 张）</label>
       <div class="tier-slider-wrap">
-        <input type="range" id="cfg-sticker-collect-max" class="tier-slider" min="1" max="60" step="1"
+        <input type="range" id="cfg-sticker-collect-max" class="tier-slider" min="1" max="60" step="0.1"
           value="${normalizeStickerCollectMax(c.sticker?.maxCollectPerHour)}" aria-label="每小时最多收藏张数" />
       </div>
       <div class="hint">
@@ -214,9 +214,9 @@ return `
     </div>
 
     <div class="field">
-      <label for="cfg-sticker-max">系统提示里的表情清单条数（<span id="cfg-sticker-max-now">${normalizeStickerMax(c.sticker?.promptMaxStickers)}</span> 条）</label>
+      <label for="cfg-sticker-max">系统提示里的表情清单条数（<span class="slider-now" id="cfg-sticker-max-now">${normalizeStickerMax(c.sticker?.promptMaxStickers)}</span> 条）</label>
       <div class="tier-slider-wrap">
-        <input type="range" id="cfg-sticker-max" class="tier-slider" min="1" max="60" step="1"
+        <input type="range" id="cfg-sticker-max" class="tier-slider" min="1" max="60" step="0.1"
           value="${normalizeStickerMax(c.sticker?.promptMaxStickers)}" aria-label="表情清单条数" />
       </div>
       <div class="hint">

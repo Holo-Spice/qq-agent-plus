@@ -2378,13 +2378,23 @@ body, .btn, .tab, .model-modal, .price-card, .tier-btn, .icon-btn {
   width: 100%;
   height: 6px;
   border-radius: 999px;
-  /* 已填充部分用强调色，未填充用中性色；--pos 由 JS 实时写入 */
+  /* 已填充部分用强调色，未填充用中性色；--pos 由 JS 实时写入。
+     ⚠️ 这里**不能**给 background 加 transition：两个线性渐变之间无法插值，浏览器会在
+     过渡结束时整段离散切换 —— 拖动时填充色一格一格追着滑块跳，看起来"一卡一卡"
+     （2026-10-02 用户反馈）。实时跟随才顺滑。 */
   background: linear-gradient(90deg,
     var(--accent) 0 var(--pos, 100%),
     var(--border) var(--pos, 100%) 100%);
   outline: none;
   cursor: pointer;
-  transition: background var(--dur-fast) linear;
+}
+/* 滑条实时读数（1~60 这类整数滑条标签里的数字）：等宽数字 + 固定宽度，
+   拖动时文字宽度不跳，避免小抖动 */
+.slider-now {
+  display: inline-block;
+  min-width: 2ch;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 /* 滑块 */
 .tier-slider::-webkit-slider-thumb {

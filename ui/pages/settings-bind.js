@@ -866,7 +866,9 @@ function bindSettingsListsAndGroups(c) {
   }
 
   // ── 表情清单条数 / 每小时最多收藏：同款 1~60 滑条（2026-10-02 用户要求"做移动条"）。
-  //    滑条的实时读数与填充色只影响显示；保存读的仍是滑条的 value（settings-save 里归一化）。
+  //    手感（用户当天又反馈"一卡一卡"）靠两件事：① step=0.1 —— 60 格的 step=1 拖起来一格一格跳，
+  //    细步长跟手（显示与保存仍四舍五入成整数）；② 填充色按**原始值**算，不用四舍五入值，
+  //    否则填充会比滑块慢半格。方向键单独处理成按 1 走（不然按十下才动一格）。
   for (const [sliderSel, nowSel] of [
     ['#cfg-sticker-max', '#cfg-sticker-max-now'],
     ['#cfg-sticker-collect-max', '#cfg-sticker-collect-max-now']
@@ -877,11 +879,23 @@ function bindSettingsListsAndGroups(c) {
     const syncStickerSlider = () => {
       const min = Number(slider.min) || 1;
       const max = Number(slider.max) || 60;
-      const v = Math.min(max, Math.max(min, Math.round(Number(slider.value) || min)));
-      if (now) now.textContent = String(v);
-      slider.style.setProperty('--pos', `${Math.round(((v - min) / Math.max(1, max - min)) * 100)}%`);
+      const raw = Number(slider.value);
+      const v = Number.isFinite(raw) ? Math.min(max, Math.max(min, raw)) : min;
+      const text = String(Math.round(v));
+      if (now && now.textContent !== text) now.textContent = text;   // 只在整数值变化时写 DOM
+      slider.style.setProperty('--pos', `${((v - min) / Math.max(1, max - min)) * 100}%`);
     };
     slider.addEventListener('input', syncStickerSlider);
+    slider.addEventListener('keydown', (event) => {
+      const delta = { ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1 }[event.key];
+      if (!delta) return;
+      const min = Number(slider.min) || 1;
+      const max = Number(slider.max) || 60;
+      const cur = Number(slider.value);
+      event.preventDefault();
+      slider.value = String(Math.min(max, Math.max(min, Math.round(Number.isFinite(cur) ? cur : min) + delta)));
+      syncStickerSlider();
+    });
     syncStickerSlider();
   }
 
