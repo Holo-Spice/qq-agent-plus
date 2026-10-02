@@ -10,9 +10,9 @@ import { CHAT_MSG_PAGE, STICKER_LEVELS } from '../core/constants.js';
 import { askForConfirmation, initChatScrollLoader, patchKeyedList } from '../core/dom-util.js';
 import { $, $$, esc } from '../core/dom.js';
 import {
-  chatNameOf, fmtTime, fmtTok, formatChatTitle, groupSliderPosForUi, paramActiveForProbability,
-  segOfProbability, sliderDesc, sliderToTierUI, sliderToTierUI_tierToSlider, stickerCollectMaxSelectOptions,
-  stickerMaxSelectOptions
+  chatNameOf, fmtTime, fmtTok, formatChatTitle, groupSliderPosForUi, normalizeStickerCollectMax,
+  normalizeStickerMax, paramActiveForProbability, segOfProbability, sliderDesc, sliderToTierUI,
+  sliderToTierUI_tierToSlider
 } from '../core/format.js';
 import { state } from '../core/state.js';
 function renderConversationModePanels(conversation = {}) {
@@ -190,10 +190,12 @@ return `
       <label for="cfg-sticker-collect">允许机器人自己收藏表情包（关掉后不再自动收，也不会在聊天里主动收；手动添加不受影响）</label></div>
 
     <div class="field">
-      <label for="cfg-sticker-collect-max">每小时最多收藏</label>
-      <select id="cfg-sticker-collect-max">${stickerCollectMaxSelectOptions(c.sticker?.maxCollectPerHour)}</select>
+      <label for="cfg-sticker-collect-max">每小时最多收藏（张）</label>
+      <input type="number" id="cfg-sticker-collect-max" min="1" max="60"
+        value="${normalizeStickerCollectMax(c.sticker?.maxCollectPerHour)}" placeholder="1-60，默认 10" />
       <div class="hint">
-        全局上限（默认 10 张/小时）；每个会话另有 3 张/小时的上限。控制台里手动添加表情不受这两项影响。
+        自己填 1-60（超出会按这个范围收口，清空保持原值）。全局上限，默认 10 张/小时；每个会话另有
+        3 张/小时的上限。控制台里手动添加表情不受这两项影响。
       </div>
     </div>
 
@@ -211,10 +213,12 @@ return `
 
     <div class="field">
       <label for="cfg-sticker-max">系统提示里的表情清单条数</label>
-      <select id="cfg-sticker-max">${stickerMaxSelectOptions(c.sticker?.promptMaxStickers)}</select>
+      <input type="number" id="cfg-sticker-max" min="1" max="60"
+        value="${normalizeStickerMax(c.sticker?.promptMaxStickers)}" placeholder="1-60，默认 10" />
       <div class="hint">
-        清单一半放常用的，一半放没用过/很久没用的，发掉一张自动换下一张上来（不会再总是那几张）。
-        档位越大能选的范围越宽，代价是每轮提示词变长；省 Token 模式还会再夹到 3~5 条。库容量不受这一项影响。
+        自己填 1-60（超出会按这个范围收口，清空保持原值）。清单一半放常用的，一半放没用过/很久没用的，
+        发掉一张自动换下一张上来（不会再总是那几张）。填得越大能选的范围越宽，代价是每轮提示词变长；
+        省 Token 模式还会再夹到 3~5 条。库容量不受这一项影响。
       </div>
     </div>
 

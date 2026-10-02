@@ -13,8 +13,8 @@ import {
 } from '../core/dom-util.js';
 import { $, $$ } from '../core/dom.js';
 import {
-  asrHostOf, clampInt, hasOwnPrice, hostOfUrl, memThreshold, mulOf, normalizeAsrMax, parseList,
-  sliderToTierUI
+  asrHostOf, clampInt, hasOwnPrice, hostOfUrl, memThreshold, mulOf, normalizeAsrMax,
+  normalizeStickerCollectMax, normalizeStickerMax, parseList, sliderToTierUI
 } from '../core/format.js';
 import { pickedGroups, state } from '../core/state.js';
 import { currentPersonaId } from './persona.js';
@@ -681,13 +681,18 @@ async function saveConfig({ quiet = false } = {}) {
       enabled: chk('#cfg-sticker', c.sticker?.enabled !== false),
       collectEnabled: stickerCollectOn,
       autoCollect: stickerCollectOn,
-      maxCollectPerHour: clampInt(val('#cfg-sticker-collect-max', c.sticker?.maxCollectPerHour), 1, 60, 10),
+      // 输入框口径与"每小时最多转写"一致：清空保持原值、0/负数回默认、超出按 1~60 收口
+      maxCollectPerHour: normalizeStickerCollectMax(
+        val('#cfg-sticker-collect-max', '').trim() || c.sticker?.maxCollectPerHour
+      ),
       // 先取界面实时值（没这个控件时才退回已保存配置），再钳到 0~3
       encourage: Math.min(3, Math.max(0, Number(
         $('#cfg-sticker-encourage') ? $('#cfg-sticker-encourage').value : (c.sticker?.encourage ?? 1)
       ) || 0)),
-      // 下拉只提供 1~60 内的档位；这里的 clampInt 是防手工改 DOM 的兜底（服务端也会再夹一次）
-      promptMaxStickers: clampInt(val('#cfg-sticker-max', c.sticker?.promptMaxStickers), 1, 60, 10)
+      // 输入框：清空保持原值、0/负数回默认、超出按 1~60 收口（与"每小时最多转写"同一口径）
+      promptMaxStickers: normalizeStickerMax(
+        val('#cfg-sticker-max', '').trim() || c.sticker?.promptMaxStickers
+      )
     };
     // 读取历史档位（替代原来的「最多条数 + 字符预算」两个固定值）
     patch.store = {
