@@ -3,6 +3,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRouter } from './router.js';
@@ -1294,8 +1295,30 @@ export function createApp({
   });
 
   function json(res, code, data) {
-    res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-    res.end(JSON.stringify(data));
+    // gzip（2026-10-02）：sessions 全量约 1.4MB、经隧道裸传要 3.4 秒 —— 而控制台每次
+    // 初始化都拉它，这是"每个页面加载好几秒"的主因。JSON 压缩率约 10 倍，超过 1KB 就压；
+    // 压缩失败退化成明文（客户端照样能读）。客户端没带 Accept-Encoding: gzip 就不压。
+    const body = Buffer.from(JSON.stringify(data));
+    const headers = {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      vary: 'Accept-Encoding'
+    };
+    const accept = String(res.req?.headers?.['accept-encoding'] || '');
+    if (body.length >= 1024 && /\bgzip\b/.test(accept)) {
+      zlib.gzip(body, (error, packed) => {
+        if (error) {
+          res.writeHead(code, { ...headers, 'content-length': body.length });
+          res.end(body);
+          return;
+        }
+        res.writeHead(code, { ...headers, 'content-encoding': 'gzip', 'content-length': packed.length });
+        res.end(packed);
+      });
+      return;
+    }
+    res.writeHead(code, { ...headers, 'content-length': body.length });
+    res.end(body);
   }
 
   async function readBody(req, maxBytes = 2 * 1024 * 1024) {
@@ -1924,10 +1947,19 @@ export function createApp({
     let sticker = stickers.peek(id);
     const localImage = stickers.readImage(id);
     if (localImage) {
+      // 贴纸图片按 id 内容恒定（id 唯一、删除后不再出现）：长缓存 + 强 ETag。
+      // 2026-10-02：观测页每张 126KB，36 张约 4.5MB，重复浏览不该重下。
+      const etag = `"s-${id}"`;
+      if (String(req.headers['if-none-match'] || '') === etag) {
+        res.writeHead(304, { etag, 'cache-control': 'private, max-age=604800, immutable' });
+        res.end();
+        return;
+      }
       res.writeHead(200, {
         'content-type': localImage.contentType,
         'content-length': localImage.buffer.length,
-        'cache-control': 'private, max-age=300',
+        'cache-control': 'private, max-age=604800, immutable',
+        etag,
         'x-content-type-options': 'nosniff'
       });
       res.end(localImage.buffer);
@@ -1937,6 +1969,15 @@ export function createApp({
       sticker = await stickers.findForSend(id);
     }
     if (!sticker?.url) return json(res, 404, { error: '表情图片不存在' });
+    // 远程表情图片（QQ 表情 URL 里带 md5、内容恒定）：ETag + 一天浏览器缓存。
+    // 2026-10-02 实测：线上 42 张贴纸**全部**只有远程 URL、没有本地文件，观测页每张
+    // 缩略图都要服务器现去 QQ 拉一次且只缓存 60 秒 —— 每次进页面把整套图重拉一遍。
+    const remoteEtag = `"u-${crypto.createHash('sha1').update(String(sticker.url)).digest('hex').slice(0, 16)}"`;
+    if (String(req.headers['if-none-match'] || '') === remoteEtag) {
+      res.writeHead(304, { etag: remoteEtag, 'cache-control': 'private, max-age=86400' });
+      res.end();
+      return;
+    }
     try {
       const image = await safeFetchBinary(sticker.url, 8 * 1024 * 1024);
       const contentType = String(image.contentType || '').split(';')[0].trim().toLowerCase();
@@ -1946,7 +1987,8 @@ export function createApp({
       res.writeHead(200, {
         'content-type': contentType,
         'content-length': image.buffer.length,
-        'cache-control': 'private, max-age=60',
+        'cache-control': 'private, max-age=86400',
+        etag: remoteEtag,
         'x-content-type-options': 'nosniff'
       });
       res.end(image.buffer);
