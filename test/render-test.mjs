@@ -1798,6 +1798,16 @@ try {
   scrollRestored ? pass++ : fail++;
   console.log('  ' + (scrollRestored ? 'OK   ' : 'FAIL ')
     + '删除资产后滚动位置还原（回到删除前的 4242）');
+
+  // 传入了卡片节点时直接移除该节点（缩略图不重闪、网格不重渲染），不再退回整页重渲染
+  let cardRemoved = false;
+  const pendingCard = ctx.deleteAsset('stickers', { id: 'sticker-1', desc: '测试表情' },
+    { remove: () => { cardRemoved = true; } });
+  await answerLatestConfirmation(true);
+  await pendingCard;
+  cardRemoved ? pass++ : fail++;
+  console.log('  ' + (cardRemoved ? 'OK   ' : 'FAIL ')
+    + '传入卡片节点时直接摘除节点（不整页重渲染）');
   sandbox.fetch = originalFetch;
 
   vm.runInContext(`state.autoUpdateStatus = ${JSON.stringify({

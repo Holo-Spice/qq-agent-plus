@@ -511,7 +511,7 @@ function openAssetEditor(kind, entry = null) {
   return openMemoryAssetEditor(entry);
 }
 
-async function deleteAsset(kind, entry) {
+async function deleteAsset(kind, entry, cardEl = null) {
   const label = kind === 'stickers'
     ? (entry.localNote || entry.desc || entry.id)
     : kind === 'slang'
@@ -531,12 +531,30 @@ async function deleteAsset(kind, entry) {
   }
   try {
     const result = await api(path, { method: 'DELETE', body: JSON.stringify(body) });
-    // 就地更新（2026-10-02 用户反馈）：原先删除成功后清空 overview/detail 再重拉整页，
-    // 页面先塌成一行"加载中…"，滚动位置被浏览器顶回顶部 —— 删一张图就得重新划半天。
-    // 现在保留资产状态直接重拉列表数据（overview 非空时不会走"加载中…"塌缩分支），
-    // 重渲染后把滚动位置还原；identity 页有自己的加载函数，维持原路径。
+    // 就地摘除（2026-10-02 用户反馈）：重拉整页会把缩略图全部重闪一遍、滚动位置被顶回去，
+    // 看起来就像整页刷新。stickers 改为：本地状态摘掉这一条 + 概览计数就地减一 + 直接移除
+    // 卡片节点 —— 不重拉接口、不重渲染网格，剩下的图纹丝不动；拿不到卡片节点才退回重渲染。
+    // 其余类别维持重拉路径。
     const scrollY = window.scrollY ?? 0;
-    if (state.tab === 'identity') {
+    if (kind === 'stickers') {
+      if (state.assetDetail && Array.isArray(state.assetDetail.entries)) {
+        const deletedKey = String(entry.id ?? '');
+        state.assetDetail = {
+          ...state.assetDetail,
+          entries: state.assetDetail.entries.filter((item) => String(item.id ?? '') !== deletedKey),
+        };
+      }
+      if (state.assetOverview?.stickers && typeof state.assetOverview.stickers.total === 'number') {
+        state.assetOverview.stickers.total = Math.max(0, state.assetOverview.stickers.total - 1);
+      }
+      if (cardEl && typeof cardEl.remove === 'function') {
+        cardEl.remove();
+        const countEl = document.querySelector('.asset-summary-item[data-asset-kind="stickers"] strong');
+        if (countEl) countEl.textContent = fmtTok(state.assetOverview?.stickers?.total ?? 0);
+      } else {
+        renderAssetObservatory();
+      }
+    } else if (state.tab === 'identity') {
       state.assetOverview = null;
       state.assetDetail = null;
       await loadIdentityFeaturePage();
@@ -658,7 +676,7 @@ function renderAssetObservatory() {
         ? state.assetDetail?.entries?.[Number(button.dataset.assetIndex)]
         : state.assetDetail?.entries?.find((item) =>
             String(item.id ?? item.userId) === String(button.dataset.assetId));
-      if (entry) deleteAsset(kind, entry);
+      if (entry) deleteAsset(kind, entry, button.closest('.asset-sticker'));
     });
   });
 }
@@ -928,7 +946,7 @@ function bindFeatureAssetActions(rootSelector, kind, entries) {
         ? entries[Number(button.dataset.assetIndex)]
         : entries.find((item) =>
             String(item.id ?? item.userId) === String(button.dataset.assetId));
-      if (entry) deleteAsset(kind, entry);
+      if (entry) deleteAsset(kind, entry, button.closest('.asset-sticker'));
     });
   });
 }
