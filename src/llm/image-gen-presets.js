@@ -29,30 +29,41 @@ export const IMAGEGEN_SERVICES = [
   },
   {
     id: 'zhipu',
-    label: '智谱 CogView-3-Flash（免费档，需注册拿 Key）',
+    label: '智谱 CogView（cogview-3-flash 免费 / cogview-4 付费）',
     shape: 'openai',
     creds: ['key'],
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
     hosts: ['open.bigmodel.cn'],
     keyUrl: 'https://open.bigmodel.cn/usercenter/apikeys',
-    models: [{ id: 'cogview-3-flash' }],
-    note: 'CogView-3-Flash 是智谱的免费档（是否仍免费以官方定价页为准）；'
-      + '服务地址要填到 /api/paas/v4 这一层，Key 用智谱开放平台的 API Key。'
-      + '出图在右下角带「AI 生成」水印（2026-10-01 真机实测）—— 国内厂商按《人工智能生成合成内容'
-      + '标识办法》都要打这个标识，介意水印只能换海外服务商（如 OpenAI 的图模型）。'
-      + '实测：8~9 秒出一张 1024x1024，约 100 KB。'
+    models: [
+      { id: 'cogview-3-flash' },
+      { id: 'cogview-4-250304' }
+    ],
+    note: '服务地址要填到 /api/paas/v4 这一层，Key 用智谱开放平台的 API Key。'
+      + 'cogview-3-flash 免费，但 2026-10-02 实测：**中文文字写不出来**（提示词里的汉字会变成'
+      + '乱码假字），做带字表情包不可用；出图右下角带「AI 生成」水印（国内厂商按标识办法统一加）。'
+      + 'cogview-4-250304 画面与文字都好、¥0.06/张，但要账户有余额 —— 余额不足会直接报'
+      + '「1113 余额不足或无可用资源包，请充值」。'
   },
   {
     id: 'siliconflow',
-    label: '硅基流动（模型广场里挑标了免费的图模型）',
+    label: '硅基流动（含默认 Z-Image-Turbo，中文文字准）',
     shape: 'openai',
     creds: ['key'],
     baseUrl: 'https://api.siliconflow.cn/v1',
     hosts: ['api.siliconflow.cn'],
     keyUrl: 'https://cloud.siliconflow.cn/account/ak',
-    models: [],
-    note: '免费与否取决于选哪个模型：到「模型广场」挑标了免费的图模型（如 FLUX 系列的免费项）'
-      + '填进「模型」栏，模型名必填。'
+    // 顺序即默认：切到这家会把「模型」预填成第一个
+    models: [
+      { id: 'Tongyi-MAI/Z-Image-Turbo' },
+      { id: 'Qwen/Qwen-Image' },
+      { id: 'Kwai-Kolors/Kolors' }
+    ],
+    note: '模型名必填（本预设默认 Tongyi-MAI/Z-Image-Turbo）。2026-10-02 真机实测同一提示词：'
+      + 'Z-Image-Turbo ¥0.10/张、约 5 秒、**中文文字写得对**、无水印（推荐）；'
+      + 'Qwen/Qwen-Image ¥0.30/张、约 13 秒、中文同样准确、画面更精细；'
+      + 'Kwai-Kolors/Kolors 免费，但**中文会写错**（实测"事已在吧"），适合不带字的图。'
+      + '地址填到 /v1 这一层，Key 用硅基流动的 API Key（与语音转写可以是同一把）。'
   },
   {
     id: 'modelscope',

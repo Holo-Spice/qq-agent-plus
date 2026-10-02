@@ -524,7 +524,9 @@ export function buildToolDefs() {
     {
       name: 'generate_image',
       description: '自己画一张图（调用图片生成服务，按张计费、有每小时上限）。适合群友点名要"画一张"：梗图、应景的图。'
-        + 'prompt 要写清楚画面内容（主体、风格、氛围），生成后图片会存进表情库，接着用 send_sticker 发出去。'
+        + 'prompt 要写清楚画面内容（主体、风格、氛围）；要在图上带中文文字时，把文字用引号原样写进 prompt'
+        + '（例如：…画面上有中文文字"事已至此，先吃饭吧"——能不能写对取决于所选图模型）。'
+        + '生成后图片会存进表情库，接着用 send_sticker 发出去。'
         + '别频繁用（一次调用就是一次真实花费）。',
       parameters: {
         type: 'object',
