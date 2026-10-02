@@ -7,6 +7,8 @@ import path from 'node:path';
 import { openDatabase } from './sqlite.js';
 
 const OUTBOUND_STALE_MS = 6 * 60 * 60 * 1000;   // 出站水位：6 小时没有任何自己发的消息＝可疑
+const STUCK_INBOUND_MS = 30 * 60 * 1000;        // 入站到期未处理的宽限：一轮会话运行只要几分钟，
+                                                // 到期 30 分钟还停在 pending 就是管道死了
 const DISK_MIN_BYTES = 1024 * 1024 * 1024;       // 磁盘余量：< 1GB 报警
 const NOTIFY_AFTER_STREAK = 3;                   // 连续失败到第 3 次才通知
 // 两个本机探测必须带超时（2026-10-01 审查）：原来一次 fetch 用 undici 的默认上限（约 5 分钟），
@@ -78,13 +80,19 @@ export async function runHealthCheck(opts = {}) {
     add('onebot-status', false, error?.message ?? String(error));
   }
 
-  // ③ 出站消息水位：判据是"**有人说话而 bot 一条都没回**"，不是"bot 一直没说话"。
+  // ③ 入站处理水位：判据是"**到期的入站消息有没有被处理**"，而不是"入站新 → 出站必须新"，
+  //    也不是"bot 一直没说话"。
   // - observe 模式本来就不发消息 → 跳过（否则每 5 分钟固定误报）。
   // - 窗口内没有入站消息（深夜/冷清时段）→ 静默期，出站为空是正常行为 → 记 ok。
   //   2026-10-01 实测踩到：凌晨 00:13 部署后群里没人说话，出站水位在 05:40 越过 6 小时，
-  //   连击到 3 次就私聊 owner 报"收发停止" —— 纯误报，而且**每次在安静时段部署都会复现一次**。
-  //   方案 §#7 只写了 observe 要跳过、把"时间控制/游戏等待等合法静默期"留给抑制口径，
-  //   但抑制只压抖动、压不住"本来就没人的时段"，所以要在判据本身把静默期排除掉。
+  //   连击到 3 次就私聊 owner 报"收发停止" —— 纯误报，判据本身把静默期排除掉。
+  // - 2026-10-02 08:15 第二种误报：入站很新，但编排器按响应概率**决定不回**（日志：
+  //   「未命中触发条件（概率 60%，未触发），已标记已读、不响应」），旧判据"入站新 → 出站必须新"
+  //   把这种合法沉默当成收发停止，又弹了一次告警。实际上对每条入站消息，编排器要么发起回复、
+  //   要么决定不回并标记已读（state='acked'），补课窗口外的入库时更是直接 acked —— 两者都算
+  //   "处理过"。time-gate 的 held（故意延迟）和发送失败重试的 backoff（available_at 在未来）
+  //   也都不是卡住。所以真正的故障信号只剩一个：**有消息到期了却一直停在 pending**——管道死掉
+  //   才会出现这种堆积（STUCK_INBOUND_MS 宽限覆盖一轮正常运行与一次退避重试）。
   if (mode === 'observe') {
     add('outbound-freshness', true, '跳过（observe 模式不发消息）');
   } else {
@@ -102,8 +110,24 @@ export async function runHealthCheck(opts = {}) {
         } else if (inAge > outboundStaleMs) {
           add('outbound-freshness', true, `静默期：最近一次入站距今 ${Math.round(inAge / 60000)} 分钟（超过 ${Math.round(outboundStaleMs / 60000)} 分钟没人说话，出站为空属正常）`);
         } else {
-          add('outbound-freshness', outAge <= outboundStaleMs,
-            `最近一次出站距今 ${Math.round(outAge / 60000)} 分钟 · 入站距今 ${Math.round(inAge / 60000)} 分钟`);
+          // 卡住的判据：self=0、仍停在 pending、**已到期**（max(ts, available_at) 已过宽限线
+          // —— available_at 在未来的是显式排期/退避重试，不是卡住）、且落在观察窗口内
+          // （窗口外的历史遗留 pending 不追打）。held 不在 pending 里，天然不算。
+          const stuck = db.prepare(
+            "SELECT count(*) AS c, min(ts) AS oldest FROM messages" +
+            " WHERE self=0 AND state='pending' AND max(ts, available_at) <= ? AND ts > ?"
+          ).get(now - STUCK_INBOUND_MS, now - outboundStaleMs);
+          if (stuck.c > 0) {
+            add('outbound-freshness', false,
+              `有 ${stuck.c} 条入站消息到期超过 ${Math.round(STUCK_INBOUND_MS / 60000)} 分钟未被处理` +
+              `（最早一条距今 ${Math.round((now - Number(stuck.oldest)) / 60000)} 分钟）—— 收发链路可能停滞`);
+          } else if (inAge < STUCK_INBOUND_MS) {
+            add('outbound-freshness', true,
+              `最近入站处理中（${Math.round(inAge / 60000)} 分钟前收到；出站距今 ${Math.round(outAge / 60000)} 分钟）`);
+          } else {
+            add('outbound-freshness', true,
+              `最近入站均已处理（最后一条距今 ${Math.round(inAge / 60000)} 分钟；出站距今 ${Math.round(outAge / 60000)} 分钟）`);
+          }
         }
       } finally { db.close(); }
     } catch (error) {

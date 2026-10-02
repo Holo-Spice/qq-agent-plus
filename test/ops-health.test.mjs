@@ -10,7 +10,7 @@ const { runHealthCheck } = await import('../src/core/health-check.js');
 const { openDatabase } = await import('../src/core/sqlite.js');
 const { readOwnerUin } = await import('../src/core/notify-owner.js');
 
-function makeDataDir({ withDb = true, withUpdaterState = false, withMarker = false, outboundAgoMs = 0, inboundAgoMs = 0 } = {}) {
+function makeDataDir({ withDb = true, withUpdaterState = false, withMarker = false, outboundAgoMs = 0, inboundAgoMs = 0, inboundState = 'pending', inboundAvailableInMs = null } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-health-'));
   if (withDb) {
     const db = openDatabase(path.join(dir, 'messages.sqlite'));
@@ -24,9 +24,12 @@ function makeDataDir({ withDb = true, withUpdaterState = false, withMarker = fal
     )`);
     const now = Date.now();
     db.prepare('INSERT INTO messages (chat_key, id, ts, text, self) VALUES (?, ?, ?, ?, 1)').run('group:1', 1, now - outboundAgoMs, 'hi');
-    // inboundAgoMs = null 表示"库里从来没有入站记录"
+    // inboundAgoMs = null 表示"库里从来没有入站记录"；
+    // inboundAvailableInMs = null 表示 available_at=0（真实入库的默认值：立即到期）
     if (inboundAgoMs !== null) {
-      db.prepare('INSERT INTO messages (chat_key, id, ts, text, self) VALUES (?, ?, ?, ?, 0)').run('group:1', 2, now - inboundAgoMs, '有人吗');
+      const availableAt = inboundAvailableInMs === null ? 0 : now + inboundAvailableInMs;
+      db.prepare('INSERT INTO messages (chat_key, id, ts, text, self, state, available_at) VALUES (?, ?, ?, ?, 0, ?, ?)')
+        .run('group:1', 2, now - inboundAgoMs, '有人吗', inboundState, availableAt);
     }
     db.close();
   }
@@ -68,20 +71,53 @@ test('observe 模式跳过出站水位（不发消息不算故障）', async () 
   assert.match(item.detail, /observe/);
 });
 
-test('active 模式出站水位陈旧 → 失败；新鲜 → 通过', async () => {
-  // 窗口内**有**入站消息（10 分钟前有人说话）时，出站 7 小时没动静才是"收发停止"
-  const stale = makeDataDir({ outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 10 * 60 * 1000 });
+test('active 模式：入站到期未处理（管道停滞）→ 失败；已处理 → 通过', async () => {
+  // 判据（2026-10-02 修订）：看的不是"出站多新"，而是"**到期的入站有没有被处理**"。
+  // 入站 40 分钟前到达、仍停在 pending（到期超过 30 分钟宽限）＝ 管道停滞 → 失败。
+  const stale = makeDataDir({ outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 40 * 60 * 1000 });
   const staleRun = await runHealthCheck({
     dataDir: stale, fetchImpl: okFetch, statfs: okStatfs, notify: null,
     outboundStaleMs: 6 * 60 * 60 * 1000,
   });
   const staleItem = staleRun.checks.find((c) => c.name === 'outbound-freshness');
   assert.equal(staleItem.ok, false);
-  assert.match(staleItem.detail, /入站距今/);
+  assert.match(staleItem.detail, /未被处理/);
 
-  const fresh = makeDataDir({ outboundAgoMs: 60 * 1000, inboundAgoMs: 10 * 60 * 1000 });
-  const freshRun = await runHealthCheck({ dataDir: fresh, fetchImpl: okFetch, statfs: okStatfs, notify: null });
-  assert.equal(freshRun.checks.find((c) => c.name === 'outbound-freshness').ok, true);
+  // 同样的出站水位，入站已经评估过（acked：回了，或按概率决定不回）→ 不是故障。
+  // 这条就是 2026-10-02 08:15 那次误报的回归用例：旧判据（入站新 → 出站必须新）在这里必红。
+  const handled = makeDataDir({ outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 40 * 60 * 1000, inboundState: 'acked' });
+  const handledRun = await runHealthCheck({
+    dataDir: handled, fetchImpl: okFetch, statfs: okStatfs, notify: null,
+    outboundStaleMs: 6 * 60 * 60 * 1000,
+  });
+  const handledItem = handledRun.checks.find((c) => c.name === 'outbound-freshness');
+  assert.equal(handledItem.ok, true);
+  assert.match(handledItem.detail, /均已处理/);
+});
+
+test('active 模式：入站刚到还在处理窗口内（pending 未满宽限）→ 不算故障', async () => {
+  // 出站过旧 + 入站 10 分钟前（未超 30 分钟宽限）＝ 可能在处理中，不该告警
+  const dir = makeDataDir({ outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 10 * 60 * 1000 });
+  const r = await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null });
+  const item = r.checks.find((c) => c.name === 'outbound-freshness');
+  assert.equal(item.ok, true);
+  assert.match(item.detail, /处理中/);
+});
+
+test('active 模式：入站被显式排期到未来（available_at 未到）→ 不算故障', async () => {
+  // 到达 40 分钟前但排期在 1 小时后（重试退避/延迟处理）：还没到期，不算卡住
+  const dir = makeDataDir({
+    outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 40 * 60 * 1000, inboundAvailableInMs: 60 * 60 * 1000,
+  });
+  const r = await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null });
+  assert.equal(r.checks.find((c) => c.name === 'outbound-freshness').ok, true);
+});
+
+test('active 模式：time-gate held 的入站 → 不算故障', async () => {
+  // 静默时段收到的消息被故意持有到活跃时段：是延迟不是卡住
+  const dir = makeDataDir({ outboundAgoMs: 7 * 60 * 60 * 1000, inboundAgoMs: 40 * 60 * 1000, inboundState: 'held' });
+  const r = await runHealthCheck({ dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null });
+  assert.equal(r.checks.find((c) => c.name === 'outbound-freshness').ok, true);
 });
 
 test('active 模式：窗口内没人说话（最后一条入站也在窗口外）→ 静默期，不算故障', async () => {
