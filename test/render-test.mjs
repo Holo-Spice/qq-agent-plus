@@ -1718,6 +1718,25 @@ try {
     console.log('  FAIL  AI 资产观测视图缺失或泄露了图片源 URL');
   }
 
+  // 静态护栏（2026-10-02 复审 P2）：包裹/守卫这类"只有读代码才看得见"的约定，行为用例只
+  // 覆盖标记生效后的分支 —— 未来把包裹或守卫删掉，行为用例仍然全绿。这里把源码形态钉死：
+  // ① 每个保存点都被 withAssetWrite 包裹；② 删除在途标记覆盖全部类别（身份/记忆的回声走
+  //    identity-pilot-update，不能退回只标 stickers/slang）；③ 资产/身份回声监听器带着守卫。
+  const featuresSrc = fs.readFileSync(path.join(ROOT, 'ui', 'pages', 'features.js'), 'utf8');
+  const appSrc = fs.readFileSync(path.join(ROOT, 'ui', 'app.js'), 'utf8');
+  const wrapCount = (featuresSrc.match(/withAssetWrite\(async/g) || []).length;
+  const finishCount = (featuresSrc.match(/await finishAssetMutation\(/g) || []).length;
+  const guardHit = (name) => {
+    const at = appSrc.indexOf(`addEventListener('${name}'`);
+    return at >= 0 && appSrc.slice(at, at + 900).includes('assetWriteInFlight');
+  };
+  const guardPins = wrapCount >= 5 && wrapCount === finishCount
+    && featuresSrc.includes("const inFlight = { kind, id: String(entry.id ?? entry.userId ?? '') };")
+    && guardHit('asset-update') && guardHit('identity-pilot-update');
+  guardPins ? pass++ : fail++;
+  console.log('  ' + (guardPins ? 'OK   ' : 'FAIL ')
+    + `写入/删除在途守卫的源码约定保持（保存点包裹 ${wrapCount}/${finishCount}）`);
+
   const originalFetch = sandbox.fetch;
   const assetDeleteCalls = [];
   sandbox.fetch = async (url, options = {}) => {
@@ -1871,7 +1890,7 @@ try {
 
   // 本地写入在途（编辑/新增保存）时，asset-update 回声一律跳过 —— 防"保存后双重重渲染"
   vm.runInContext(
-    'state.tab = "assets"; state.assetWriteInFlight = true;'
+    'state.tab = "assets"; state.assetWriteInFlight = 1;'
     + 'state.assetDetail = { entries: [{ id: "sticker-7" }] };'
     + 'state.assetOverview = { stickers: { total: 3 } };', ctx);
   for (const fn of sseRegistry['asset-update'] || []) {
@@ -1884,7 +1903,61 @@ try {
   writeSkip ? pass++ : fail++;
   console.log('  ' + (writeSkip ? 'OK   ' : 'FAIL ')
     + '本地写入在途时 asset-update 回声被跳过（防保存后双重重渲染）');
-  vm.runInContext('state.assetWriteInFlight = false;', ctx);
+  vm.runInContext('state.assetWriteInFlight = 0;', ctx);
+
+  // 身份/记忆的保存与删除在途时，identity-pilot-update 回声同样必须被跳过 —— 服务端
+  // /api/assets/identities 写库、/api/assets/memory 经 refreshIdentityAfterAssetMutation
+  // 都会广播该事件；不挡的话 finishAssetMutation / 删除收尾之前先被回声整页重拉一次，
+  // 保存/删除后页面闪两下（2026-10-02 复审 P1：五个保存点里身份、记忆两处曾被穿透）。
+  vm.runInContext(
+    'const __origLoadIdentityPage = loadIdentityFeaturePage;'
+    + 'globalThis.__identityReloads = 0;'
+    + 'loadIdentityFeaturePage = () => { globalThis.__identityReloads += 1; return Promise.resolve(); };'
+    + 'state.tab = "identity"; state.assetDeleteInFlight = null;', ctx);
+  // ① 保存在途 → 跳过
+  vm.runInContext('state.assetWriteInFlight = 1;', ctx);
+  for (const fn of sseRegistry['identity-pilot-update'] || []) await fn({ data: '{}' });
+  const identityWriteSkip = vm.runInContext('globalThis.__identityReloads === 0', ctx);
+  identityWriteSkip ? pass++ : fail++;
+  console.log('  ' + (identityWriteSkip ? 'OK   ' : 'FAIL ')
+    + '身份/记忆保存在途时 identity-pilot-update 回声被跳过（防保存后双重重拉）');
+  // ② 身份/记忆删除在途 → 同样跳过（删除收尾自己会重拉）
+  vm.runInContext(
+    'state.assetWriteInFlight = 0; state.assetDeleteInFlight = { kind: "identities", id: "u-1" };', ctx);
+  for (const fn of sseRegistry['identity-pilot-update'] || []) await fn({ data: '{}' });
+  const identityDeleteSkip = vm.runInContext('globalThis.__identityReloads === 0', ctx);
+  identityDeleteSkip ? pass++ : fail++;
+  console.log('  ' + (identityDeleteSkip ? 'OK   ' : 'FAIL ')
+    + '身份/记忆删除在途时 identity-pilot-update 回声被跳过（防删除后双重重拉）');
+  // ③ 清掉在途标记后，同一事件正常触发重拉（后台/别处的身份变更仍然同步）
+  vm.runInContext('state.assetDeleteInFlight = null;', ctx);
+  for (const fn of sseRegistry['identity-pilot-update'] || []) await fn({ data: '{}' });
+  const identityEchoApplied = vm.runInContext('globalThis.__identityReloads >= 1', ctx);
+  identityEchoApplied ? pass++ : fail++;
+  console.log('  ' + (identityEchoApplied ? 'OK   ' : 'FAIL ')
+    + '清掉在途标记后 identity-pilot-update 正常触发重拉（后台变更仍然同步）');
+  vm.runInContext('loadIdentityFeaturePage = __origLoadIdentityPage; state.tab = "assets";', ctx);
+
+  // withAssetWrite 用计数而非布尔（2026-10-02 复审 P2）：两次保存重叠时，先完成的一次
+  // 不能把后一次的在途窗口提前清掉 —— 否则后一次的回声漏进来，双重重拉复发。
+  const refcount = await vm.runInContext(
+    '(async () => {'
+    + ' state.assetWriteInFlight = 0;'
+    + ' let release;'
+    + ' const gate = new Promise((resolve) => { release = resolve; });'
+    + ' const first = withAssetWrite(async () => { await gate; });'
+    + ' const second = withAssetWrite(async () => {});'
+    + ' await second;'
+    + ' const duringFirst = state.assetWriteInFlight;'
+    + ' release();'
+    + ' await first;'
+    + ' return { duringFirst, after: state.assetWriteInFlight };'
+    + '})()', ctx);
+  const refcountOk = refcount.duringFirst === 1 && refcount.after === 0;
+  refcountOk ? pass++ : fail++;
+  console.log('  ' + (refcountOk ? 'OK   ' : 'FAIL ')
+    + 'withAssetWrite 计数语义（先完成的一次不提前关闭另一次的在途窗口）');
+
   sandbox.fetch = originalFetch;
 
   vm.runInContext(`state.autoUpdateStatus = ${JSON.stringify({

@@ -811,6 +811,11 @@ function connectSSE() {
     loadAssetObservatory();
   });
   es.addEventListener('identity-pilot-update', () => {
+    // 本地身份/记忆的保存或删除在途：这条多半是自己请求的回声（服务端 /api/assets/identities
+    // 写库、/api/assets/memory 经 refreshIdentityAfterAssetMutation 都会广播该事件）——
+    // 跳过重拉，交给保存流程的 finishAssetMutation / 删除收尾自己刷新；不挡的话同一份数据
+    // 拉两遍、页面闪两下（2026-10-02 复审 P1：资产页保存修好后，身份/记忆两处仍被这条回声穿透）。
+    if (state.assetWriteInFlight || state.assetDeleteInFlight) return;
     if (state.tab === 'settings' && state.settingsSection === 'experiments') {
       loadExperimentalFeatureStatuses();
     }

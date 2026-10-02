@@ -317,12 +317,16 @@ function assetChatOptions(selected = '') {
   ).join('');
 }
 
-/** 本地资产写入在途（编辑/新增/收录保存）：期间到达的 asset-update SSE 回声一律跳过 ——
- *  保存流程自己会用 finishAssetMutation 重拉收尾；不挡的话回声会再触发一次"清空+重拉"，
- *  表现为保存后整格重渲染两次、滚动被顶回顶部（2026-10-02 复审）。 */
+/** 本地资产写入在途（编辑/新增/收录保存）：期间到达的资产类 SSE 回声（asset-update /
+ *  identity-pilot-update）一律跳过 —— 保存流程自己会用 finishAssetMutation 重拉收尾；
+ *  不挡的话回声会再触发一次"清空+重拉"，表现为保存后整格重渲染两次、滚动被顶回顶部
+ *  （2026-10-02 复审）。计数而非布尔：连续两次保存重叠时，先完成的一次不能把后一次的
+ *  在途窗口提前清掉，否则后一次的回声漏进来照样双重重拉（2026-10-02 复审 P2）。 */
 async function withAssetWrite(fn) {
-  state.assetWriteInFlight = true;
-  try { return await fn(); } finally { state.assetWriteInFlight = false; }
+  state.assetWriteInFlight = (Number(state.assetWriteInFlight) || 0) + 1;
+  try { return await fn(); } finally {
+    state.assetWriteInFlight = Math.max(0, (Number(state.assetWriteInFlight) || 0) - 1);
+  }
 }
 
 function finishAssetMutation(overlay) {
@@ -554,9 +558,9 @@ async function deleteAsset(kind, entry, cardEl = null) {
   // 删除在途标记：服务端是「先广播 SSE、后回 HTTP 响应」，SSE 的 delete 事件会比
   // 本响应先到 —— 若不挡住，asset-update 监听器会在这里的本地摘除完成前触发
   // 整格重渲染（缩略图全部重闪）并把概览计数减两次（2026-10-02 用户实测「等好久才消失」）。
-  const inFlight = (kind === 'stickers' || kind === 'slang')
-    ? { kind, id: String(entry.id ?? '') }
-    : null;
+  // 身份/记忆也一并标记：它们的删除不走就地摘除，但回声（identity-pilot-update）会在
+  // 响应落地前先把身份页整页重拉一次，叠上删除收尾的重拉同样是两次（2026-10-02 复审）。
+  const inFlight = { kind, id: String(entry.id ?? entry.userId ?? '') };
   state.assetDeleteInFlight = inFlight;
   try {
     const result = await api(path, { method: 'DELETE', body: JSON.stringify(body) });
