@@ -929,20 +929,21 @@ try {
     && !/id="cfg-sticker-max"[^>]*type="number"/.test(defaultHtml);
   defaultOnOk ? pass++ : fail++;
   console.log('  ' + (defaultOnOk ? 'OK   ' : 'FAIL ') + '设置页：缺省开关勾选、清单条数默认 10 档且不再是输入框');
-  // 收藏三件套（2026-10-02 用户反馈"乱收藏"）：总闸/自动收藏默认勾选、上限默认 10 档；
-  // 关掉/自定义的存量值如实回显（不勾选、5 被选中）
+  // 收藏开关（2026-10-02 用户反馈"乱收藏"）：**一个开关**同时管"自动收"与"主动收"
+  // （两个名字太像、分开摆会造成误解）；上限默认 10 档；关掉/自定义值如实回显，
+  // 手改出的"混合状态"（总闸开、自动关）在界面上显示为关。
   const collectSelect = (html) => /<select id="cfg-sticker-collect-max">([\s\S]*?)<\/select>/.exec(html)?.[1] || '';
+  const mixedCollectHtml = ctx.renderChatSection({ ...cfg, sticker: { ...cfg.sticker, collectEnabled: true, autoCollect: false } });
   const collectUiOk = /id="cfg-sticker-collect"/.test(defaultHtml)
-    && /id="cfg-sticker-autocollect"/.test(defaultHtml)
+    && !/id="cfg-sticker-autocollect"/.test(defaultHtml)
     && /id="cfg-sticker-collect"\s+checked/.test(defaultHtml)
-    && /id="cfg-sticker-autocollect"\s+checked/.test(defaultHtml)
     && /<option value="10" selected>/.test(collectSelect(defaultHtml))
     && !/id="cfg-sticker-collect"\s+checked/.test(chatHtml)
-    && !/id="cfg-sticker-autocollect"\s+checked/.test(chatHtml)
-    && /<option value="5" selected>/.test(collectSelect(chatHtml));
+    && /<option value="5" selected>/.test(collectSelect(chatHtml))
+    && !/id="cfg-sticker-collect"\s+checked/.test(mixedCollectHtml);
   collectUiOk ? pass++ : fail++;
   console.log('  ' + (collectUiOk ? 'OK   ' : 'FAIL ')
-    + '设置页：收藏总闸/自动收藏开关 + 每小时上限档位（存量值如实回显）');
+    + '设置页：收藏开关（一个开关管自动+主动）+ 每小时上限档位（存量/混合值如实回显）');
   // 存量的超范围值（手改过 config.json 的 500）落到 60 档，不会渲染出 500 这种选项
   const overHtml = ctx.renderChatSection({ ...cfg, sticker: { ...cfg.sticker, promptMaxStickers: 500 } });
   const overOk = /<option value="60" selected>/.test(overHtml)
@@ -3025,8 +3026,8 @@ try {
       + (okBranch ? '' : ' -> ' + JSON.stringify(results)));
   }
 
-  // 收藏三件套（2026-10-02 用户反馈）：控件状态要原样写进 sticker 配置 —— 只钉"sticker 键存在"
-  // 不够（分支用例里它本来就在），这里连值一起钉：总闸 false、自动收藏 true、上限 5。
+  // 收藏开关（2026-10-02 用户反馈）：一个开关管两个键 —— 关掉时 collectEnabled 与 autoCollect
+  // 一起写 false（否则"总闸关了还在往 QQ 收藏里收"那个洞会从界面重开）；勾上时一起 true。
   {
     const posts = [];
     sandbox.fetch = async (path, opts = {}) => {
@@ -3039,16 +3040,19 @@ try {
     vm.runInContext(
       'state.settingsSection = "chat";'
       + 'document.querySelector("#cfg-sticker-collect").checked = false;'
-      + 'document.querySelector("#cfg-sticker-autocollect").checked = true;'
       + 'document.querySelector("#cfg-sticker-collect-max").value = "5";', ctx);
     await vm.runInContext('saveConfig({ quiet: true })', ctx);
-    const body = posts.length ? posts[posts.length - 1] : {};
-    const sk = body.sticker || {};
-    const collectSaveOk = sk.collectEnabled === false && sk.autoCollect === true && sk.maxCollectPerHour === 5;
+    let sk = (posts.length ? posts[posts.length - 1] : {}).sticker || {};
+    const collectOffOk = sk.collectEnabled === false && sk.autoCollect === false && sk.maxCollectPerHour === 5;
+    vm.runInContext('document.querySelector("#cfg-sticker-collect").checked = true;', ctx);
+    await vm.runInContext('saveConfig({ quiet: true })', ctx);
+    sk = (posts.length ? posts[posts.length - 1] : {}).sticker || {};
+    const collectOnOk = sk.collectEnabled === true && sk.autoCollect === true;
+    const collectSaveOk = collectOffOk && collectOnOk;
     collectSaveOk ? pass++ : fail++;
     console.log('  ' + (collectSaveOk ? 'OK   ' : 'FAIL ')
-      + '保存：收藏总闸/自动收藏/上限按控件状态写入 sticker 配置'
-      + (collectSaveOk ? '' : ` -> ${JSON.stringify(sk)}`));
+      + '保存：收藏开关一起写 collectEnabled/autoCollect（关=两个都关、开=都开）'
+      + (collectSaveOk ? '' : ` -> off=${collectOffOk} on=${collectOnOk} ${JSON.stringify(sk)}`));
   }
 
   // ── 群勾选列表的"没读完别覆盖"守卫 ──

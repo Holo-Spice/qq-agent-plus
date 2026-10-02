@@ -670,14 +670,17 @@ async function saveConfig({ quiet = false } = {}) {
       followUpEnabled: chk('#cfg-pro-followup', c.proactive?.followUpEnabled !== false),
       selfWakeEnabled: chk('#cfg-pro-selfwake', c.proactive?.selfWakeEnabled !== false)
     };
+    // 收藏总闸（2026-10-02 用户反馈"乱收藏"）：界面是**一个开关** = collectEnabled 与
+    // autoCollect 一起开/一起关（自动收与主动收都归它管，两个名字太像、分开摆会造成误解）。
+    // 两个键在配置里仍独立，手改可以只关"自动扫图"那条；手改出的混合状态在界面上显示为"关"，
+    // 保存时按"一起关"落盘（控件缺失的旧页面按已保存值回退，不会误抹）。
+    const stickerCollectOn = chk('#cfg-sticker-collect',
+      c.sticker?.collectEnabled !== false && c.sticker?.autoCollect !== false);
     patch.sticker = {
       ...c.sticker,
       enabled: chk('#cfg-sticker', c.sticker?.enabled !== false),
-      // 收藏相关（2026-10-02 用户反馈"乱收藏"）：三个键各自独立 —— collectEnabled 是总闸
-      // （自动收与聊天里主动收都过它），autoCollect 只管"扫群友发的图"。老配置缺键按默认
-      // （true/true/10）回退；控件不存在（旧页面缓存）时也退回已保存配置，不会把值抹掉。
-      collectEnabled: chk('#cfg-sticker-collect', c.sticker?.collectEnabled !== false),
-      autoCollect: chk('#cfg-sticker-autocollect', c.sticker?.autoCollect !== false),
+      collectEnabled: stickerCollectOn,
+      autoCollect: stickerCollectOn,
       maxCollectPerHour: clampInt(val('#cfg-sticker-collect-max', c.sticker?.maxCollectPerHour), 1, 60, 10),
       // 先取界面实时值（没这个控件时才退回已保存配置），再钳到 0~3
       encourage: Math.min(3, Math.max(0, Number(

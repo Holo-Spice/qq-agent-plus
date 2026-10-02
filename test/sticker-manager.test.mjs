@@ -463,6 +463,27 @@ test('Issue #17：备注命中不被标签擦边否决；整行粘贴（带标�
 });
 
 
+test('收藏总闸关闭时自动收藏直接跳过：不判断、不花模型调用（2026-10-02 反馈）', async () => {
+  const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+  updateConfig({ sticker: { ...DEFAULT_CONFIG.sticker, enabled: true, autoCollect: true, collectEnabled: false } });
+  const manager = new StickerManager({ async call() { throw new Error('不该调协议端'); } });
+  // 防变异路径碰真实网络：真去判断时这里会立刻抛错（而不是去 fetch example.com）
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error('总闸关闭时不该有任何网络调用'); };
+  try {
+    const result = await manager.autoCollect('group:1', {
+      mid: 'm1',
+      media: [{ kind: 'image', url: 'https://example.com/a.png', file: 'a.png' }]
+    });
+    assert.equal(result, null, '总闸关闭时不该收藏');
+    // judgeTimes 在"进入判断"之前就会记一笔 —— 它为空才证明连判断都没跑
+    // （否则"优先加进 QQ 收藏"那条路会绕过总闸、还会白花一次看图调用）
+    assert.equal((manager.judgeTimes || []).length, 0, '总闸关闭时不该进入判断');
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+});
+
 test('收藏双闸（#9）：会话额度互不影响；全局额度共享（配额在 manager 实例上）', async () => {
   const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
   updateConfig({ sticker: { ...DEFAULT_CONFIG.sticker, collectEnabled: true, maxCollectPerHour: 4, maxCollectPerHourPerChat: 2 } });

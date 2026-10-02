@@ -186,11 +186,8 @@ return `
     <div class="checkbox-row"><input type="checkbox" id="cfg-sticker" ${c.sticker.enabled ? 'checked' : ''} />
       <label for="cfg-sticker">启用表情包（收藏表情同步 + 发送工具）</label></div>
 
-    <div class="checkbox-row"><input type="checkbox" id="cfg-sticker-collect" ${c.sticker?.collectEnabled !== false ? 'checked' : ''} />
-      <label for="cfg-sticker-collect">允许机器人自己收藏表情包（关掉后自动收与主动收都停；控制台手动添加不受影响）</label></div>
-
-    <div class="checkbox-row"><input type="checkbox" id="cfg-sticker-autocollect" ${c.sticker?.autoCollect !== false ? 'checked' : ''} />
-      <label for="cfg-sticker-autocollect">自动收藏群友发的表情包（看到图会自己判断值不值得收；上面开着时才生效）</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-sticker-collect" ${(c.sticker?.collectEnabled !== false && c.sticker?.autoCollect !== false) ? 'checked' : ''} />
+      <label for="cfg-sticker-collect">允许机器人自己收藏表情包（关掉后不再自动收，也不会在聊天里主动收；手动添加不受影响）</label></div>
 
     <div class="field">
       <label for="cfg-sticker-collect-max">每小时最多收藏</label>

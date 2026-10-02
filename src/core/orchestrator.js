@@ -1453,6 +1453,9 @@ export class Orchestrator {
       // 与 schedule_wake / generate_image 是同一口径：开关关掉就连工具带提示词一起撤。
       if (!stickerEnabled && (d.name === 'send_sticker' || d.name === 'list_stickers'
         || d.name === 'get_sticker_image' || d.name === 'collect_sticker')) return false;
+      // 收藏总闸关掉（表情包功能还开着）：只摘"主动收藏"这一个工具 —— 发送/列表/看图不受影响；
+      // 留着的话模型会去调一个必然失败的收藏（还先白花一次看图判断，2026-10-02）。
+      if (cfg.sticker?.collectEnabled === false && d.name === 'collect_sticker') return false;
       if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
       if (!selfWakeEnabled && d.name === 'schedule_wake') return false;
       // ASR 按量计费：开关关掉或没配 key 就不注入，避免模型调用必失败；也防误配置导致意外计费

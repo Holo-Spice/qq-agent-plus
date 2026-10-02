@@ -694,6 +694,27 @@ describe('Orchestrator', () => {
     }
   });
 
+  it('收藏总闸关闭时只摘 collect_sticker，发送/列表/看图仍在（2026-10-02）', async (t) => {
+    // 总闸（collectEnabled）管的是"收"：关掉后模型不该再有主动收藏的工具，
+    // 否则它会去调一个必然失败的收藏（还先白花一次看图判断）。
+    const { cfg, runner, append } = fixture(t);
+    cfg.sticker.enabled = true;
+    cfg.sticker.collectEnabled = false;
+    setRuntimeConfig(cfg);
+    const bodies = [];
+    globalThis.fetch = async (_url, options) => {
+      bodies.push(JSON.parse(options.body));
+      return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
+    };
+    append(1, '在吗', '42');
+    await runner.wake('group:1');
+    const names = bodies[0].tools.map((tool) => tool.function.name);
+    assert.ok(!names.includes('collect_sticker'), '收藏总闸关闭时不应再注入 collect_sticker');
+    for (const name of ['send_sticker', 'list_stickers', 'get_sticker_image']) {
+      assert.ok(names.includes(name), `${name} 与收藏无关，应该保留`);
+    }
+  });
+
   it('feeds both familiar and unused stickers into the system prompt', async (t) => {
     const { cfg, runner, append } = fixture(t);
     cfg.sticker.enabled = true;

@@ -320,7 +320,10 @@ export class StickerManager {
    */
   async autoCollect(chatKey, message) {
     const cfg = getConfig().sticker || {};
-    if (cfg.autoCollect !== true || cfg.enabled === false || !this.enabled) return null;
+    // collectEnabled 是收藏总闸（2026-10-02）：关掉后连判断都不跑 —— 否则每次候选图都会
+    // 白花一次看图判断，而且"优先加进 QQ 收藏"那条路（#addToQqFavorites，不走 collect()）
+    // 会绕过总闸继续收。总闸必须在这里挡住。
+    if (cfg.autoCollect !== true || cfg.collectEnabled === false || cfg.enabled === false || !this.enabled) return null;
     const media = (message?.media || []).find((item) => item?.kind === 'image' && item.url);
     if (!media) return null;
     const srcKey = String(media.file || '').trim() || stickerSourceKey(media.url);
