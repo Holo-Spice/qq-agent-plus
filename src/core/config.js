@@ -158,11 +158,30 @@ export function asrProvider(cfg = getConfig()) {
  * 把腾讯的 SecretKey 当讯飞 APISecret 这类事都会静默发生（2026-09-26 审查，两处都实测复现）。
  * 环境变量不受此限：它是部署级的一个值，用户设它就意味着"给我当前配的那个供应商用"。
  */
+/**
+ * 当前这家该用的三项凭据（2026-10-02 用户要求："切换服务预设时 Key 跟着切换"）：
+ * 活动槽那把按归属算（asrCredentialApplies），不适用就查"这家存过的"（asr.keys 映射，
+ * 由 asrCredentialFor 兜底老配置的单槽）。都没有时 asrApiKey 再回落到环境变量。
+ */
+export function asrCredentials(cfg = getConfig()) {
+  const asr = cfg?.asr || {};
+  const provider = asrProvider(cfg);
+  const pick = (kind, providerField, hostField) => {
+    const stored = String(asr?.[kind] || '').trim();
+    if (stored && legacy.asrCredentialApplies(asr, provider, stored, providerField, hostField)) return stored;
+    return legacy.asrCredentialFor(asr, kind, provider, asr?.baseUrl);
+  };
+  return {
+    slot: legacy.asrCredentialSlot(provider, asr?.baseUrl),
+    apiKey: pick('apiKey', 'apiKeyProvider', 'apiKeyHost'),
+    secretId: pick('secretId', 'secretIdProvider'),
+    secretKey: pick('secretKey', 'secretKeyProvider')
+  };
+}
+
 export function asrApiKey(cfg = getConfig()) {
-  const stored = String(cfg?.asr?.apiKey || '').trim();
-  if (stored && legacy.asrCredentialApplies(cfg?.asr, asrProvider(cfg), stored, 'apiKeyProvider', 'apiKeyHost')) {
-    return stored;
-  }
+  const resolved = asrCredentials(cfg).apiKey;
+  if (resolved) return resolved;
   // provider 只是"升级默认值"（用户没选过）时，不拿部署级的环境变量 Key 去请求一个他没选过的服务：
   // 从控制台保存一次即固化 provider（并清掉这个标记），那时 env Key 照常生效（2026-09-26 审查 P2）
   if (cfg?.asr?.providerDefaulted === true) return '';
@@ -171,10 +190,9 @@ export function asrApiKey(cfg = getConfig()) {
   return String(process.env.ASR_API_KEY || '').trim();
 }
 
-/** 腾讯云的 SecretId（同 apiKey 的绑定规则）。 */
+/** 腾讯云的 SecretId（同 apiKey 的绑定规则 + 按服务记忆）。 */
 export function asrSecretId(cfg = getConfig()) {
-  const stored = String(cfg?.asr?.secretId || '').trim();
-  return legacy.asrCredentialApplies(cfg?.asr, asrProvider(cfg), stored, 'secretIdProvider') ? stored : '';
+  return asrCredentials(cfg).secretId;
 }
 
 /**
@@ -182,8 +200,7 @@ export function asrSecretId(cfg = getConfig()) {
  * 所以归属必须记清：不记就会把腾讯的 SecretKey 发给百度或讯飞（2026-09-26 审查，实测复现）。
  */
 export function asrSecretKey(cfg = getConfig()) {
-  const stored = String(cfg?.asr?.secretKey || '').trim();
-  return legacy.asrCredentialApplies(cfg?.asr, asrProvider(cfg), stored, 'secretKeyProvider') ? stored : '';
+  return asrCredentials(cfg).secretKey;
 }
 
 /** 当前配的这家，Key 绑定落在哪个主机上（控制台显示"这把 Key 是哪家的"用；非 OpenAI 兼容为空）。 */
@@ -201,10 +218,7 @@ export function asrKeySource(cfg = getConfig()) {
   if (!asrApiKey(cfg)) return '';
   // 必须报"真正生效的那把从哪来"：存的那把不适用时会回落到 env，原来无条件按"存过就算 config"报，
   // 界面就不会提示"Key 来自环境变量"，用户撤掉 env 后会突然失效且找不到原因（2026-09-26 审查 P2）
-  const stored = String(cfg?.asr?.apiKey || '').trim();
-  const storedApplies = Boolean(stored)
-    && legacy.asrCredentialApplies(cfg?.asr, asrProvider(cfg), stored, 'apiKeyProvider', 'apiKeyHost');
-  return storedApplies ? 'config' : 'env';
+  return asrCredentials(cfg).apiKey ? 'config' : 'env';
 }
 
 /**

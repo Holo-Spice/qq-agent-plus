@@ -57,11 +57,15 @@ export function sanitizeConfigSecrets(cfg) {
     out.providerKeyPresence = has;
   }
 
-  // tts.keys 同款处理（2026-09-29 审查 P1）：SECRET_KEY_PATTERN 只匹配字段名，"按服务 id
-  // 存 Key" 的 keys 映射（{ siliconflow: 'sk-…', doubao: '…' }）会整包穿过去、明文下发。
-  // 前端的"哪几家存过"口径由 safeConfigWithAsrStatus 里的 ttsKeyServices 另行下发。
-  if (out.tts && typeof out.tts === 'object' && out.tts.keys && typeof out.tts.keys === 'object') {
-    out.tts.keys = {};
+  // keys 映射同款处理（2026-09-29 审查 P1；2026-10-02 扩到 imageGen / asr）：SECRET_KEY_PATTERN
+  // 只匹配字段名，"按服务 id / 主机存 Key" 的 keys 映射（{ siliconflow: 'sk-…' }）会整包穿过去、
+  // 明文下发。前端的"哪几家存过"口径由各自的派生结论另行下发：ttsKeyServices（tts）、
+  // keyHosts（imageGen）、keySlots（asr）。
+  for (const section of ['tts', 'imageGen', 'asr']) {
+    const node = out[section];
+    if (node && typeof node === 'object' && node.keys && typeof node.keys === 'object') {
+      node.keys = {};
+    }
   }
 
   // 提供商列表：删掉 key 字段（同样不能置空串，否则回传时覆盖真实 Key），补 hasKey

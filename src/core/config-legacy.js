@@ -193,6 +193,11 @@ export const DEFAULT_CONFIG = {
     secretIdProvider: '',     // 上面这个 SecretId 是给哪家存的（同 apiKeyProvider 的道理）
     secretKey: '',            // 百度 Secret Key / 腾讯云 SecretKey / 讯飞 APISecret
     secretKeyProvider: '',    // 上面这个 SecretKey 是给哪家存的（三个服务共用这一个字段，不记归属就会串用）
+    // 「每家存过的那套凭据」按**槽位**记（2026-10-02 用户要求）：切服务预设时自动取回 ——
+    // 存过就填回、没存过就留空等用户填。槽位口径见 asrCredentialSlot：
+    // OpenAI 兼容按"地址主机"分家（硅基流动/Groq/OpenAI 都是 openai），其余按 provider。
+    // 活动凭据仍是上面的单槽 + 归属钉；这个映射只作"切换预设时的记忆"（与 tts.keys / imageGen.keys 同款思路）。
+    keys: {},
     baseUrl: 'https://api.siliconflow.cn/v1',  // 默认预置硅基流动（免费模型，国内可直连）；可换任意兼容服务
     model: '',                // openai 兼容的模型名，例：whisper-large-v3-turbo
     language: '',             // 可选：提示语言（zh / en…），留空由服务自己判
@@ -227,6 +232,10 @@ export const DEFAULT_CONFIG = {
     baseUrl: '',              // 留空表示"跟聊天模型同域"（很多网关同域就带 images 端点）
     apiKey: '',               // 单独填的 Key；留空只在"与模型同域"时复用模型 Key，否则拒绝（见 resolveImageGenAuth）
     apiKeyHost: '',           // 上面这把 Key 是给哪家的**地址**存的（主机名）：换预设/换地址后不再拿它发请求
+    // 「每家存过的那把 Key」按主机记（2026-10-02 用户要求）：切服务预设时自动取回 ——
+    // 存过就填回、没存过就留空等用户填。活动 Key 仍是上面的 apiKey + apiKeyHost 归属钉；
+    // 这个映射只作"切换预设时的记忆"（与 tts.keys 同款思路）。
+    keys: {},
 
     model: '',                // 如 gpt-image-1 / seedream-3.0 / cogview-3
     size: '',                 // 如 1024x1024；留空由服务商默认
@@ -690,6 +699,7 @@ export function asrEndpointHost(baseUrl) {
  */
 export const ASR_DERIVED_KEYS = [
   'configured', 'available', 'keySource', 'keyProvider', 'keyUsable', 'keyHost',
+  'keySlots',                               // "哪几家存过凭据"的布尔口径（GET 时重算），不回写
   'credentialStale',                       // 界面用来表达"刚换了服务、凭据要重填"的草稿标记，不该落盘
   'secretIdUsable', 'secretKeyUsable',
   'localBinResolved', 'localModelResolved', 'localManagedExists', 'localInstalled'
@@ -723,6 +733,64 @@ export function asrCredentialApplies(asr, provider, value, providerField, hostFi
     if (bound && bound !== asrEndpointHost(asr?.baseUrl)) return false;
   }
   return true;
+}
+
+/** 槽位拼装（provider + 主机名；主机名只有 OpenAI 兼容用得上）。 */
+export function asrCredentialSlotOf(provider, host) {
+  const p = String(provider || '').trim().toLowerCase() || 'openai';
+  return p === 'openai' ? `openai|${String(host || '').trim().toLowerCase()}` : p;
+}
+
+/**
+ * 凭据槽位：一个服务预设对应一个槽（2026-10-02 用户要求："切换服务预设时 Key 跟着切换"）。
+ * 粒度与 asrCredentialApplies 的归属判定一致：OpenAI 兼容按**地址主机**分家
+ * （硅基流动/Groq/OpenAI 都是 provider=openai，不按地址分就会把 A 家的 Key 发给 B 家），
+ * 其余（讯飞/百度/腾讯/火山/百炼/本机）按 provider。
+ */
+export function asrCredentialSlot(provider, baseUrl) {
+  return asrCredentialSlotOf(provider, asrEndpointHost(baseUrl));
+}
+
+/**
+ * 取"这家存过的"某个凭据（asr.keys 映射优先；老配置的单槽凭据按归属算 —— 与
+ * asrCredentialApplies 同一条口径，升级上来的实例行为不变）。
+ * 两个读取端：运行时取凭据（core/config.js）、保存时按目标槽自动取回（/api/config）。
+ */
+export function asrCredentialFor(asr, kind, provider, baseUrl) {
+  const slot = asrCredentialSlot(provider, baseUrl);
+  const fromMap = String(asr?.keys?.[slot]?.[kind] || '').trim();
+  if (fromMap) return fromMap;
+  const providerField = kind === 'apiKey' ? 'apiKeyProvider' : `${kind}Provider`;
+  const hostField = kind === 'apiKey' ? 'apiKeyHost' : '';
+  const stored = String(asr?.[kind] || '').trim();
+  if (!stored) return '';
+  return asrCredentialApplies({ ...(asr || {}), baseUrl }, provider, stored, providerField, hostField) ? stored : '';
+}
+
+/**
+ * 哪些槽存过凭据、存的是哪几项（给界面切换预设时显示掩码用；只下发布尔口径，不下发明文）。
+ * 形状：{ 'openai|api.siliconflow.cn': ['apiKey'], tencent: ['secretId', 'secretKey'] }
+ */
+export function asrKeySlots(asr) {
+  const out = {};
+  const push = (slot, kind, value) => {
+    const s = String(slot || '').trim().toLowerCase();
+    if (!s || !String(value || '').trim()) return;
+    const list = out[s] || (out[s] = []);
+    if (!list.includes(kind)) list.push(kind);
+  };
+  for (const [slot, entry] of Object.entries(asr?.keys || {})) {
+    for (const kind of ['apiKey', 'secretId', 'secretKey']) push(slot, kind, entry?.[kind]);
+  }
+  // 老配置的单槽（升级上来、还没在控制台重存过）：按各自记的归属算槽，
+  // 让"切走再切回"能照常显示掩码（新写入路径会把它归档进映射）。
+  const fallbackProvider = String(asr?.provider || '').trim().toLowerCase();
+  const apiKeyProvider = String(asr?.apiKeyProvider || '').trim().toLowerCase() || fallbackProvider;
+  const apiKeyHost = String(asr?.apiKeyHost || '').trim().toLowerCase() || asrEndpointHost(asr?.baseUrl);
+  push(asrCredentialSlotOf(apiKeyProvider, apiKeyHost), 'apiKey', asr?.apiKey);
+  push(asrCredentialSlotOf(asr?.secretIdProvider || fallbackProvider, ''), 'secretId', asr?.secretId);
+  push(asrCredentialSlotOf(asr?.secretKeyProvider || fallbackProvider, ''), 'secretKey', asr?.secretKey);
+  return out;
 }
 
 function migrateConfig(parsed) {
@@ -932,6 +1000,32 @@ export function pinImageGenKeyHost(imageGen, apiBaseUrl) {
   const base = String(imageGen.baseUrl || '').trim() || String(apiBaseUrl || '').trim();
   imageGen.apiKeyHost = asrEndpointHost(base);
   return imageGen.apiKeyHost;
+}
+
+/**
+ * 取"某个主机上存过的图片生成 Key"（keys 映射优先；老配置只有单槽 apiKey + apiKeyHost，
+ * 那把只对**它自己绑定的主机**算数 —— 与 ttsKeyFor 的兼容口径一致）。
+ * 两个读取端：运行时取 Key（image-gen.js）、保存时按目标主机自动取回（/api/config）。
+ */
+export function imageGenKeyFor(imageGen, host) {
+  const h = String(host || '').trim().toLowerCase();
+  if (!h) return '';
+  const fromMap = String(imageGen?.keys?.[h] || '').trim();
+  if (fromMap) return fromMap;
+  const legacyHost = String(imageGen?.apiKeyHost || '').trim().toLowerCase();
+  if (legacyHost && legacyHost === h) return String(imageGen?.apiKey || '').trim();
+  return '';
+}
+
+/** 哪些主机存过 Key（给界面在切换预设时显示掩码用；只下发布尔口径，不下发明文）。 */
+export function imageGenKeyHosts(imageGen) {
+  const hosts = Object.entries(imageGen?.keys || {})
+    .filter(([, v]) => String(v || '').trim())
+    .map(([k]) => String(k).trim().toLowerCase())
+    .filter(Boolean);
+  const legacyHost = String(imageGen?.apiKeyHost || '').trim().toLowerCase();
+  if (legacyHost && String(imageGen?.apiKey || '').trim() && !hosts.includes(legacyHost)) hosts.push(legacyHost);
+  return hosts;
 }
 
 /** 真对象判定（排除 null / 数组 / 标量）——人设段这类"必须是对象"的字段用它兜底。 */

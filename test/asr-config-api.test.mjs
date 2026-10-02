@@ -236,3 +236,96 @@ test('语音模型筛选：名字里没有 asr 的转写模型也要留下，TTS
   assert.deepEqual([...body.ttsSample].sort(), ['FunAudioLLM/CosyVoice2-0.5B', 'fnlp/MOSS-TTSD-v0.5']);
   assert.equal(body.total, 10);
 });
+
+// 切换语音服务预设时凭据跟着切（2026-10-02 用户要求）：每家（槽位）存过的凭据由服务端记住 ——
+// 切到存过的那家自动取回、切到没存过的留空（等用户填）；客户端送来的 keys 映射一律被忽略
+// （与 tts.keys / imageGen.keys 同款：只准送"这一家新填的凭据"，映射由服务端合并）。
+test('切换语音服务预设：凭据按服务记忆（存过取回 / 没存过留空 / 映射不可被客户端覆盖）', async (t) => {
+  const port = await freePort();
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.server = { ...cfg.server, host: '127.0.0.1', port, token: '' };
+  cfg.runtime.mode = 'observe';
+  cfg.onebot.wsUrl = 'ws://127.0.0.1:1';
+  cfg.onebot.httpUrl = 'ws://127.0.0.1:1';
+  // keys 是映射型字段：deepMerge 不删键，用 __replace__ 让本用例从空映射开始
+  // （同文件里其它用例留下的记忆不许串进来，否则 keySlots 断言会随运行顺序漂移）
+  cfg.asr = { ...cfg.asr, enabled: true, provider: 'openai', baseUrl: 'https://a.example.com/v1', model: 'm-a', keys: { __replace__: {} } };
+  updateConfig(cfg);
+  const app = createApp({ log: () => {} });
+  t.after(async () => {
+    await app.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  await app.start();
+  const request = async (route, { method = 'GET', body } = {}) => {
+    const response = await fetch(`http://127.0.0.1:${port}${route}`, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    return { status: response.status, body: await response.json() };
+  };
+  const saveAsr = (patch) => request('/api/config', { method: 'POST', body: { asr: patch } });
+  const asrStatus = async () => (await request('/api/config')).body.asr;
+  const plain = async (field = 'apiKey') => (await request(`/api/asr-key?field=${field}`)).body.apiKey;
+
+  // ① 在 A 家填 Key
+  let res = await saveAsr({ provider: 'openai', baseUrl: 'https://a.example.com/v1', model: 'm-a', apiKey: 'sk-asr-a' });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(await plain(), 'sk-asr-a');
+  assert.deepEqual((await asrStatus()).keySlots['openai|a.example.com'], ['apiKey'], '存过 A 家要出现在 keySlots 里');
+
+  // ② 切到没存过的 B 家（掩码/留空路径）→ 不留可用的 Key，回读也拿不到（不能把 A 家的当 B 家的）
+  res = await saveAsr({ provider: 'openai', baseUrl: 'https://b.example.com/v1', model: 'm-b' });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal((await asrStatus()).keyUsable, false, '没存过的那家不该显示成"已填"');
+  assert.equal(await plain(), '', '回读走的是"这家实际会用的那把"，B 家没有就不给');
+
+  // ③ 在 B 家填 Key → 两家都记着
+  res = await saveAsr({ provider: 'openai', baseUrl: 'https://b.example.com/v1', model: 'm-b', apiKey: 'sk-asr-b' });
+  assert.equal(await plain(), 'sk-asr-b');
+  assert.deepEqual(Object.keys((await asrStatus()).keySlots).sort(),
+    ['openai|a.example.com', 'openai|b.example.com'], '两家都要在 keySlots 里');
+
+  // ④ 切回 A 家（不带 Key = 掩码路径）→ 自动取回 A 家的 Key（这条就是用户要的行为）
+  res = await saveAsr({ provider: 'openai', baseUrl: 'https://a.example.com/v1', model: 'm-a' });
+  assert.equal(await plain(), 'sk-asr-a', '切回存过的那家要自动取回 Key');
+  assert.equal((await asrStatus()).keyUsable, true);
+  assert.equal((await asrStatus()).keySource, 'config', '取回的 Key 来源是 config（不是 env）');
+
+  // ⑤ 本土服务的一套凭据（腾讯 SecretId + SecretKey）同样按服务记忆，且不会串给百度
+  await saveAsr({ provider: 'tencent', baseUrl: '', model: '', secretId: 'AKID-tc', secretKey: 'SK-tc' });
+  assert.equal(await plain('secretId'), 'AKID-tc');
+  await saveAsr({ provider: 'baidu', baseUrl: '', model: '', apiKey: 'BD_KEY' });
+  assert.equal(await plain('secretId'), '', '百度拿不到腾讯的 SecretId（跨服务不串用）');
+  await saveAsr({ provider: 'tencent', baseUrl: '', model: '' });
+  assert.equal(await plain('secretId'), 'AKID-tc', '切回腾讯要取回 SecretId');
+  assert.equal(await plain('secretKey'), 'SK-tc', '切回腾讯要取回 SecretKey');
+
+  // ⑥ 客户端送来的 keys 映射不许覆盖服务端记忆
+  res = await saveAsr({ provider: 'tencent', baseUrl: '', model: '', keys: { hijack: { apiKey: 'sk-evil' } } });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  const slots = (await asrStatus()).keySlots;
+  assert.equal(Object.prototype.hasOwnProperty.call(slots, 'hijack'), false, '客户端送的 keys 必须被忽略');
+  assert.equal(await plain('secretId'), 'AKID-tc', '原有的记忆不能被冲掉');
+
+  // ⑦ 升级上来的老配置只有单槽（apiKey + 归属钉，keys 映射里没有）：在别家新填凭据时，
+  // 老那把必须先归档进映射 —— 否则活动槽被覆盖后就永远取不回（与生图同款，切回来要能取用）
+  updateConfig({
+    asr: {
+      provider: 'openai', baseUrl: 'https://c.example.com/v1', model: 'm-c',
+      apiKey: 'sk-legacy-c', apiKeyProvider: 'openai', apiKeyHost: 'c.example.com'
+    }
+  });
+  await saveAsr({ provider: 'openai', baseUrl: 'https://d.example.com/v1', model: 'm-d', apiKey: 'sk-d' });
+  assert.equal(await plain(), 'sk-d');
+  await saveAsr({ provider: 'openai', baseUrl: 'https://c.example.com/v1', model: 'm-c' });
+  assert.equal(await plain(), 'sk-legacy-c', '老配置单槽那把在别家新填时要归档，切回来才能取回');
+
+  // ⑧ 同一家重填一把新凭据：切走再切回要取回**新的**那把（旧值不能被记忆复活）。
+  // 这条钉住"新填即写入映射"：只靠"切走时归档"会保留上次归档的旧值，重填就白填了。
+  await saveAsr({ provider: 'openai', baseUrl: 'https://c.example.com/v1', model: 'm-c', apiKey: 'sk-c-new' });
+  await saveAsr({ provider: 'openai', baseUrl: 'https://d.example.com/v1', model: 'm-d' });   // 切走（触发归档）
+  await saveAsr({ provider: 'openai', baseUrl: 'https://c.example.com/v1', model: 'm-c' });
+  assert.equal(await plain(), 'sk-c-new', '同一家重填后，切回来要取回新那把');
+});

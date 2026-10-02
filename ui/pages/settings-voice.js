@@ -147,23 +147,23 @@ function renderAsrSection(c) {
         <input type="text" id="cfg-asr-appid" value="${esc(c.asr?.appId || '')}" placeholder="讯飞控制台里那个 AppID" />
       </div>
       <div class="field" id="asr-key-field" style="${wants('key')}">
-        <label for="cfg-asr-key">API Key（留空用环境变量 ASR_API_KEY）</label>
+        <label for="cfg-asr-key">API Key（掩码 = 用这家存过的；这家没存过就留空等填）</label>
         <div style="display:flex;gap:8px">
-          <input type="password" id="cfg-asr-key" value="${esc(keyReady ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" style="flex:1" />
+          <input type="password" id="cfg-asr-key" value="${esc(keyReady ? '******' : '')}" placeholder="留空 = 用这家存过的；都没有时回落到环境变量 ASR_API_KEY" autocomplete="new-password" style="flex:1" />
           <button class="btn btn-small" id="cfg-asr-key-toggle" type="button">显示</button>
         </div>
       </div>
       <div class="field" id="asr-secretid-field" style="${wants('secretId')}">
         <label for="cfg-asr-secretid">SecretId（腾讯云）</label>
         <div style="display:flex;gap:8px">
-          <input type="password" id="cfg-asr-secretid" value="${esc(hasSecretId ? '******' : '')}" placeholder="腾讯云访问密钥的 SecretId" autocomplete="new-password" style="flex:1" />
+          <input type="password" id="cfg-asr-secretid" value="${esc(hasSecretId ? '******' : '')}" placeholder="腾讯云访问密钥的 SecretId（留空 = 用这家存过的）" autocomplete="new-password" style="flex:1" />
           <button class="btn btn-small" id="cfg-asr-secretid-toggle" type="button">显示</button>
         </div>
       </div>
       <div class="field" id="asr-secretkey-field" style="${wants('secretKey')}">
         <label for="cfg-asr-secretkey">${esc(secretKeyLabel)}</label>
         <div style="display:flex;gap:8px">
-          <input type="password" id="cfg-asr-secretkey" value="${esc(hasSecretKey ? '******' : '')}" placeholder="输入后保存；留空保持不变" autocomplete="new-password" style="flex:1" />
+          <input type="password" id="cfg-asr-secretkey" value="${esc(hasSecretKey ? '******' : '')}" placeholder="输入后保存；留空 = 用这家存过的" autocomplete="new-password" style="flex:1" />
           <button class="btn btn-small" id="cfg-asr-secretkey-toggle" type="button">显示</button>
         </div>
       </div>
@@ -311,8 +311,15 @@ async function bindImageGenPreset() {
       keyInput.disabled = !needsKey;
       keyInput.placeholder = needsKey ? '留空 = 与模型同域时复用模型 Key' : '这家不需要 Key';
     }
-    if (keyLabel) keyLabel.textContent = needsKey ? 'API Key（留空/掩码 = 保持不变）' : 'API Key（这家不需要）';
+    if (keyLabel) keyLabel.textContent = needsKey ? 'API Key（掩码 = 用这家存过的；留空 = 这家还没存过，要填）' : 'API Key（这家不需要）';
     if (revealBtn) revealBtn.disabled = !needsKey;
+    // Key 框跟着预设切（2026-10-02 用户要求）：这家（主机）存过就显示掩码 —— 保存时服务端
+    // 会把这家存过的那把取回；没存过就留空等着填。掩码/留空都不会把别家的 Key 发出去。
+    const targetHost = hostOf(s.baseUrl || baseInput?.value || '');
+    const keyHosts = Array.isArray(state.config?.imageGen?.keyHosts) ? state.config.imageGen.keyHosts : [];
+    if (keyInput && needsKey) {
+      keyInput.value = targetHost && keyHosts.includes(targetHost) ? '******' : '';
+    }
   };
   if (!presetsOk) {
     // 拉不到预设表时**什么都不动**。以前这里退化成"只有 pollinations 一家"，

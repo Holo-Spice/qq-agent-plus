@@ -437,6 +437,12 @@ function asrHostOf(url) {
   try { return new URL(String(url || '').trim()).host.toLowerCase(); } catch { return ''; }
 }
 
+/** 语音转写的凭据槽位（与后端 asrCredentialSlot 同口径）：OpenAI 兼容按主机分家，其余按 provider。 */
+function asrSlotOf(provider, baseUrl) {
+  const p = String(provider || '').trim().toLowerCase() || 'openai';
+  return p === 'openai' ? `openai|${asrHostOf(baseUrl)}` : p;
+}
+
 /** 按 provider + 地址反查当前是哪家（改过就落到「自定义」）。 */
 function asrServiceOf(provider, baseUrl) {
   const norm = (v) => String(v || '').trim().replace(/[/]+$/, '').toLowerCase();
@@ -606,7 +612,7 @@ function parseList(s) {
 
 
 export {
-  asrHostOf, asrServiceOf, asrServiceOptions, chatNameOf, clampInt, effectivePriceFor, fmtClock, fmtRate,
+  asrHostOf, asrServiceOf, asrServiceOptions, asrSlotOf, chatNameOf, clampInt, effectivePriceFor, fmtClock, fmtRate,
   fmtRemainingMs, fmtTime, fmtTok, fmtTokens, fmtWaitRemain, fmtYuan, formatChatTitle, formatElapsed,
   formatReleaseNotes, formatRevision, groupSliderPosForUi, hasOwnPrice, hostOfUrl, initialServiceNote,
   legacyServiceDeployed, matchPriceTable, memThreshold, mulOf, normalizeAsrMax, normalizeStickerMax,

@@ -1405,6 +1405,55 @@ try {
   console.log('  ' + (mapOk ? 'OK   ' : 'FAIL ') + '设置页：保存时模式/服务正确映射成 provider/baseUrl/model/Key 归属'
     + (mapOk ? '' : ` -> ${mapNotes.join('；')}`));
 
+  // 切换服务预设时凭据按"这家存过没有"自动填回（2026-10-02 用户要求"切预设时 Key 跟着切换"）：
+  // 存过 → 掩码（保存时服务端取回这家存过的那把）；没存过 → 留空等填；都不再一律清空 + 报"要重填"。
+  {
+    let switchOk = true;
+    const switchNotes = [];
+    const view = {
+      ...cfg,
+      asr: {
+        ...cfg.asr, provider: 'openai', baseUrl: 'https://a.example.com/v1', model: 'm-a',
+        hasApiKey: true, keyUsable: true,
+        keySlots: { 'openai|api.siliconflow.cn': ['apiKey'], tencent: ['secretId', 'secretKey'] }
+      }
+    };
+    vm.runInContext("state.settingsSection = 'asr';", ctx);
+    vm.runInContext(`state.config = ${JSON.stringify(view)};`, ctx);
+    // ⚠️ 垫片里同一个元素会累积多次 bindSettingsEvents 留下的监听器（前面的用例也 bind 过）——
+    // 全量触发会让"后跑的那份旧闭包"看到已更新的草稿、把 serviceChanged 重算成 false 并覆盖。
+    // 所以只触发**本次 bind 新加的那几个**（按 bind 前的数量切一刀）。
+    const svc = document.querySelector('#cfg-asr-service');
+    const boundBefore = [...(svc?._listeners?.change || [])].length;
+    ctx.bindSettingsEvents(view);            // 每次 renderSettings 都会绑；这里显式绑一次
+    const handlers = [...(document.querySelector('#cfg-asr-service')?._listeners?.change || [])].slice(boundBefore);
+    const read = (sel) => document.querySelector(sel)?.value;
+    const asrDraft = (key) => vm.runInContext(`state.config.asr.${key}`, ctx);
+    const fire = () => { for (const h of handlers) h(); };
+
+    svc.value = 'siliconflow';               // ① 切到存过 apiKey 的那家（槽位 openai|api.siliconflow.cn）
+    fire();
+    if (read('#cfg-asr-key') !== '******') { switchOk = false; switchNotes.push(`存过的那家应显示掩码，实际 ${JSON.stringify(read('#cfg-asr-key'))}`); }
+    if (asrDraft('credentialStale') !== false) { switchOk = false; switchNotes.push('存过的那家不该再报"要重填"'); }
+
+    svc.value = 'tencent';                   // ② 切到存过 SecretId/SecretKey 的那家
+    fire();
+    if (read('#cfg-asr-secretid') !== '******') { switchOk = false; switchNotes.push(`腾讯的 SecretId 应显示掩码，实际 ${JSON.stringify(read('#cfg-asr-secretid'))}`); }
+    if (read('#cfg-asr-secretkey') !== '******') { switchOk = false; switchNotes.push('腾讯的 SecretKey 应显示掩码'); }
+    if (read('#cfg-asr-key') !== '') { switchOk = false; switchNotes.push('腾讯不用 apiKey，那格该留空'); }
+
+    svc.value = 'groq';                      // ③ 切到没存过的那家（槽位 openai|api.groq.com）
+    fire();
+    for (const sel of ['#cfg-asr-key', '#cfg-asr-secretid', '#cfg-asr-secretkey']) {
+      if (read(sel) !== '') { switchOk = false; switchNotes.push(`${sel} 没存过应留空，实际 ${JSON.stringify(read(sel))}`); }
+    }
+    if (asrDraft('hasApiKey') !== false) { switchOk = false; switchNotes.push(`没存过的那家不该显示成"已填"（实际 ${JSON.stringify(asrDraft('hasApiKey'))}）`); }
+    if (asrDraft('credentialStale') !== true) { switchOk = false; switchNotes.push(`没存过的那家要提示"请重新填一次凭据"（实际 ${JSON.stringify(asrDraft('credentialStale'))} / provider=${JSON.stringify(asrDraft('provider'))} baseUrl=${JSON.stringify(asrDraft('baseUrl'))} slots=${JSON.stringify(Object.keys(asrDraft('keySlots') || {}))} svc=${JSON.stringify(svc.value)}）`); }
+    switchOk ? pass++ : fail++;
+    console.log('  ' + (switchOk ? 'OK   ' : 'FAIL ') + '设置页：切换语音服务预设时凭据按"这家存过没有"填回（存过掩码 / 没存过留空）'
+      + (switchOk ? '' : ` -> ${switchNotes.join('；')}`));
+  }
+
   // 每小时上限：清空 = 保持原值（不能变成 1，那是"清一下就变严格"的坑）
   {
     vm.runInContext("state.settingsSection = 'asr';", ctx);

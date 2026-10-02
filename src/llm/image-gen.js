@@ -11,6 +11,7 @@
 // 下载器（url 形态）直接 import safeFetchBinary 而不是当参数传：函数当参数会被 ops scan
 // 当成"未定义调用点"误报（与 tts-http.js 里记的同一类）。
 import { watchTimeWindow } from '../core/time-gate.js';
+import { imageGenKeyFor } from '../core/config.js';
 import { imageGenServiceOfBaseUrl, imageGenServiceNeedsKey } from './image-gen-presets.js';
 import { safeFetchBinary } from './safe-fetch.js';
 
@@ -51,9 +52,15 @@ export function imageGenKeyApplies(imageGen, host) {
 
 /** 存过 Key、但它不是给当前地址存的 → 界面要提示"换个地址要重填"。 */
 export function imageGenKeyStale(imageGen, api) {
-  const own = String(imageGen?.apiKey || '').trim();
-  if (!own || own === '******') return false;
-  return !imageGenKeyApplies(imageGen, hostOf(imageGenBaseUrl(imageGen, api)));
+  const host = hostOf(imageGenBaseUrl(imageGen, api));
+  const hasAny = Boolean(String(imageGen?.apiKey || '').trim())
+    || Object.values(imageGen?.keys || {}).some((v) => String(v || '').trim());
+  if (!hasAny) return false;   // 从没存过 = "还没填"，不是"要重填"
+  // 活动槽那把"没记归属"的老配置（migrateConfig 会按当时地址补记）按"当前地址能用"算 ——
+  // 与 imageGenKeyApplies 同一条口径，不给升级中的实例制造突然失效（2026-10-02 回归测试抓到）
+  const active = String(imageGen?.apiKey || '').trim();
+  if (active && active !== '******' && imageGenKeyApplies(imageGen, host)) return false;
+  return !imageGenKeyFor(imageGen, host);
 }
 
 /**
@@ -75,6 +82,10 @@ export function resolveImageGenAuth({ imageGen, api, apiKey } = {}) {
   if (own && own !== '******' && imageGenKeyApplies(imageGen, gHost)) {
     return { ok: true, key: own, reused: false, error: '' };
   }
+  // 活动槽不可用（没填/归属不是这家）→ 查"这家存过的"（2026-10-02：切换服务预设的记忆；
+  // 也覆盖手改配置直接换地址的情况 —— 只要那把 Key 确实是给这个主机存的，就不算跨家外发）
+  const remembered = imageGenKeyFor(imageGen, gHost);
+  if (remembered) return { ok: true, key: remembered, reused: false, error: '' };
   const aHost = hostOf(api?.baseUrl);
   if (gHost && aHost && gHost === aHost) {
     const modelKey = String(apiKey || '').trim();

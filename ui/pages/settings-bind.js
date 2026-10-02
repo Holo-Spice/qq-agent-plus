@@ -12,7 +12,7 @@ import { askForConfirmation, bindPeekToggle, requestExperimentOwnerUin, syncClam
 import { bindKeyToggles, fetchRealKey } from './key-toggles.js';
 import { $, $$, esc } from '../core/dom.js';
 import {
-  asrHostOf, hostOfUrl, mulOf, paramActiveForProbability, segOfProbability, sliderDesc
+  asrSlotOf, hostOfUrl, mulOf, paramActiveForProbability, segOfProbability, sliderDesc
 } from '../core/format.js';
 import { state } from '../core/state.js';
 import { loadExperimentalFeatureStatuses } from './features.js';
@@ -453,19 +453,23 @@ function bindSettingsSaveAndSections() {
       // 字段显隐/说明按新服务整体重画：比逐个 toggle 可靠（服务多了以后容易漏）
       // 先把当前草稿落到 state.config 上，重画才不会把它们丢回去
       const draft = state.config || {};
-      // 换了服务或换了地址：原来那把凭据就不属于这家了 —— 输入框清空 + 打标记，
-      // 别让它看起来"已经填好了"（后端本来也不会拿它去请求别家，2026-09-26 审查）
       const prevAsr = draft.asr || {};
       const nextProvider = item?.provider || 'openai';
-      const nextHost = item && item.needsBaseUrl !== false ? asrHostOf(item.baseUrl) : '';
-      const serviceChanged = nextProvider !== String(prevAsr.provider || '')
-        || (nextProvider === 'openai' && nextHost !== asrHostOf(prevAsr.baseUrl));
-      if (serviceChanged) {
-        for (const id of ['#cfg-asr-key', '#cfg-asr-secretid', '#cfg-asr-secretkey']) {
-          const el = $(id);
-          if (el && el.value === '******') el.value = '';
-        }
-      }
+      const nextBaseUrl = urlEl ? urlEl.value : (draft.asr?.baseUrl || '');
+      // 凭据按"这家存过没有"自动填回（2026-10-02 用户要求：切换服务预设时 Key 跟着切换）：
+      // 存过 → 显示掩码（保存时服务端取回这家存过的那把）；没存过 → 留空等用户填。
+      // 槽位口径与后端 asrCredentialSlot 一致；keySlots 是服务端下发的布尔口径（不下发明文）。
+      const slot = asrSlotOf(nextProvider, nextBaseUrl);
+      const slotKinds = draft.asr?.keySlots?.[slot] || [];
+      const setCred = (id, kind) => {
+        const el = $(id);
+        if (el) el.value = slotKinds.includes(kind) ? '******' : '';
+      };
+      setCred('#cfg-asr-key', 'apiKey');
+      setCred('#cfg-asr-secretid', 'secretId');
+      setCred('#cfg-asr-secretkey', 'secretKey');
+      // 与旧行为对齐的"换了一家"判据：凭据域（槽位）变了没有
+      const serviceChanged = slot !== asrSlotOf(prevAsr.provider, prevAsr.baseUrl);
       draft.asr = {
         ...(draft.asr || {}),
         provider: item?.provider || 'openai',
@@ -475,14 +479,15 @@ function bindSettingsSaveAndSections() {
         apiKey: ($('#cfg-asr-key')?.value || '') === '******' ? draft.asr?.apiKey : ($('#cfg-asr-key')?.value || draft.asr?.apiKey),
         secretId: ($('#cfg-asr-secretid')?.value || '') === '******' ? draft.asr?.secretId : ($('#cfg-asr-secretid')?.value || draft.asr?.secretId),
         secretKey: ($('#cfg-asr-secretkey')?.value || '') === '******' ? draft.asr?.secretKey : ($('#cfg-asr-secretkey')?.value || draft.asr?.secretKey),
-        hasApiKey: Boolean(draft.asr?.apiKey || $('#cfg-asr-key')?.value),
-        hasSecretId: Boolean(draft.asr?.secretId || $('#cfg-asr-secretid')?.value),
-        hasSecretKey: Boolean(draft.asr?.secretKey || $('#cfg-asr-secretkey')?.value),
-        // 草稿层面的"凭据要重填"标记：保存后由服务端的 keyUsable/secretKeyUsable 接管
-        credentialStale: serviceChanged,
-        keyUsable: serviceChanged ? false : draft.asr?.keyUsable,
-        secretIdUsable: serviceChanged ? false : draft.asr?.secretIdUsable,
-        secretKeyUsable: serviceChanged ? false : draft.asr?.secretKeyUsable
+        hasApiKey: Boolean($('#cfg-asr-key')?.value),
+        hasSecretId: Boolean($('#cfg-asr-secretid')?.value),
+        hasSecretKey: Boolean($('#cfg-asr-secretkey')?.value),
+        // 草稿层面的"凭据要重填"标记：保存后由服务端的 keyUsable/secretKeyUsable 接管。
+        // 这家存过（已自动填回掩码）就不该再说"请重填"。
+        credentialStale: serviceChanged && slotKinds.length === 0,
+        keyUsable: serviceChanged ? slotKinds.includes('apiKey') : draft.asr?.keyUsable,
+        secretIdUsable: serviceChanged ? slotKinds.includes('secretId') : draft.asr?.secretIdUsable,
+        secretKeyUsable: serviceChanged ? slotKinds.includes('secretKey') : draft.asr?.secretKeyUsable
       };
       state.settingsSection = 'asr';
       renderSettings();

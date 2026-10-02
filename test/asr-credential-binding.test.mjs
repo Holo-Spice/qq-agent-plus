@@ -131,6 +131,66 @@ test('控制台保存回传的运行时字段不落盘、也不改凭据归属',
   assert.equal(cfg.asr.secretKeyProvider, 'iflytek');
 });
 
+test('运行时也取"这家存过的"凭据（活动槽为空或属于别家时）—— 2026-10-02 切换预设带 Key', () => {
+  // 活动槽里那把是给硅基流动存的；当前配置指向 Groq，而映射里存着 Groq 的那把 →
+  // 运行时必须取映射里的（切换预设/手改地址后不必等控制台再存一次）
+  const cfg = C.updateConfig({
+    asr: {
+      provider: 'openai',
+      baseUrl: 'https://api.groq.com/openai/v1',
+      model: 'whisper-large-v3-turbo',
+      apiKey: 'sk-siliconflow', apiKeyProvider: 'openai', apiKeyHost: 'api.siliconflow.cn',
+      keys: { 'openai|api.groq.com': { apiKey: 'sk-groq' } }
+    }
+  });
+  assert.equal(C.asrApiKey(cfg), 'sk-groq', '活动槽那把是别家的 → 用这家存过的');
+  assert.equal(C.asrKeySource(cfg), 'config', '来源要报 config（不是 env）');
+  assert.equal(C.asrConfigured(cfg), true);
+  assert.equal(C.asrCredentials(cfg).slot, 'openai|api.groq.com');
+
+  // 本土服务（腾讯）的 SecretId/SecretKey 对也在映射里存着 → 运行时取得到
+  // （活动槽清空 = 只靠映射；活动槽有值且归属匹配时按 asrCredentials 的口径优先用活动槽）
+  const tc = C.updateConfig({
+    asr: {
+      provider: 'tencent',
+      secretId: '', secretIdProvider: '', secretKey: '', secretKeyProvider: '',
+      keys: { tencent: { secretId: 'AKID-tc', secretKey: 'SK-tc' } }
+    }
+  });
+  assert.equal(C.asrSecretId(tc), 'AKID-tc');
+  assert.equal(C.asrSecretKey(tc), 'SK-tc');
+  assert.equal(C.asrConfigured(tc), true);
+
+  // 反向：映射里给的是**别家**的槽 → 拿不到（不会把 A 家的 Key 发给 B 家）
+  const sf = C.updateConfig({
+    asr: {
+      provider: 'openai', baseUrl: 'https://api.siliconflow.cn/v1', model: 'm',
+      apiKey: '', apiKeyProvider: '', apiKeyHost: '',
+      keys: { tencent: { apiKey: 'TENCENT_KEY' } }
+    }
+  });
+  assert.equal(C.asrApiKey(sf), '', '硅基流动拿不到腾讯槽里的凭据');
+});
+
+test('凭据槽位口径与归属判定一致（OpenAI 兼容按主机分家，其余按 provider）', () => {
+  assert.equal(C.asrCredentialSlot('openai', 'https://api.siliconflow.cn/v1'), 'openai|api.siliconflow.cn');
+  assert.equal(C.asrCredentialSlot('openai', 'https://api.groq.com/openai/v1'), 'openai|api.groq.com');
+  assert.equal(C.asrCredentialSlot('openai', 'https://api.siliconflow.cn/v1/'), 'openai|api.siliconflow.cn', '只差结尾斜杠不算换家');
+  assert.equal(C.asrCredentialSlot('tencent', ''), 'tencent');
+  assert.equal(C.asrCredentialSlot('iflytek', ''), 'iflytek');
+  assert.equal(C.asrCredentialSlot('', ''), 'openai|', '缺省 provider 就是 openai');
+
+  // 哪些槽存过凭据（界面掩码口径）：映射 + 老配置单槽
+  const slots = C.asrKeySlots({
+    provider: 'openai', baseUrl: 'https://api.groq.com/openai/v1',
+    apiKey: 'sk-x', apiKeyProvider: 'openai', apiKeyHost: 'api.siliconflow.cn',
+    keys: { 'openai|api.groq.com': { apiKey: 'sk-groq' }, tencent: { secretId: 'AKID', secretKey: 'SK' } }
+  });
+  assert.deepEqual(slots['openai|api.groq.com'], ['apiKey']);
+  assert.deepEqual(slots.tencent.sort(), ['secretId', 'secretKey']);
+  assert.deepEqual(slots['openai|api.siliconflow.cn'], ['apiKey'], '老配置的单槽也按归属算进槽位表');
+});
+
 test('provider 缺失的配置不强行补归属（别把 Key 绑到任何一家头上）', () => {
   const asr = { enabled: true, apiKey: 'just-a-key' };
   C.pinStoredAsrCredentials(asr, '');               // provider 为空 → 什么都不记

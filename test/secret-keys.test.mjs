@@ -34,16 +34,21 @@ test('sanitizeConfigSecrets：*From 与 has* 布尔不脱敏（含"有/无"为 f
   assert.equal(out.api.hasHasApiKey, undefined, '派生的 has* 布尔不得被二次处理');
 });
 
-test('sanitizeConfigSecrets：providerKeys / tts.keys / providers[].apiKey 三段特判', () => {
+test('sanitizeConfigSecrets：providerKeys / tts.keys / imageGen.keys / asr.keys / providers[].apiKey 特判', () => {
   const out = sanitizeConfigSecrets({
     providerKeys: { p1: 'sk-1', p2: '' },
     tts: { keys: { siliconflow: 'sk-x' }, service: 'siliconflow' },
+    imageGen: { keys: { 'api.siliconflow.cn': 'sk-img' }, model: 'm' },
+    asr: { keys: { 'openai|api.siliconflow.cn': { apiKey: 'sk-asr' }, tencent: { secretId: 'AKID', secretKey: 'SK' } } },
     providers: [{ id: 'p1', label: 'A', apiKey: 'sk-1' }, { id: 'p2', apiKey: '' }]
   });
   assert.deepEqual(out.providerKeys, {}, '密钥集合整体清空，不逐 key 暴露存在性');
   assert.deepEqual(out.providerKeyPresence, { p1: true, p2: false });
   assert.deepEqual(out.tts.keys, {}, 'tts 按服务 id 存的 keys 映射不得明文下发');
   assert.equal(out.tts.service, 'siliconflow');
+  assert.deepEqual(out.imageGen.keys, {}, 'imageGen 按主机存的 keys 映射不得明文下发（"哪几家存过"走 keyHosts）');
+  assert.equal(out.imageGen.model, 'm');
+  assert.deepEqual(out.asr.keys, {}, 'asr 按服务槽位存的 keys 映射不得明文下发（"哪几家存过"走 keySlots）');
   assert.equal(out.providers[0].apiKey, undefined);
   assert.equal(out.providers[0].hasKey, true);
   assert.equal(out.providers[1].hasKey, false);
