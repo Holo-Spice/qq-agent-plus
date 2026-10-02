@@ -1234,6 +1234,54 @@ try {
       + ((peekOk && peekBack) ? '' : ` -> handlers=${peekHandlers.length} afterFirst=${JSON.stringify(afterFirst)} type=${peekInput.type} label=${peekBtn.textContent}`));
   }
 
+  // 语音转写 / 图片生成的密钥「显示」要带上**表单里当前选中**的槽位/主机（2026-10-02 全量审查）：
+  // 刚切换预设、还没保存时，不带参数的端点按"已保存配置"回显 —— 会把上一家的明文显示在新服务名下，
+  // 用户点一下「显示」再保存就把那家 Key 绑给了新服务。
+  {
+    ctx.bindSettingsEvents(cfg);
+    const cases = [
+      {
+        btn: '#cfg-asr-key-toggle',
+        input: '#cfg-asr-key',
+        prep: () => {
+          document.querySelector('#cfg-asr-service').value = 'groq';
+          document.querySelector('#cfg-asr-baseurl').value = 'https://api.groq.com/openai/v1';
+        },
+        want: /slot=openai%7Capi\.groq\.com/
+      },
+      {
+        btn: '#cfg-img-reveal-key-btn',
+        input: '#cfg-img-key',
+        prep: () => { document.querySelector('#cfg-img-baseurl').value = 'https://img.example.com/v1'; },
+        want: /host=img\.example\.com/
+      }
+    ];
+    let slotOk = true;
+    const slotNotes = [];
+    for (const item of cases) {
+      const input = document.querySelector(item.input);
+      const btn = document.querySelector(item.btn);
+      const handlers = [...(btn?._listeners?.click || [])];
+      input.value = '******';
+      input.type = 'password';
+      // 按钮状态可能是前面用例留下的「隐藏」态：不重置的话这次点的是隐藏分支、根本不发请求
+      if (btn) { btn.textContent = '显示'; btn.dataset.revealed = '0'; }
+      item.prep();
+      const before = sandbox.fetch;
+      let fetched = '';
+      sandbox.fetch = async (url) => {
+        fetched = String(url);
+        return { ok: true, status: 200, json: async () => ({ ok: true, apiKey: 'x' }), text: async () => '' };
+      };
+      try { for (const h of handlers) await h({ currentTarget: btn }); } catch { /* 看结果 */ }
+      sandbox.fetch = before;
+      if (!handlers.length || !item.want.test(fetched)) { slotOk = false; slotNotes.push(`${item.btn} → ${fetched}`); }
+    }
+    slotOk ? pass++ : fail++;
+    console.log('  ' + (slotOk ? 'OK   ' : 'FAIL ') + '设置页：密钥「显示」带上表单里的目标槽位/主机（不按已保存配置回显别家的）'
+      + (slotOk ? '' : ` -> ${slotNotes.join('；')}`));
+  }
+
   // 语音合成 Key：并入统一开关后的三件事（2026-10-01 审查的两条 low）
   //  · 「显示」向 /api/tts/key 要明文时要带上当前选中的那家（它按服务分家存 Key）；
   //  · 用户手输了一半就点「显示」：**不许**用回读值盖掉他没保存的输入，也不该白发请求；

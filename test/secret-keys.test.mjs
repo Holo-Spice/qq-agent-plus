@@ -54,6 +54,20 @@ test('sanitizeConfigSecrets：providerKeys / tts.keys / imageGen.keys / asr.keys
   assert.equal(out.providers[1].hasKey, false);
 });
 
+test('sanitizeConfigSecrets：非对象形态的 keys 也要整包清空（手改坏配置不许明文下发）', () => {
+  // 2026-10-02 全量审查实测：`"keys": "sk-xxx"` 既不匹配 SECRET_KEY_PATTERN（裸 key 是刻意排除的），
+  // 又躲过"只有对象才清空"的判断 → 原样下发给浏览器。类型无关地清掉。
+  const out = sanitizeConfigSecrets({
+    tts: { keys: 'sk-tts-malformed' },
+    imageGen: { keys: ['sk-img-a', 'sk-img-b'] },
+    asr: { keys: 5, provider: 'openai' }
+  });
+  assert.deepEqual(out.tts.keys, {}, '字符串形态');
+  assert.deepEqual(out.imageGen.keys, {}, '数组形态');
+  assert.deepEqual(out.asr.keys, {}, '数字形态');
+  assert.equal(out.asr.provider, 'openai', '同一段其它字段不受影响');
+});
+
 test('sanitizeConfigSecrets：返回副本，不改原对象', () => {
   const cfg = { api: { apiKey: 'sk-abc' } };
   sanitizeConfigSecrets(cfg);

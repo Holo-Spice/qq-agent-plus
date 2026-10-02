@@ -715,7 +715,7 @@ export const ASR_DERIVED_KEYS = [
  * secret-keys 抹掉，所以下发时换个名。前端把整份视图展开成 patch 回传 —— 不在这里剔掉，
  * 保存一次 config.json 里就多出一份陈旧副本（真身改了它不跟着动，读盘的人看到两个说法）。
  */
-export const IMAGEGEN_DERIVED_KEYS = ['available', 'keyStale', 'keyHost'];
+export const IMAGEGEN_DERIVED_KEYS = ['available', 'keyStale', 'keyHost', 'keyHosts'];
 
 /**
  * 这个凭据能不能用于"当前配的这家"：凭据记着存它时的供应商（OpenAI 兼容的还记地址主机）。
@@ -751,10 +751,12 @@ export function asrCredentialSlot(provider, baseUrl) {
   return asrCredentialSlotOf(provider, asrEndpointHost(baseUrl));
 }
 
+
 /**
  * 取"这家存过的"某个凭据（asr.keys 映射优先；老配置的单槽凭据按归属算 —— 与
  * asrCredentialApplies 同一条口径，升级上来的实例行为不变）。
- * 两个读取端：运行时取凭据（core/config.js）、保存时按目标槽自动取回（/api/config）。
+ * 运行时取凭据（core/config.js）用它；"保存时该用哪把、能不能认领"要用
+ * asrCredentialResolve（2026-10-02 全量审查拆开的两件事）。
  */
 export function asrCredentialFor(asr, kind, provider, baseUrl) {
   const slot = asrCredentialSlot(provider, baseUrl);
@@ -765,6 +767,54 @@ export function asrCredentialFor(asr, kind, provider, baseUrl) {
   const stored = String(asr?.[kind] || '').trim();
   if (!stored) return '';
   return asrCredentialApplies({ ...(asr || {}), baseUrl }, provider, stored, providerField, hostField) ? stored : '';
+}
+
+/**
+ * 保存时解析"目标槽位该用哪把凭据"，返回 { value, owned }（2026-10-02 全量审查定稿）：
+ *   owned=true  → 这把凭据**明确属于这家**（活动槽的归属钉匹配，或映射里这家存过的）；
+ *                 保存时可以把归属钉写回去、并补进映射。
+ *   owned=false → 只是"归属未知的老凭据"（asrCredentialApplies 的兜底规则）：值照用，
+ *                 但**不许认领** —— 不回写归属钉、不塞映射，否则会把别家的凭据洗成这家的
+ *                 （migrateConfig 的注释警告的正是这条路：只读盘或用户重填时才记归属）。
+ * 顺序：活动槽（明确属于目标）→ 这家存过的 → 归属未知的老单槽。活动槽在前是为了让
+ * "手改过活动槽、映射里还留着旧值"时**用活动槽那把**（与运行时同一口径）。
+ */
+export function asrCredentialResolve(asr, kind, provider, baseUrl) {
+  const slot = asrCredentialSlot(provider, baseUrl);
+  const providerField = kind === 'apiKey' ? 'apiKeyProvider' : `${kind}Provider`;
+  const hostField = kind === 'apiKey' ? 'apiKeyHost' : '';
+  const stored = String(asr?.[kind] || '').trim();
+  const pin = String(asr?.[providerField] || '').trim().toLowerCase();
+  if (stored && pin && asrCredentialApplies({ ...(asr || {}), baseUrl }, provider, stored, providerField, hostField)) {
+    return { value: stored, owned: true };
+  }
+  const fromMap = String(asr?.keys?.[slot]?.[kind] || '').trim();
+  if (fromMap) return { value: fromMap, owned: true };
+  if (stored && !pin) return { value: stored, owned: false };
+  return { value: '', owned: false };
+}
+
+/**
+ * 按**槽位字符串**取"明确属于这家"的凭据（只认映射 + 归属钉匹配的活动槽，不含"归属未知"兜底）。
+ * 给控制台的「显示」端点用：表单里刚切换、还没保存时，回显的必须是**目标槽位**那把 ——
+ * 拿已保存配置的解析结果会把上一家的明文显示在新服务名下（2026-10-02 全量审查）。
+ */
+export function asrCredentialForSlot(asr, kind, slot) {
+  const s = String(slot || '').trim().toLowerCase();
+  if (!s) return { value: '', owned: false };
+  const sep = s.indexOf('|');
+  const provider = sep === -1 ? s : s.slice(0, sep);
+  const host = sep === -1 ? '' : s.slice(sep + 1);
+  const baseUrl = host ? `https://${host}` : '';
+  const providerField = kind === 'apiKey' ? 'apiKeyProvider' : `${kind}Provider`;
+  const hostField = kind === 'apiKey' ? 'apiKeyHost' : '';
+  const fromMap = String(asr?.keys?.[s]?.[kind] || '').trim();
+  if (fromMap) return { value: fromMap, owned: true };
+  const stored = String(asr?.[kind] || '').trim();
+  const pin = String(asr?.[providerField] || '').trim().toLowerCase();
+  if (!stored || !pin) return { value: '', owned: false };
+  return asrCredentialApplies({ ...(asr || {}), baseUrl }, provider, stored, providerField, hostField)
+    ? { value: stored, owned: true } : { value: '', owned: false };
 }
 
 /**
@@ -885,6 +935,14 @@ function migrateConfig(parsed) {
     delete out.server.closeToTray;
   }
   if (out.ui?.theme === '?') out.ui.theme = 'dark';
+  // ── 带凭据映射的三个段：手改坏成标量/数组时归一化成对象，段内的 keys 同理 ──
+  // （`{ ...'sk-x' }` 会把字符串展开成字符索引的垃圾映射；与 persona/identityPilot 同款兜底。
+  //   2026-10-02 全量审查：非对象形态的 keys 还会绕过控制台下发的"整包清空"——那条单独在
+  //   secret-keys.js 修，这里保证落盘/合并路径拿到的一定是对象。）
+  for (const sec of ['asr', 'tts', 'imageGen']) {
+    if (out[sec] !== undefined && !isPlainObject(out[sec])) out[sec] = {};
+    if (isPlainObject(out[sec]) && out[sec].keys !== undefined && !isPlainObject(out[sec].keys)) out[sec].keys = {};
+  }
   // ── 语音转写（asr）──
   if (isPlainObject(out.asr)) {
     // 剔掉运行时结论（见 ASR_DERIVED_KEYS 的说明），连 sanitizeConfig 生成的 hasXxx 一起。
@@ -1003,18 +1061,41 @@ export function pinImageGenKeyHost(imageGen, apiBaseUrl) {
 }
 
 /**
- * 取"某个主机上存过的图片生成 Key"（keys 映射优先；老配置只有单槽 apiKey + apiKeyHost，
- * 那把只对**它自己绑定的主机**算数 —— 与 ttsKeyFor 的兼容口径一致）。
- * 两个读取端：运行时取 Key（image-gen.js）、保存时按目标主机自动取回（/api/config）。
+ * 取"某个主机上存过的图片生成 Key"（活动槽归属匹配优先，其次 keys 映射；老配置只有单槽
+ * apiKey + apiKeyHost，"没记归属"的那把按"当前地址能用"算 —— 与 imageGenKeyApplies 一致）。
+ * 运行时/判定端读它；"保存时该用哪把、能不能认领"用 imageGenKeyResolve（2026-10-02 全量审查拆开）。
  */
 export function imageGenKeyFor(imageGen, host) {
+  return imageGenKeyResolveCore(imageGen, host, { allowUnbound: true }).value;
+}
+
+/**
+ * 保存时解析"目标主机该用哪把 Key"，返回 { value, owned }（与 asrCredentialResolve 同款）：
+ *   owned=true  → 明确属于这个主机（活动槽的 apiKeyHost 就是它，或映射里这家存过的）→ 可写回钉；
+ *   owned=false → "没记归属"的老单槽兜底：值照用，但**不认领**（不写 apiKeyHost、不塞映射）。
+ */
+export function imageGenKeyResolve(imageGen, host) {
+  return imageGenKeyResolveCore(imageGen, host, { allowUnbound: true });
+}
+
+/** 只认"明确属于这个主机"的那把（控制台「显示」端点给"表单里换到别的主机"时用）。 */
+export function imageGenKeyOwnedBy(imageGen, host) {
+  return imageGenKeyResolveCore(imageGen, host, { allowUnbound: false }).value;
+}
+
+function imageGenKeyResolveCore(imageGen, host, { allowUnbound }) {
   const h = String(host || '').trim().toLowerCase();
-  if (!h) return '';
-  const fromMap = String(imageGen?.keys?.[h] || '').trim();
-  if (fromMap) return fromMap;
-  const legacyHost = String(imageGen?.apiKeyHost || '').trim().toLowerCase();
-  if (legacyHost && legacyHost === h) return String(imageGen?.apiKey || '').trim();
-  return '';
+  if (!h) return { value: '', owned: false };
+  const active = String(imageGen?.apiKey || '').trim();
+  const boundHost = String(imageGen?.apiKeyHost || '').trim().toLowerCase();
+  if (active && active !== '******' && boundHost && boundHost === h) return { value: active, owned: true };
+  // 用**自有属性**读映射：`keys['constructor']` 会命中原型链，把函数的源码当"这家存过的 Key"
+  // （2026-10-02 推前复审实测：host=constructor 会返回 "function Object() { [native code] }" 并标 owned）
+  const map = imageGen?.keys;
+  const fromMap = map && typeof map === 'object' && Object.hasOwn(map, h) ? String(map[h] || '').trim() : '';
+  if (fromMap) return { value: fromMap, owned: true };
+  if (allowUnbound && active && active !== '******' && !boundHost) return { value: active, owned: false };
+  return { value: '', owned: false };
 }
 
 /** 哪些主机存过 Key（给界面在切换预设时显示掩码用；只下发布尔口径，不下发明文）。 */

@@ -191,6 +191,45 @@ test('凭据槽位口径与归属判定一致（OpenAI 兼容按主机分家，�
   assert.deepEqual(slots['openai|api.siliconflow.cn'], ['apiKey'], '老配置的单槽也按归属算进槽位表');
 });
 
+test('保存解析：明确属于这家的才认领，归属未知的老凭据只用值不写回归属（2026-10-02 全量审查）', () => {
+  // ① 映射里这家存过的 → owned
+  const withMap = { keys: { 'openai|a.example.com': { apiKey: 'MAP-KEY' } } };
+  assert.deepEqual(
+    C.asrCredentialResolve(withMap, 'apiKey', 'openai', 'https://a.example.com/v1'),
+    { value: 'MAP-KEY', owned: true }
+  );
+  // ② 活动槽归属钉就是目标 → owned（且**优先于**映射：手改过活动槽时用活动那把，与运行期同口径）
+  const handEdited = {
+    apiKey: 'NEW-HAND-EDIT', apiKeyProvider: 'openai', apiKeyHost: 'a.example.com',
+    keys: { 'openai|a.example.com': { apiKey: 'OLD-MAP' } }
+  };
+  assert.deepEqual(
+    C.asrCredentialResolve(handEdited, 'apiKey', 'openai', 'https://a.example.com/v1'),
+    { value: 'NEW-HAND-EDIT', owned: true }
+  );
+  // ③ 归属未知的老凭据（provider=openai 时残留的 secretKey，migrateConfig 故意不补归属）：
+  //    值可以用，但**不算这家的** —— 认领会把别家的凭据洗成当前这家的（百度/讯飞就再也取不回）
+  const unbound = { provider: 'openai', secretKey: 'LEGACY-SK' };
+  assert.deepEqual(C.asrCredentialResolve(unbound, 'secretKey', 'iflytek', ''), { value: 'LEGACY-SK', owned: false });
+  // ④ 归属钉明确属于别家 → 既不用也不认领
+  const otherOwner = { secretKey: 'TENCENT-SK', secretKeyProvider: 'tencent' };
+  assert.deepEqual(C.asrCredentialResolve(otherOwner, 'secretKey', 'iflytek', ''), { value: '', owned: false });
+});
+
+test('回显端点用：按槽位只取"明确属于这家"的（不给别家看未归属的老凭据）', () => {
+  const asr = {
+    provider: 'openai', apiKey: 'A-KEY', apiKeyProvider: 'openai', apiKeyHost: 'a.example.com',
+    secretKey: 'UNBOUND-SK',
+    keys: { 'openai|b.example.com': { apiKey: 'B-KEY' }, tencent: { secretId: 'AKID', secretKey: 'SK' } }
+  };
+  assert.deepEqual(C.asrCredentialForSlot(asr, 'apiKey', 'openai|b.example.com'), { value: 'B-KEY', owned: true });
+  assert.deepEqual(C.asrCredentialForSlot(asr, 'apiKey', 'openai|a.example.com'), { value: 'A-KEY', owned: true }, '活动槽归属匹配也算');
+  assert.deepEqual(C.asrCredentialForSlot(asr, 'apiKey', 'openai|zzz.example.com'), { value: '', owned: false }, '没存过的主机给空');
+  assert.deepEqual(C.asrCredentialForSlot(asr, 'apiKey', 'tencent'), { value: '', owned: false }, '别家槽位给空');
+  assert.deepEqual(C.asrCredentialForSlot(asr, 'secretKey', 'iflytek'), { value: '', owned: false }, '归属未知的不给别家回显');
+  assert.deepEqual(C.asrCredentialForSlot(asr, 'secretId', 'tencent'), { value: 'AKID', owned: true });
+});
+
 test('provider 缺失的配置不强行补归属（别把 Key 绑到任何一家头上）', () => {
   const asr = { enabled: true, apiKey: 'just-a-key' };
   C.pinStoredAsrCredentials(asr, '');               // provider 为空 → 什么都不记

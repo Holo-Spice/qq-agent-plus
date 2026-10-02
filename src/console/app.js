@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRouter } from './router.js';
 
-import { asrApiKey, asrAvailable, asrConfigured, asrCredentialFor, asrCredentialSlot, asrCredentialSlotOf, asrCredentials, asrEndpointHost, asrKeyHost, asrKeySlots, asrKeySource, asrLocalBin, asrLocalModel, asrSecretId, asrSecretKey, conversationConfigForChat, findWhisperBinSync, getConfig, identityPilotEnabled, imageGenAvailable, imageGenKeyFor, imageGenKeyHosts, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, pinImageGenKeyHost, DATA_DIR, ROOT } from '../core/config.js';
+import { asrApiKey, asrAvailable, asrConfigured, asrCredentialForSlot, asrCredentialResolve, asrCredentialSlot, asrCredentialSlotOf, asrCredentials, asrEndpointHost, asrKeyHost, asrKeySlots, asrKeySource, asrLocalBin, asrLocalModel, asrSecretId, asrSecretKey, conversationConfigForChat, findWhisperBinSync, getConfig, identityPilotEnabled, imageGenAvailable, imageGenKeyHosts, imageGenKeyOwnedBy, imageGenKeyResolve, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, pinImageGenKeyHost, DATA_DIR, ROOT } from '../core/config.js';
 import { tokenSaverEffective } from '../core/token-saver.js';
 import { catchupReplyWindowMs, catchupLogLine, isFreshForReply } from '../core/catchup-policy.js';
 import { budgetStatus } from '../core/budget.js';
@@ -31,7 +31,7 @@ import { GroupGameManager } from '../features/group-game.js';
 import { ReminderStore } from '../core/reminders.js';
 import { listModels, chatCompletion, resolveApiKey, cachedTokensOfUsage } from '../llm/llm.js';
 import { synthesizeSpeech } from '../llm/tts.js';
-import { generateImage, imageGenKeyStale, resolveImageGenAuth } from '../llm/image-gen.js';
+import { generateImage, imageGenEffectiveHost, imageGenKeyStale, resolveImageGenAuth } from '../llm/image-gen.js';
 import { imageType } from '../core/image-type.js';
 import { IMAGEGEN_SERVICES } from '../llm/image-gen-presets.js';
 import { TTS_SERVICES, ttsServiceById, ttsServiceOfBaseUrl, ttsKeyServices, ttsServiceOf, ttsKeyFor } from '../llm/tts-presets.js';
@@ -2402,10 +2402,20 @@ export function createApp({
     }
     const field = String(url.searchParams.get('field') || 'apiKey');
     const allowed = { apiKey: 'apiKey', secretId: 'secretId', secretKey: 'secretKey' };
-    if (!allowed[field]) return json(res, 400, { error: `未知字段：${field}` });
-    // 回读的是**当前这家实际会用的**那一把（活动槽，或"这家存过的"）—— 与界面上掩码同源。
-    // 直接回显原始字段会在"刚切换服务、还没保存"时把上一家的凭据显示在新服务名下（2026-10-02）。
-    return json(res, 200, { apiKey: asrCredentials(getConfig())[field] || '' });
+    if (!Object.hasOwn(allowed, field)) return json(res, 400, { error: `未知字段：${field}` });
+    const cfgNow = getConfig();
+    const cred = asrCredentials(cfgNow);
+    // 表单里刚切换、还没保存时，「显示」要回显**目标槽位**那把（与界面上的掩码同源）：
+    // 直接按已保存配置解析会把上一家的明文显示在新服务名下（2026-10-02 全量审查实测），
+    // 用户点一下「显示」再保存就把那家 Key 绑给了新的服务。目标槽位与当前槽位不一致时
+    // 只认"明确属于目标槽位"的（映射 + 归属钉匹配），归属未知的不给别家回显。
+    const slot = String(url.searchParams.get('slot') || '').trim().toLowerCase();
+    if (slot && slot !== String(cred.slot || '').toLowerCase()) {
+      const target = asrCredentialForSlot(cfgNow.asr, field, slot);
+      return json(res, 200, { apiKey: target.owned ? target.value : '' });
+    }
+    // 回读的是**当前这家实际会用的**那一把（活动槽，或"这家存过的"）
+    return json(res, 200, { apiKey: cred[field] || '' });
   });
   router.add('POST', '/api/providers/fetch-models', async (req, res) => {
     const cfgNow = getConfig();
@@ -2625,9 +2635,16 @@ export function createApp({
   // 2026-09-30 审查：界面上有「显示」按钮却没有这条路由，点了没反应、已存的 Key 读不回来。
   router.add('GET', '/api/imagegen/presets', async (req, res) => json(res, 200, { ok: true, services: IMAGEGEN_SERVICES }));
 
-  router.add('GET', '/api/imagegen/key', async (req, res) => {
+  router.add('GET', '/api/imagegen/key', async (req, res, params, url) => {
     if (!keyEndpointAllowed(req)) return json(res, 403, { ok: false, error: '只能在控制台里查看密钥' });
     const cfgNow = getConfig();
+    // 同 /api/asr-key：表单里换到**别的主机**（还没保存）时，回显那个主机存过的那把；
+    // 按已保存配置解析会把当前那家的明文显示在新选的主机名下（2026-10-02 全量审查）。
+    const askedHost = String(url.searchParams.get('host') || '').trim().toLowerCase();
+    const effHost = imageGenEffectiveHost(cfgNow.imageGen, cfgNow.api);
+    if (askedHost && askedHost !== effHost) {
+      return json(res, 200, { ok: true, apiKey: imageGenKeyOwnedBy(cfgNow.imageGen, askedHost), reused: false, error: '' });
+    }
     const auth = resolveImageGenAuth({
       imageGen: cfgNow.imageGen,
       api: cfgNow.api,
@@ -3066,52 +3083,81 @@ export function createApp({
     // 控制台保存总会带上显式的 provider（来自服务预设）：等于用户确认过这一家，
     // 清掉"升级默认值"的标记，让环境变量 Key 恢复生效（2026-09-26 审查 P2）
     if (patch?.asr && typeof patch.asr === 'object') delete patch.asr.providerDefaulted;
+    // ── 整节替换（{ __replace__: X }）会把"映射由服务端维护"整条绕过：deepMerge 直接换成
+    //    客户端对象，我们算好的 keys 被丢掉，客户端于是能把 keys 映射写进配置（2026-10-02
+    //    全量审查实测：`{asr:{__replace__:{keys:{'openai|evil…':{apiKey:'ATK'}}}}}` 落盘成功）。
+    //    这里把服务端算好的映射**钉回替换对象**：整节替换语义保留，但 keys 仍归服务端。
+    const stampServerKeys = (section, nextKeys) => {
+      const node = patch?.[section];
+      if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+      const replaced = node.__replace__;
+      if (replaced && typeof replaced === 'object' && !Array.isArray(replaced)) replaced.keys = nextKeys;
+      node.keys = nextKeys;
+    };
+    // 整节替换下 deepMerge 只取替换体，节点层的删改/读取都落不到最终配置上 —— 凡是要"动这一节"
+    // 的地方都取**有效体**：有对象替换体就用它，否则用节点本身。不这样，替换体里的归属钉会直接
+    // 生效（delete 删不到）、`api.__replace__.baseUrl` 也让 pin 读不到新地址（2026-10-02 推前复审实测）。
+    const sectionBody = (node) => (node && typeof node === 'object' && !Array.isArray(node)
+      && node.__replace__ && typeof node.__replace__ === 'object' && !Array.isArray(node.__replace__)
+      ? node.__replace__
+      : node);
     // tts 的 Key 与 asr 同款语义：留空/掩码占位 = 保持原值（掩码回写会把真 Key 冲掉）
     if (patch?.tts && typeof patch.tts === 'object') {
+      const ttsBody = sectionBody(patch.tts);
       // 服务端派生位（GET 时下发的布尔/归属口径）：不回写配置（2026-09-29 审查 P2，
       // 之前 keyServices/currentService 会随保存被持久化进 config.json）
-      delete patch.tts.hasApiKey;
-      delete patch.tts.keyServices;
-      delete patch.tts.currentService;
+      delete ttsBody.hasApiKey;
+      delete ttsBody.keyServices;
+      delete ttsBody.currentService;
       // 前端只送"这一家新填的 Key"（apiKeyInput）与当前服务：合并进 keys 映射，
       // 绝不接受整份 keys 覆盖（那会把别家的 Key 冲掉）。空/掩码 = 保持不变。
-      const keyInput = String(patch.tts.apiKeyInput ?? '').trim();
-      delete patch.tts.apiKeyInput;
-      delete patch.tts.keys;
+      const keyInput = String(ttsBody.apiKeyInput ?? '').trim();
+      delete ttsBody.apiKeyInput;
+      delete ttsBody.keys;
       // Key 归属 = UI 选中那家（service），地址反查只作兜底。之前只按地址认：
       // 「自定义/自建」的地址不在预设表里 → 落到 provider 字符串 'openai'，
       // 运行时又读不到 keys['openai']（2026-09-29 审查 P0）
-      const uiService = ttsServiceById(String(patch.tts.service || '').trim())?.id || '';
-      delete patch.tts.service;
-      const svc = ttsServiceOfBaseUrl(patch.tts.baseUrl || cfgNow.tts?.baseUrl || '');
-      const targetId = svc?.id || uiService || String(patch.tts.provider || cfgNow.tts?.provider || 'openai');
-      if (keyInput && keyInput !== '******') {
-        patch.tts.keys = { ...(cfgNow.tts?.keys || {}), [targetId]: keyInput };
-      }
+      const uiService = ttsServiceById(String(ttsBody.service || '').trim())?.id || '';
+      delete ttsBody.service;
+      const svc = ttsServiceOfBaseUrl(ttsBody.baseUrl || cfgNow.tts?.baseUrl || '');
+      const targetId = svc?.id || uiService || String(ttsBody.provider || cfgNow.tts?.provider || 'openai');
+      const nextTtsKeys = keyInput && keyInput !== '******'
+        ? { ...(cfgNow.tts?.keys || {}), [targetId]: keyInput }
+        : { ...(cfgNow.tts?.keys || {}) };
+      ttsBody.keys = nextTtsKeys;
+      stampServerKeys('tts', nextTtsKeys);
       // 老客户端/手写配置不带 provider：按地址反查预设，免得火山/MiniMax 的地址走了 openai 兼容实现
-      if (!patch.tts.provider && patch.tts.baseUrl) {
-        const svc = ttsServiceOfBaseUrl(patch.tts.baseUrl);
-        if (svc?.provider) patch.tts.provider = svc.provider;
+      if (!ttsBody.provider && ttsBody.baseUrl) {
+        const svc = ttsServiceOfBaseUrl(ttsBody.baseUrl);
+        if (svc?.provider) ttsBody.provider = svc.provider;
       }
-      const submittedKey = String(patch.tts.apiKey ?? '').trim();
-      if (!submittedKey || submittedKey === '******') delete patch.tts.apiKey;
+      const submittedKey = String(ttsBody.apiKey ?? '').trim();
+      if (!submittedKey || submittedKey === '******') delete ttsBody.apiKey;
     }
     // imageGen 的 Key：与 tts 同款语义（留空/掩码 = 保持原值）。前端已按此过滤，
     // 这里再兜一层 —— 配置是外部可编辑的，别让一次手写的空串把 Key 冲掉。
     // （派生结论 available/hasApiKey 的剥离在 migrateConfig：那是所有写入路径的必经口，
     //   也顺带兜住读盘 —— 与 asr 同款，见 IMAGEGEN_DERIVED_KEYS 的说明）
     if (patch?.imageGen && typeof patch.imageGen === 'object') {
+      const imgBody = sectionBody(patch.imageGen);
       // 服务端派生的布尔/归属口径：不回写配置
-      delete patch.imageGen.keyStale;
-      delete patch.imageGen.keyHosts;
+      delete imgBody.keyStale;
+      delete imgBody.keyHosts;
       // keys 映射由服务端维护：客户端只送"这一家新填的 Key"（apiKey），绝不接受整份覆盖
-      // （那会把别家存过的 Key 冲掉 —— 与 tts.keys 同款口径，2026-10-02）
-      delete patch.imageGen.keys;
+      // （那会把别家存过的 Key 冲掉 —— 与 tts.keys 同款口径，2026-10-02）。
+      // apiKeyHost 同款：归属钉一律由服务端按"本次提交的地址/凭据"重算 —— 客户端直接送它
+      // 就能把旧 Key 的归属改到别的主机，等于绕过归属守卫（2026-10-02 全量审查实测）。
+      delete imgBody.keys;
+      delete imgBody.apiKeyHost;
       // 目标主机：按本次提交的地址算（没有就用当前地址；留空 = 跟聊天模型同家）。
-      // pinImageGenKeyHost 就是这套口径，借它算一次（传临时对象，不改 patch 本身）。
+      // ⚠️ 模型地址要用**本次 patch 之后**的值：同一次 POST 里既改 api.baseUrl 又填图 Key 时，
+      // 用改动前的地址会把 Key 钉到旧主机（运行期按新地址找不到它；换回旧主机时又把它发给旧主机）。
+      // 2026-10-02 全量审查实测的"保存期归属与运行期不一致"；`api.__replace__.baseUrl` 同样算数。
+      const apiBody = sectionBody(patch.api);
+      const nextApiBase = apiBody && apiBody.baseUrl !== undefined ? apiBody.baseUrl : cfgNow.api?.baseUrl;
       const keyTargetHost = pinImageGenKeyHost(
-        { baseUrl: patch.imageGen.baseUrl ?? cfgNow.imageGen?.baseUrl ?? '' },
-        cfgNow.api?.baseUrl
+        { baseUrl: imgBody.baseUrl ?? cfgNow.imageGen?.baseUrl ?? '' },
+        nextApiBase
       );
       const nextKeys = { ...(cfgNow.imageGen?.keys || {}) };
       // 归档：当前活动槽那把先记到它自己的主机名下 —— 老配置只有单槽（升级上来的实例），
@@ -3121,58 +3167,75 @@ export function createApp({
       if (prevKey && prevKey !== '******' && prevHost && !String(nextKeys[prevHost] || '').trim()) {
         nextKeys[prevHost] = prevKey;
       }
-      const submittedKey = String(patch.imageGen.apiKey ?? '').trim();
+      const submittedKey = String(imgBody.apiKey ?? '').trim();
       if (submittedKey && submittedKey !== '******') {
         // 新填的 Key：记为当前活动 Key（归属钉照旧）＋ 存进"这家存过的"映射，切回来能自动取回
         if (keyTargetHost) nextKeys[keyTargetHost] = submittedKey;
-        patch.imageGen.keys = nextKeys;
-        pinImageGenKeyHost(patch.imageGen, cfgNow.api?.baseUrl);
+        imgBody.keys = nextKeys;
+        pinImageGenKeyHost(imgBody, nextApiBase);
       } else {
         // 留空/掩码 = "用这家存过的"（2026-10-02 用户要求）：切到哪家就取哪家存过的那把 ——
         // 存过就取回（连归属一起）；没存过就**不动现有的那把**：它由归属钉挡住使用
         // （不会发给别家），留着切回去还能用，界面按 keyHosts 显示"这家还没存过"。
-        delete patch.imageGen.apiKey;
-        const remembered = imageGenKeyFor(
+        delete imgBody.apiKey;
+        const resolved = imageGenKeyResolve(
           {
             ...(cfgNow.imageGen || {}),
             keys: nextKeys,
-            ...(patch.imageGen.baseUrl !== undefined ? { baseUrl: patch.imageGen.baseUrl } : {})
+            ...(imgBody.baseUrl !== undefined ? { baseUrl: imgBody.baseUrl } : {})
           },
           keyTargetHost
         );
-        if (remembered) {
-          nextKeys[keyTargetHost] = remembered;   // 取回的同时把映射补全（下次不再依赖活动槽）
-          patch.imageGen.keys = nextKeys;
-          patch.imageGen.apiKey = remembered;
-          patch.imageGen.apiKeyHost = keyTargetHost;
+        if (resolved.value) {
+          imgBody.apiKey = resolved.value;
+          // 明确属于这个主机的才写回归属钉/补映射；"没记归属"的老单槽只用值、不认领
+          if (resolved.owned) {
+            nextKeys[keyTargetHost] = resolved.value;
+            imgBody.keys = nextKeys;
+            imgBody.apiKeyHost = keyTargetHost;
+          }
         }
       }
+      stampServerKeys('imageGen', nextKeys);
     }
     // ASR 的凭据：与 tts/imageGen 同款语义（2026-10-02 用户要求："切换服务预设时 Key 跟着切换"）。
     // 三种凭据（apiKey / secretId / secretKey，后者两家与讯飞百度共用字段）各按"槽位"记忆，
     // 槽位口径见 asrCredentialSlot：OpenAI 兼容按地址主机分家，其余按 provider。
     if (patch?.asr && typeof patch.asr === 'object') {
-      delete patch.asr.keySlots;              // 服务端派生的视图口径：不回写配置
-      delete patch.asr.keys;                  // 映射由服务端维护，绝不接受整份覆盖
+      const asrBody = sectionBody(patch.asr);
+      delete asrBody.keySlots;                // 服务端派生的视图口径：不回写配置
+      delete asrBody.keys;                    // 映射由服务端维护，绝不接受整份覆盖
       const curAsr = cfgNow.asr || {};
-      const nextProvider = String(patch.asr.provider ?? curAsr.provider ?? '').trim().toLowerCase()
+      const nextProvider = String(asrBody.provider ?? curAsr.provider ?? '').trim().toLowerCase()
         || String(curAsr.provider || 'openai');
-      const nextBaseUrl = patch.asr.baseUrl !== undefined ? patch.asr.baseUrl : (curAsr.baseUrl || '');
+      const nextBaseUrl = asrBody.baseUrl !== undefined ? asrBody.baseUrl : (curAsr.baseUrl || '');
       const targetSlot = asrCredentialSlot(nextProvider, nextBaseUrl);
       const nextKeys = { ...(curAsr.keys || {}) };
-      const slotEntry = { ...(nextKeys[targetSlot] || {}) };
+      // 槽位条目必须是对象：手改成标量（"keys":{"tencent":"SCALAR"}）时 `{...'SCALAR'}` 会摊成
+      // 字符索引的垃圾键写进配置（2026-10-02 推前复审）。migrateConfig 只归一化顶层映射，这里兜条目。
+      const prevEntry = nextKeys[targetSlot];
+      const slotEntry = prevEntry && typeof prevEntry === 'object' && !Array.isArray(prevEntry)
+        ? { ...prevEntry } : {};
       const credentials = [
         ['apiKey', 'apiKeyProvider', 'apiKeyHost'],
         ['secretId', 'secretIdProvider', ''],
         ['secretKey', 'secretKeyProvider', '']
       ];
+      // 归属钉同款：一律由服务端按"本次提交的 provider/地址/凭据"重算 —— 客户端直接送它，
+      // 就能把别家的旧凭据改绑到当前这家（或反过来），绕过归属守卫（2026-10-02 全量审查实测）。
+      for (const [, providerField, hostField] of credentials) {
+        delete asrBody[providerField];
+        if (hostField) delete asrBody[hostField];
+      }
       // 归档：活动槽里"这家还没有副本"的凭据先记到它自己的槽名下 —— 老配置只有单槽，
       // 切到别家新填凭据时会覆盖它，不归档就丢了（切回来取不回）。
       for (const [kind, providerField, hostField] of credentials) {
         const value = String(curAsr[kind] || '').trim();
         if (!value || value === '******') continue;
-        const owner = String(curAsr[providerField] || '').trim().toLowerCase()
-          || String(curAsr.provider || '').trim().toLowerCase();
+        // 只归档**归属明确**的那把（pin 非空）：归属未知的老凭据没有"自己的家"可记，而且用
+        // 当前 provider 去猜会在同一次保存里被"取回"分支当成这家的凭据认领（推前复审实测：
+        // 讯飞/百度的 secretKey 会被写回归属钉并塞进目标槽）
+        const owner = String(curAsr[providerField] || '').trim().toLowerCase();
         if (!owner) continue;
         const host = hostField
           ? (String(curAsr[hostField] || '').trim().toLowerCase() || asrEndpointHost(curAsr.baseUrl))
@@ -3183,32 +3246,35 @@ export function createApp({
         nextKeys[slot] = entry;
       }
       for (const [kind, providerField, hostField] of credentials) {
-        const submitted = String(patch.asr[kind] ?? '').trim();
+        const submitted = String(asrBody[kind] ?? '').trim();
         if (submitted && submitted !== '******') {
           // 新填的凭据：写进"这家存过的"映射 + 更新归属钉（切回来能自动取回）
           if (targetSlot) slotEntry[kind] = submitted;
-          patch.asr[providerField] = nextProvider;
-          if (hostField) patch.asr[hostField] = nextProvider === 'openai' ? asrEndpointHost(nextBaseUrl) : '';
+          asrBody[providerField] = nextProvider;
+          if (hostField) asrBody[hostField] = nextProvider === 'openai' ? asrEndpointHost(nextBaseUrl) : '';
           continue;
         }
-        // 留空/掩码 = "用这家存过的"：取到就填回（连归属一起）；没取到就不动现有的 ——
-        // 现有那把给别家存的，归属钉挡着不会被使用（切回去还能用）。
-        delete patch.asr[kind];
-        const remembered = asrCredentialFor(
+        // 留空/掩码 = "用这家存过的"：取到就填回；**明确属于这家的**才写回归属钉/补映射 ——
+        // "归属未知"的老凭据只用值、不认领（认领会把别家的凭据洗成这家的，2026-10-02 全量审查；
+        // migrateConfig 的注释警告的正是这条路）。没取到就不动现有的：那把给别家存的，
+        // 归属钉挡着不会被使用（切回去还能用）。
+        delete asrBody[kind];
+        const resolved = asrCredentialResolve(
           { ...curAsr, keys: nextKeys, baseUrl: nextBaseUrl },
           kind,
           nextProvider,
           nextBaseUrl
         );
-        if (remembered) {
-          slotEntry[kind] = remembered;                  // 取回的同时把映射补全
-          patch.asr[kind] = remembered;
-          patch.asr[providerField] = nextProvider;
-          if (hostField) patch.asr[hostField] = nextProvider === 'openai' ? asrEndpointHost(nextBaseUrl) : '';
-        }
+        if (!resolved.value) continue;
+        asrBody[kind] = resolved.value;
+        if (!resolved.owned) continue;
+        slotEntry[kind] = resolved.value;                // 取回的同时把映射补全（只补明确属于这家的）
+        asrBody[providerField] = nextProvider;
+        if (hostField) asrBody[hostField] = nextProvider === 'openai' ? asrEndpointHost(nextBaseUrl) : '';
       }
       if (targetSlot && Object.keys(slotEntry).length) nextKeys[targetSlot] = slotEntry;
-      patch.asr.keys = nextKeys;
+      asrBody.keys = nextKeys;
+      stampServerKeys('asr', nextKeys);
     }
     // 人设真的改了就打一个时间戳：提示词据此在接下来 24 小时里提醒模型
     // "历史里的旧口癖/自称不作数"（换卡后它会被自己的旧发言锚住，实测能锚一天以上）

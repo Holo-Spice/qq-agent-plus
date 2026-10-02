@@ -8,7 +8,9 @@
 // 与"正在输入"的密码框（登录令牌、SnowLuma 改密、新增搜索服务的 Key）不同：
 // 那些没有已保存的值，用 ui/core/dom-util.js 的 bindPeekToggle（纯本地切 type）。
 import { api } from '../core/api.js';
+import { ASR_SERVICES } from '../core/constants.js';
 import { $ } from '../core/dom.js';
+import { asrSlotOf, hostOfUrl } from '../core/format.js';
 import { state } from '../core/state.js';
 
 // 输入框 id -> 搜索服务字段名（/api/config 里的搜索 Key 是脱敏的，
@@ -39,7 +41,11 @@ async function fetchRealKey(inputId) {
   }
   if (inputId === 'cfg-asr-key' || inputId === 'cfg-asr-secretid' || inputId === 'cfg-asr-secretkey') {
     const field = { 'cfg-asr-key': 'apiKey', 'cfg-asr-secretid': 'secretId', 'cfg-asr-secretkey': 'secretKey' }[inputId];
-    const r = await api(`/api/asr-key?field=${encodeURIComponent(field)}`);
+    // 带上表单**当前选中**的槽位（与切换预设时的掩码同源）：刚切换、还没保存时，
+    // 服务端按已保存配置解析会把上一家的明文显示在新服务名下（2026-10-02 全量审查）。
+    const item = ASR_SERVICES.find((x) => x.id === String($('#cfg-asr-service')?.value || ''));
+    const slot = item ? asrSlotOf(item.provider, $('#cfg-asr-baseurl')?.value || '') : '';
+    const r = await api(`/api/asr-key?field=${encodeURIComponent(field)}${slot ? `&slot=${encodeURIComponent(slot)}` : ''}`);
     return String(r.apiKey || '');
   }
   if (inputId === 'cfg-obtoken' || inputId === 'cfg-obhttptoken') {
@@ -48,7 +54,9 @@ async function fetchRealKey(inputId) {
     return String(r.token || '');
   }
   if (inputId === 'cfg-img-key') {
-    const r = await api('/api/imagegen/key');
+    // 同款：把表单里当前填的地址主机带上（空 = 跟随聊天模型，服务端按"当前这家"回显）
+    const host = hostOfUrl($('#cfg-img-baseurl')?.value || '');
+    const r = await api(`/api/imagegen/key${host ? `?host=${encodeURIComponent(host)}` : ''}`);
     return String(r.apiKey || '');
   }
   if (inputId === 'cfg-tts-key') {

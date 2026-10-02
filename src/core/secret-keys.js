@@ -63,7 +63,9 @@ export function sanitizeConfigSecrets(cfg) {
   // keyHosts（imageGen）、keySlots（asr）。
   for (const section of ['tts', 'imageGen', 'asr']) {
     const node = out[section];
-    if (node && typeof node === 'object' && node.keys && typeof node.keys === 'object') {
+    // 类型无关：手改坏的 keys（字符串/数组/数字）同样不能明文下发 —— 名称不含 apikey/secret，
+    // 走到这里之前谁也拦不住它（2026-10-02 全量审查实测：`"keys":"sk-xxx"` 会原样发给浏览器）。
+    if (node && typeof node === 'object' && 'keys' in node) {
       node.keys = {};
     }
   }

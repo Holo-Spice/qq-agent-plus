@@ -306,3 +306,24 @@ test('人设正文与自定义规则在写入侧夹住长度（防止粘贴事�
   // 恢复成默认人设卡，别影响同文件后续用例
   updateConfig({ persona: { roleText: PERSONAS?.xiaojingyu?.text ?? '默认人设', templateId: 'xiaojingyu' } });
 });
+
+test('三个带凭据映射的段（asr/tts/imageGen）：手改坏成标量/数组时归一化成对象，keys 同理', async () => {
+  // 2026-10-02 全量审查：非对象形态会让 { ...keys } 展开成字符索引的垃圾映射，
+  // 还会绕过控制台下发的"整包清空"（那条在 secret-keys.js 单独修）。这里钉住落盘/合并侧的归一化。
+  const { updateConfig, getConfig } = await import('../src/core/config.js');
+
+  updateConfig({ asr: { __replace__: 'junk' } });
+  assert.equal(Array.isArray(getConfig().asr), false, 'asr 段归一化成对象');
+  assert.equal(typeof getConfig().asr, 'object');
+
+  updateConfig({ imageGen: { enabled: true, keys: { __replace__: 'sk-leaked' } } });
+  assert.deepEqual(getConfig().imageGen.keys, {}, 'imageGen.keys 归一化成空映射（字符串不许当映射用）');
+  assert.equal(getConfig().imageGen.enabled, true, '同段其它字段不受影响');
+
+  updateConfig({ tts: { keys: { __replace__: ['a', 'b'] } } });
+  assert.deepEqual(getConfig().tts.keys, {}, 'tts.keys 同理');
+
+  // 正常写入照旧
+  updateConfig({ asr: { provider: 'tencent', keys: { tencent: { secretId: 'AKID', secretKey: 'SK' } } } });
+  assert.deepEqual(getConfig().asr.keys.tencent, { secretId: 'AKID', secretKey: 'SK' });
+});

@@ -267,7 +267,10 @@ test('切换语音服务预设：凭据按服务记忆（存过取回 / 没存�
   };
   const saveAsr = (patch) => request('/api/config', { method: 'POST', body: { asr: patch } });
   const asrStatus = async () => (await request('/api/config')).body.asr;
-  const plain = async (field = 'apiKey') => (await request(`/api/asr-key?field=${field}`)).body.apiKey;
+  const plain = async (field = 'apiKey', { slot = '' } = {}) => {
+    const q = `field=${encodeURIComponent(field)}${slot ? `&slot=${encodeURIComponent(slot)}` : ''}`;
+    return (await request(`/api/asr-key?${q}`)).body.apiKey;
+  };
 
   // ① 在 A 家填 Key
   let res = await saveAsr({ provider: 'openai', baseUrl: 'https://a.example.com/v1', model: 'm-a', apiKey: 'sk-asr-a' });
@@ -292,6 +295,12 @@ test('切换语音服务预设：凭据按服务记忆（存过取回 / 没存�
   assert.equal(await plain(), 'sk-asr-a', '切回存过的那家要自动取回 Key');
   assert.equal((await asrStatus()).keyUsable, true);
   assert.equal((await asrStatus()).keySource, 'config', '取回的 Key 来源是 config（不是 env）');
+
+  // ④b 「显示」按钮带上表单里的目标槽位：刚切换、还没保存时要给**目标**那把，
+  //     不能把当前这家（A）的明文显示在新服务名下（2026-10-02 全量审查）
+  assert.equal(await plain('apiKey', { slot: 'openai|b.example.com' }), 'sk-asr-b', '表单切到 B → 回显 B 存过的');
+  assert.equal(await plain('apiKey', { slot: 'openai|zzz.example.com' }), '', '没存过的主机回空，不许拿别家的顶上');
+  assert.equal(await plain('apiKey'), 'sk-asr-a', '不带槽位 = 当前这家（A）');
 
   // ⑤ 本土服务的一套凭据（腾讯 SecretId + SecretKey）同样按服务记忆，且不会串给百度
   await saveAsr({ provider: 'tencent', baseUrl: '', model: '', secretId: 'AKID-tc', secretKey: 'SK-tc' });
@@ -328,4 +337,46 @@ test('切换语音服务预设：凭据按服务记忆（存过取回 / 没存�
   await saveAsr({ provider: 'openai', baseUrl: 'https://d.example.com/v1', model: 'm-d' });   // 切走（触发归档）
   await saveAsr({ provider: 'openai', baseUrl: 'https://c.example.com/v1', model: 'm-c' });
   assert.equal(await plain(), 'sk-c-new', '同一家重填后，切回来要取回新那把');
+
+  // ⑨ 归属未知的老凭据不许被"认领"（2026-10-02 全量审查）：切到讯飞保存（不填凭据）后，
+  // secretKey 应仍是"归属未知"——认领会把它洗成讯飞的，百度那边从此取不回（跨服务串用）。
+  updateConfig({
+    asr: {
+      provider: 'openai', baseUrl: 'https://c.example.com/v1', model: 'm-c',
+      secretKey: 'UNBOUND-SK', secretKeyProvider: ''
+    }
+  });
+  await saveAsr({ provider: 'iflytek', baseUrl: '', model: '', appId: 'APP-X' });
+  const afterIflytek = await asrStatus();
+  assert.equal(String(afterIflytek.secretKeyProvider || ''), '', '归属未知的老凭据不该被讯飞认领');
+  const onDiskAsr = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8')).asr;
+  assert.equal(Boolean(onDiskAsr.keys?.iflytek?.secretKey), false, '也不该写进讯飞的槽位映射（认领会把别家的凭据洗成这家的）');
+  assert.equal(await plain('secretKey'), 'UNBOUND-SK', '讯飞仍能用它（值没丢）');
+  await saveAsr({ provider: 'baidu', baseUrl: '', model: '' });
+  assert.equal(await plain('secretKey'), 'UNBOUND-SK', '换到百度也还拿得到（没被洗成讯飞的）');
+
+  // ⑩ 整节替换（__replace__）也不能把客户端 keys 写进配置：服务端把自己的映射钉回替换对象
+  //    （deepMerge 会整节换成客户端对象 —— 2026-10-02 全量审查实测的绕过路径）
+  res = await saveAsr({
+    __replace__: {
+      enabled: true, provider: 'openai', baseUrl: 'https://a.example.com/v1', model: 'm-a',
+      apiKey: 'sk-attacker', keys: { 'openai|evil.example.com': { apiKey: 'sk-evil' } }
+    }
+  });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  const slotsAfterReplace = (await asrStatus()).keySlots;
+  assert.equal(Object.prototype.hasOwnProperty.call(slotsAfterReplace, 'openai|evil.example.com'), false,
+    '整节替换里的 keys 必须被忽略');
+  assert.ok(Object.keys(slotsAfterReplace).includes('openai|c.example.com'),
+    '服务端自己的映射被钉回替换对象（记忆没被整节替换冲掉）');
+
+  // ⑪ 手改成标量的槽位条目不许被摊成字符索引的垃圾（推前复审）：`{...'SCALAR'}` 会写进
+  //    0/1/2… 这些键，配置从此多出一份看不懂的东西。同时：归属未知的 secretKey 不许被
+  //    "归档兜底 + 取回"自证成这家的（同一批审查实测过这条自证链）
+  updateConfig({ asr: { provider: 'tencent', baseUrl: '', model: '', keys: { __replace__: { tencent: 'SCALAR' } } } });
+  await saveAsr({ provider: 'tencent', baseUrl: '', model: '', secretId: 'AKID-new' });
+  const diskAsr2 = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8')).asr;
+  assert.deepEqual(diskAsr2.keys.tencent, { secretId: 'AKID-new' }, '槽位条目只留服务端写的字段，不夹带字符索引');
+  assert.equal(String(diskAsr2.secretKeyProvider || ''), '', '归属未知的 secretKey 不许被这次保存认领');
+  assert.equal(diskAsr2.secretKey, 'UNBOUND-SK', '值仍在（当前这家还能用）');
 });

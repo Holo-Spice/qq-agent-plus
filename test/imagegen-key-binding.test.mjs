@@ -202,3 +202,134 @@ test('保存时剔掉 GET 的派生字段：视图别名 keyHost 不落盘', asy
   assert.equal(onDisk.apiKeyHost, 'open.bigmodel.cn', '真身还在，归属没被洗掉');
   assert.equal(onDisk.apiKey, 'zhipu-key', 'Key 本身不受影响');
 });
+
+test('视图布尔口径 keyHosts 走 migrateConfig 的派生名单：非控制台写入也不落盘', async () => {
+  // 控制台的保存块会显式删 keyHosts，但 updateConfig 还有别的调用方（脚本/测试/手写 API）——
+  // 派生名单是"所有写入路径的必经口"那条防线（2026-10-02 全量审查：原来只有 asr 的 keySlots 在名单里）
+  const cfg = C.updateConfig({ imageGen: { keyHosts: ['evil.example.com'], keyStale: true, keyHost: 'evil.example.com' } });
+  assert.equal('keyHosts' in cfg.imageGen, false, 'keyHosts 不该留在配置里');
+  assert.equal('keyStale' in cfg.imageGen, false);
+  assert.equal('keyHost' in cfg.imageGen, false);
+});
+
+test('同一次 POST 里既换模型地址又填图 Key：归属按**新**地址钉（不能钉到改动前的旧主机）', async (t) => {
+  const port = await freePort();
+  C.updateConfig({ server: { ...C.getConfig().server, host: '127.0.0.1', port, token: '' } });
+  C.updateConfig({ imageGen: { enabled: true, baseUrl: '', model: 'img-1', apiKey: '', apiKeyHost: '', keys: { __replace__: {} } } });
+  const app = createApp({ log: () => {} });
+  t.after(async () => { await app.stop(); });
+  await app.start();
+
+  const saved = await request(port, 'POST', '/api/config', {
+    api: { baseUrl: 'https://new-model.example.com/v1', apiKey: 'model-key' },
+    imageGen: { baseUrl: '', model: 'img-1', apiKey: 'sk-follow-model' }
+  });
+  assert.equal(saved.status, 200, saved.text);
+  const onDisk = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
+  assert.equal(onDisk.imageGen.apiKeyHost, 'new-model.example.com',
+    'imageGen 地址留空 = 跟随模型，pin 要用"本次 patch 之后"的模型地址（旧实现用改动前的，钉到 gateway.example.com）');
+  assert.equal(onDisk.imageGen.apiKey, 'sk-follow-model');
+  assert.deepEqual(Object.keys(onDisk.imageGen.keys || {}), ['new-model.example.com'], '记忆也记在新主机名下');
+  // 运行期与保存期同源：按新地址能取到这把我们刚填的 Key（钉错主机时运行期会“要重填”）
+  const auth = resolveImageGenAuth({ imageGen: onDisk.imageGen, api: onDisk.api });
+  assert.equal(auth.ok, true, auth.error);
+  assert.equal(auth.key, 'sk-follow-model');
+  assert.equal(imageGenKeyStale(onDisk.imageGen, onDisk.api), false, '钉对了就不该标"要重填"');
+});
+
+test('「显示」按钮带上表单里的目标主机：给那个主机存过的，不给当前这家的明文', async (t) => {
+  const port = await freePort();
+  C.updateConfig({ server: { ...C.getConfig().server, host: '127.0.0.1', port, token: '' } });
+  C.updateConfig({
+    imageGen: {
+      enabled: true, baseUrl: 'https://a.example.com/v1', model: 'm',
+      apiKey: 'sk-active-a', apiKeyHost: 'a.example.com',
+      keys: { __replace__: { 'b.example.com': 'sk-stored-b' } }
+    }
+  });
+  const app = createApp({ log: () => {} });
+  t.after(async () => { await app.stop(); });
+  await app.start();
+
+  const plain = async (q = '') => (await request(port, 'GET', `/api/imagegen/key${q}`)).body.apiKey;
+  assert.equal(await plain('?host=b.example.com'), 'sk-stored-b', '表单切到 B → 回显 B 存过的');
+  assert.equal(await plain('?host=zzz.example.com'), '', '没存过的主机回空（不许拿 A 的顶上）');
+  assert.equal(await plain(), 'sk-active-a', '不带 host = 当前这家（A）');
+});
+
+test('整节替换体里的归属钉不算数：按替换体的地址重算（推前复审）', async (t) => {
+  const port = await freePort();
+  C.updateConfig({ server: { ...C.getConfig().server, host: '127.0.0.1', port, token: '' } });
+  C.updateConfig({
+    imageGen: {
+      enabled: true, baseUrl: 'https://a.example.com/v1', model: 'm',
+      apiKey: 'sk-a', apiKeyHost: 'a.example.com', keys: { __replace__: {} }
+    }
+  });
+  const app = createApp({ log: () => {} });
+  t.after(async () => { await app.stop(); });
+  await app.start();
+
+  // 地址指向 A、钉子却写 evil：不重算的话 delete 删不到替换体里的 pin，evil 直接生效
+  const saved = await request(port, 'POST', '/api/config', {
+    imageGen: {
+      __replace__: {
+        enabled: true, baseUrl: 'https://a.example.com/v1', model: 'm',
+        apiKey: 'sk-a', apiKeyHost: 'evil.example.com'
+      }
+    }
+  });
+  assert.equal(saved.status, 200, saved.text);
+  const onDisk = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8')).imageGen;
+  assert.equal(onDisk.apiKeyHost, 'a.example.com', '归属钉由服务端按替换体的地址重算，不认客户端写的');
+  assert.equal(Boolean(onDisk.keys?.['evil.example.com']), false, '不许把 Key 记到伪造的主机名下');
+});
+
+test('api.__replace__ 里换模型地址：图 Key 的归属跟着**新**地址（推前复审）', async (t) => {
+  const port = await freePort();
+  C.updateConfig({ server: { ...C.getConfig().server, host: '127.0.0.1', port, token: '' } });
+  C.updateConfig({ api: { baseUrl: 'https://old-model.example.com/v1' } });
+  C.updateConfig({ imageGen: { enabled: true, baseUrl: '', model: 'img-1', apiKey: '', apiKeyHost: '', keys: { __replace__: {} } } });
+  const app = createApp({ log: () => {} });
+  t.after(async () => { await app.stop(); });
+  await app.start();
+
+  const saved = await request(port, 'POST', '/api/config', {
+    api: { __replace__: { baseUrl: 'https://new-model.example.com/v1', apiKey: 'mk', model: 'm' } },
+    imageGen: { baseUrl: '', model: 'img-1', apiKey: 'sk-follow-model' }
+  });
+  assert.equal(saved.status, 200, saved.text);
+  const onDisk = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'));
+  assert.equal(onDisk.api.baseUrl, 'https://new-model.example.com/v1', '前提：替换体生效了');
+  assert.equal(onDisk.imageGen.apiKeyHost, 'new-model.example.com',
+    'pin 要读替换体里的新模型地址（旧实现读节点层，读不到 → 钉到旧主机）');
+  assert.deepEqual(Object.keys(onDisk.imageGen.keys || {}), ['new-model.example.com']);
+});
+
+test('整节替换（__replace__）也不能把客户端 keys 写进配置：服务端把自己的映射钉回替换对象', async (t) => {
+  const port = await freePort();
+  C.updateConfig({ server: { ...C.getConfig().server, host: '127.0.0.1', port, token: '' } });
+  C.updateConfig({
+    imageGen: {
+      enabled: true, baseUrl: 'https://a.example.com/v1', model: 'm',
+      apiKey: 'sk-a', apiKeyHost: 'a.example.com', keys: { __replace__: {} }
+    }
+  });
+  const app = createApp({ log: () => {} });
+  t.after(async () => { await app.stop(); });
+  await app.start();
+
+  // deepMerge 的整节替换约定会把我们算好的 keys 丢掉 —— 2026-10-02 全量审查实测的绕过路径
+  const saved = await request(port, 'POST', '/api/config', {
+    imageGen: {
+      __replace__: {
+        enabled: true, baseUrl: 'https://a.example.com/v1', model: 'm',
+        keys: { 'evil.example.com': 'sk-evil' }
+      }
+    }
+  });
+  assert.equal(saved.status, 200, saved.text);
+  const onDisk = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8')).imageGen;
+  assert.equal(Boolean(onDisk.keys?.['evil.example.com']), false, '客户端整节替换里的 keys 必须被忽略');
+  assert.equal(onDisk.keys?.['a.example.com'], 'sk-a', '服务端自己的映射被钉回替换对象（切走前的归档没丢）');
+});

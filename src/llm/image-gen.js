@@ -56,11 +56,14 @@ export function imageGenKeyStale(imageGen, api) {
   const hasAny = Boolean(String(imageGen?.apiKey || '').trim())
     || Object.values(imageGen?.keys || {}).some((v) => String(v || '').trim());
   if (!hasAny) return false;   // 从没存过 = "还没填"，不是"要重填"
-  // 活动槽那把"没记归属"的老配置（migrateConfig 会按当时地址补记）按"当前地址能用"算 ——
-  // 与 imageGenKeyApplies 同一条口径，不给升级中的实例制造突然失效（2026-10-02 回归测试抓到）
-  const active = String(imageGen?.apiKey || '').trim();
-  if (active && active !== '******' && imageGenKeyApplies(imageGen, host)) return false;
+  // imageGenKeyFor 里含"没记归属的老单槽按当前地址能用"的兜底 —— 与运行时同一口径，
+  // 不给升级中的实例制造突然失效（2026-10-02 回归测试抓到过）
   return !imageGenKeyFor(imageGen, host);
+}
+
+/** 实际会用的图片服务主机（控制台「显示」按钮判断"表单里换的主机是不是当前这家"用）。 */
+export function imageGenEffectiveHost(imageGen, api) {
+  return hostOf(imageGenBaseUrl(imageGen, api));
 }
 
 /**
