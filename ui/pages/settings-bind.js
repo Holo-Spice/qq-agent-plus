@@ -865,6 +865,26 @@ function bindSettingsListsAndGroups(c) {
     sync();   // 初始同步一次
   }
 
+  // ── 表情清单条数 / 每小时最多收藏：同款 1~60 滑条（2026-10-02 用户要求"做移动条"）。
+  //    滑条的实时读数与填充色只影响显示；保存读的仍是滑条的 value（settings-save 里归一化）。
+  for (const [sliderSel, nowSel] of [
+    ['#cfg-sticker-max', '#cfg-sticker-max-now'],
+    ['#cfg-sticker-collect-max', '#cfg-sticker-collect-max-now']
+  ]) {
+    const slider = $(sliderSel);
+    if (!slider) continue;
+    const now = $(nowSel);
+    const syncStickerSlider = () => {
+      const min = Number(slider.min) || 1;
+      const max = Number(slider.max) || 60;
+      const v = Math.min(max, Math.max(min, Math.round(Number(slider.value) || min)));
+      if (now) now.textContent = String(v);
+      slider.style.setProperty('--pos', `${Math.round(((v - min) / Math.max(1, max - min)) * 100)}%`);
+    };
+    slider.addEventListener('input', syncStickerSlider);
+    syncStickerSlider();
+  }
+
   // ── 对话模式：分段切换器只展示当前模式相关参数 ──
   const conversationModeInput = $('#cfg-conversation-mode');
   const conversationModeShell = $('#conversation-mode-shell');

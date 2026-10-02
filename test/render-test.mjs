@@ -914,16 +914,17 @@ try {
     && chatHtml.includes('id="cfg-pro-followup"') && chatHtml.includes('id="cfg-pro-selfwake"')
     && !/id="cfg-pro-followup"[^>]*checked/.test(chatHtml)
     && !/id="cfg-pro-selfwake"[^>]*checked/.test(chatHtml)
-    // 清单条数是输入框（用户 2026-10-02 要求改回自由填写）：存量值 24 如实回显
-    && /<input type="number" id="cfg-sticker-max"[^>]*value="24"/.test(chatHtml)
+    // 清单条数是滑条（用户 2026-10-02 要求"做移动条"）：范围 1~60、存量值 24 如实回显
+    && /<input type="range" id="cfg-sticker-max"[^>]*min="1" max="60"[^>]*value="24"/.test(chatHtml)
+    && /<span id="cfg-sticker-max-now">24<\/span>/.test(chatHtml)
     && !/<select id="cfg-sticker-max"/.test(chatHtml);
   openSwitchesOk ? pass++ : fail++;
-  console.log('  ' + (openSwitchesOk ? 'OK   ' : 'FAIL ') + '设置页：主动开口三个开关 + 表情清单条数输入框');
+  console.log('  ' + (openSwitchesOk ? 'OK   ' : 'FAIL ') + '设置页：主动开口三个开关 + 表情清单条数滑条');
   // 缺省 / 老配置（字段不存在）按"开"渲染：升级后行为不变；条数默认 10 档
   const defaultHtml = ctx.renderChatSection(cfg);
   const defaultOnOk = /id="cfg-pro-followup"[^>]*checked/.test(defaultHtml)
     && /id="cfg-pro-selfwake"[^>]*checked/.test(defaultHtml)
-    && /<input type="number" id="cfg-sticker-max"[^>]*value="10"/.test(defaultHtml);
+    && /<input type="range" id="cfg-sticker-max"[^>]*value="10"/.test(defaultHtml);
   defaultOnOk ? pass++ : fail++;
   console.log('  ' + (defaultOnOk ? 'OK   ' : 'FAIL ') + '设置页：缺省开关勾选、清单条数默认 10');
   // 收藏开关（2026-10-02 用户反馈"乱收藏"）：**一个开关**同时管"自动收"与"主动收"
@@ -933,26 +934,27 @@ try {
   const collectUiOk = /id="cfg-sticker-collect"/.test(defaultHtml)
     && !/id="cfg-sticker-autocollect"/.test(defaultHtml)
     && /id="cfg-sticker-collect"\s+checked/.test(defaultHtml)
-    && /<input type="number" id="cfg-sticker-collect-max"[^>]*value="10"/.test(defaultHtml)
+    && /<input type="range" id="cfg-sticker-collect-max"[^>]*value="10"/.test(defaultHtml)
     && !/id="cfg-sticker-collect"\s+checked/.test(chatHtml)
-    && /<input type="number" id="cfg-sticker-collect-max"[^>]*value="5"/.test(chatHtml)
+    && /<input type="range" id="cfg-sticker-collect-max"[^>]*value="5"/.test(chatHtml)
+    && /<span id="cfg-sticker-collect-max-now">5<\/span>/.test(chatHtml)
     && !/id="cfg-sticker-collect"\s+checked/.test(mixedCollectHtml);
   collectUiOk ? pass++ : fail++;
   console.log('  ' + (collectUiOk ? 'OK   ' : 'FAIL ')
-    + '设置页：收藏开关（一个开关管自动+主动）+ 每小时上限输入框（存量/混合值如实回显）');
+    + '设置页：收藏开关（一个开关管自动+主动）+ 每小时上限滑条（存量/混合值如实回显）');
   // 存量的超范围值（手改过 config.json 的 500）落到 60 档，不会渲染出 500 这种选项
   const overHtml = ctx.renderChatSection({ ...cfg, sticker: { ...cfg.sticker, promptMaxStickers: 500 } });
-  // 断言只看贴纸那个输入框（同一段里发送上限的默认值就是 500，不能全局查 value="500"）
-  const overOk = /<input type="number" id="cfg-sticker-max"[^>]*value="60"/.test(overHtml)
-    && !/<input type="number" id="cfg-sticker-max"[^>]*value="500"/.test(overHtml);
+  // 断言只看贴纸那个滑条（同一段里发送上限的默认值就是 500，不能全局查 value="500"）
+  const overOk = /<input type="range" id="cfg-sticker-max"[^>]*value="60"/.test(overHtml)
+    && !/<input type="range" id="cfg-sticker-max"[^>]*value="500"/.test(overHtml);
   overOk ? pass++ : fail++;
   console.log('  ' + (overOk ? 'OK   ' : 'FAIL ') + '设置页：超范围存量值按 60 回显');
 
   // 手改成非正数（运行时按默认 10 生效）时界面也必须显示 10 —— 否则保存一下就把用户的值改成 1 了
   const zeroHtml = ctx.renderChatSection({ ...cfg, sticker: { ...cfg.sticker, promptMaxStickers: -5 } });
-  const zeroOk = /<input type="number" id="cfg-sticker-max"[^>]*value="10"/.test(zeroHtml)
-    && !/<input type="number" id="cfg-sticker-max"[^>]*value="-5"/.test(zeroHtml)
-    && !/<input type="number" id="cfg-sticker-max"[^>]*value="1"/.test(zeroHtml);
+  const zeroOk = /<input type="range" id="cfg-sticker-max"[^>]*value="10"/.test(zeroHtml)
+    && !/<input type="range" id="cfg-sticker-max"[^>]*value="-5"/.test(zeroHtml)
+    && !/<input type="range" id="cfg-sticker-max"[^>]*value="1"/.test(zeroHtml);
   zeroOk ? pass++ : fail++;
   console.log('  ' + (zeroOk ? 'OK   ' : 'FAIL ') + '设置页：非正数存量值按运行时的 10 回显');
 
@@ -3044,7 +3046,7 @@ try {
     await vm.runInContext('saveConfig({ quiet: true })', ctx);
     sk = (posts.length ? posts[posts.length - 1] : {}).sticker || {};
     const collectOnOk = sk.collectEnabled === true && sk.autoCollect === true;
-    // 清空输入框 = 保持原值（与"每小时最多转写"同一口径）：把存量设成 7 再清空保存，应仍是 7
+    // 控件无值/缺失时的兜底：回退到已保存的值（滑条正常不会为空，这里钉的是兜底分支）
     vm.runInContext(
       'state.config.sticker = { ...(state.config.sticker || {}), maxCollectPerHour: 7 };'
       + 'document.querySelector("#cfg-sticker-collect-max").value = "";', ctx);
@@ -3054,7 +3056,7 @@ try {
     const collectSaveOk = collectOffOk && collectOnOk && collectClearOk;
     collectSaveOk ? pass++ : fail++;
     console.log('  ' + (collectSaveOk ? 'OK   ' : 'FAIL ')
-      + '保存：收藏开关一起写 collectEnabled/autoCollect（关=两个都关、开=都开；清空上限保持原值）'
+      + '保存：收藏开关一起写 collectEnabled/autoCollect（关=两个都关、开=都开；无值时回退已保存值）'
       + (collectSaveOk ? '' : ` -> off=${collectOffOk} on=${collectOnOk} clear=${collectClearOk} ${JSON.stringify(sk)}`));
   }
 

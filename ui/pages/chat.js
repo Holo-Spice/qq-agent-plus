@@ -190,12 +190,14 @@ return `
       <label for="cfg-sticker-collect">允许机器人自己收藏表情包（关掉后不再自动收，也不会在聊天里主动收；手动添加不受影响）</label></div>
 
     <div class="field">
-      <label for="cfg-sticker-collect-max">每小时最多收藏（张）</label>
-      <input type="number" id="cfg-sticker-collect-max" min="1" max="60"
-        value="${normalizeStickerCollectMax(c.sticker?.maxCollectPerHour)}" placeholder="1-60，默认 10" />
+      <label for="cfg-sticker-collect-max">每小时最多收藏（<span id="cfg-sticker-collect-max-now">${normalizeStickerCollectMax(c.sticker?.maxCollectPerHour)}</span> 张）</label>
+      <div class="tier-slider-wrap">
+        <input type="range" id="cfg-sticker-collect-max" class="tier-slider" min="1" max="60" step="1"
+          value="${normalizeStickerCollectMax(c.sticker?.maxCollectPerHour)}" aria-label="每小时最多收藏张数" />
+      </div>
       <div class="hint">
-        自己填 1-60（超出会按这个范围收口，清空保持原值）。全局上限，默认 10 张/小时；每个会话另有
-        3 张/小时的上限。控制台里手动添加表情不受这两项影响。
+        拖动设置 1-60（默认 10 张/小时）。全局上限；每个会话另有 3 张/小时的上限。
+        控制台里手动添加表情不受这两项影响。
       </div>
     </div>
 
@@ -212,13 +214,15 @@ return `
     </div>
 
     <div class="field">
-      <label for="cfg-sticker-max">系统提示里的表情清单条数</label>
-      <input type="number" id="cfg-sticker-max" min="1" max="60"
-        value="${normalizeStickerMax(c.sticker?.promptMaxStickers)}" placeholder="1-60，默认 10" />
+      <label for="cfg-sticker-max">系统提示里的表情清单条数（<span id="cfg-sticker-max-now">${normalizeStickerMax(c.sticker?.promptMaxStickers)}</span> 条）</label>
+      <div class="tier-slider-wrap">
+        <input type="range" id="cfg-sticker-max" class="tier-slider" min="1" max="60" step="1"
+          value="${normalizeStickerMax(c.sticker?.promptMaxStickers)}" aria-label="表情清单条数" />
+      </div>
       <div class="hint">
-        自己填 1-60（超出会按这个范围收口，清空保持原值）。清单一半放常用的，一半放没用过/很久没用的，
-        发掉一张自动换下一张上来（不会再总是那几张）。填得越大能选的范围越宽，代价是每轮提示词变长；
-        省 Token 模式还会再夹到 3~5 条。库容量不受这一项影响。
+        拖动设置 1-60（默认 10）。清单一半放常用的，一半放没用过/很久没用的，发掉一张自动换下一张上来
+        （不会再总是那几张）。条数越大能选的范围越宽，代价是每轮提示词变长；省 Token 模式还会再夹到
+        3~5 条。库容量不受这一项影响。
       </div>
     </div>
 
@@ -270,6 +274,11 @@ return `
     </div>
 
     <div class="tier-params">
+      <div class="hint" style="margin:0 0 8px">
+        「已读」= 已经被处理过的历史消息（机器人看过、回过，或当时决定不回的）。每次响应发给模型的是
+        「这次要处理的新消息（未读）」+ 最近这么多条历史（已读），好让它知道前面在聊什么；
+        条数越大上下文越全，每轮的提示词花费也越高。
+      </div>
       <div class="tier-param${paramOn.at ? '' : ' dim'}">
         <label>① 被艾特时：发未读 + <input type="number" id="cfg-atcount" min="0" max="500" value="${esc(st.atCount ?? 20)}" /> 条已读</label>
         <div class="hint">有人 @ 机器人时<b>一定响应</b>，不受上面概率的影响。</div>
