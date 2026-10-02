@@ -1190,7 +1190,12 @@ function openBlocklistModal() {
 
   function isBlocked(uid) { return (pending[activeGid] || []).map(String).includes(String(uid)); }
 
-  function renderRight() {
+  // 只重画列表：搜索框（工具栏）留在重绘区之外 —— 输入时它不会被重建、焦点不丢。
+  // 原来输入回调直接调 renderRight()，而它把含搜索框自己的整栏都 innerHTML 重画了，
+  // 每敲一个字输入框就被换掉一次，表现就是"只能输一个字"（2026-10-02 用户反馈）。
+  function renderList() {
+    const listEl = right.querySelector('#bl-list');
+    if (!listEl) return;
     const filtered = kw
       ? members.filter((m) => `${m.card} ${m.nickname} ${m.userId}`.toLowerCase().includes(kw))
       : members;
@@ -1202,13 +1207,8 @@ function openBlocklistModal() {
         <span class="muted" style="font-size:11px">${esc(m.userId)}</span>
       </label>`;
     }).join('');
-    right.innerHTML = `
-      <div class="ma-toolbar">
-        <input type="text" id="bl-search" placeholder="搜索群员（昵称 / 群名片 / QQ 号）…" autocomplete="off" value="${esc(kw)}" />
-      </div>
-      <div id="bl-list">${rows || '<div class="empty-hint" style="padding:18px">没有匹配的群员</div>'}</div>`;
-    right.querySelector('#bl-search').addEventListener('input', (e) => { kw = e.target.value.trim().toLowerCase(); renderRight(); });
-    right.querySelectorAll('.bl-chk').forEach((chkEl) => {
+    listEl.innerHTML = rows || '<div class="empty-hint" style="padding:18px">没有匹配的群员</div>';
+    listEl.querySelectorAll('.bl-chk').forEach((chkEl) => {
       chkEl.addEventListener('change', () => {
         const uid = chkEl.dataset.uid;
         const set = new Set((pending[activeGid] || []).map(String));
@@ -1218,6 +1218,17 @@ function openBlocklistModal() {
         statusEl.textContent = n ? `当前群已屏蔽 ${n} 人` : '';
       });
     });
+  }
+
+  // 整栏初始化（首次进入 / 切群后）：工具栏只在这里渲染一次，之后输入只走 renderList()
+  function renderRight() {
+    right.innerHTML = `
+      <div class="ma-toolbar">
+        <input type="text" id="bl-search" placeholder="搜索群员（昵称 / 群名片 / QQ 号）…" autocomplete="off" value="${esc(kw)}" />
+      </div>
+      <div id="bl-list"></div>`;
+    right.querySelector('#bl-search').addEventListener('input', (e) => { kw = e.target.value.trim().toLowerCase(); renderList(); });
+    renderList();
   }
 
   async function loadMembers() {

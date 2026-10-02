@@ -3058,6 +3058,48 @@ try {
       + (collectSaveOk ? '' : ` -> off=${collectOffOk} on=${collectOnOk} clear=${collectClearOk} ${JSON.stringify(sk)}`));
   }
 
+  // ── 屏蔽名单搜索框（2026-10-02 用户反馈"只能输一个字"）────────────────────────
+  //    根因：输入回调重画了整个右栏（含搜索框自己）→ 每次按键输入框被换掉、焦点丢失。
+  //    修法：工具栏只渲染一次，输入时只重画列表容器。断言"输入后右栏 HTML 未被重建、
+  //    只有列表容器变了"—— 变异（把回调改回 renderRight）会让它变红。
+  {
+    const prevFetch = sandbox.fetch;
+    sandbox.fetch = async (path) => {
+      const p = String(path);
+      if (p.includes('/api/onebot/groups')) {
+        return { ok: true, status: 200, json: async () => ({ groups: [{ id: '1', name: '测试群' }] }), text: async () => '' };
+      }
+      if (p.includes('/members')) {
+        return { ok: true, status: 200, json: async () => ({ members: [
+          { userId: '10001', nickname: '甲', card: '' },
+          { userId: '10002', nickname: '乙', card: '' }
+        ] }), text: async () => '' };
+      }
+      return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
+    };
+    vm.runInContext('state.config = { ...(state.config || {}), allow: { groups: ["1"] } };', ctx);
+    ctx.openBlocklistModal();
+    await new Promise((resolve) => setTimeout(resolve, 20));   // 等 groups / members 两个 api 回来
+    const overlay = document.body.children[document.body.children.length - 1];
+    const right = overlay.querySelector('#bl-right');
+    const searchEl = right.querySelector('#bl-search');
+    const beforeRight = right.innerHTML;
+    const beforeList = right.querySelector('#bl-list').innerHTML;
+    // 快照迭代：变异版本（输入回调重画整栏）会往同一个 stub 元素的监听器数组里再塞一个，
+    // 对着活数组 for...of 会无限循环 —— 那种"炸掉"不算"用例抓住变异"，要让它正常走到断言。
+    const inputHandlers = [...(searchEl._listeners?.input || [])];
+    for (const fn of inputHandlers) fn({ target: { value: '甲' } });
+    const afterRight = right.innerHTML;
+    const afterList = right.querySelector('#bl-list').innerHTML;
+    const blSearchOk = inputHandlers.length > 0
+      && beforeRight === afterRight        // 整栏没被重建（搜索框还在原位、焦点不丢）
+      && beforeList !== afterList;         // 只有列表被重画
+    blSearchOk ? pass++ : fail++;
+    console.log('  ' + (blSearchOk ? 'OK   ' : 'FAIL ')
+      + '屏蔽名单搜索：输入只重画列表、不重建含搜索框的整栏（防"只能输一个字"）');
+    sandbox.fetch = prevFetch;
+  }
+
   // ── 群勾选列表的"没读完别覆盖"守卫 ──
   //    用户报过"群列表一直读取中"（2026-09-28）：那种状态下盒子里只剩提示文案、零勾选，
   //    若保存照常发 chats: []，一次无关的保存就把白名单清空了。判据是 box.dataset.loaded
