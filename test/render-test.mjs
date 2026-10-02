@@ -1768,6 +1768,17 @@ try {
   console.log('  ' + (sliderCssPin ? 'OK   ' : 'FAIL ')
     + '滑条填充不做 background 过渡（渐变无法插值，拖动会一格一格跳）');
 
+  // 滑条填充端点要对齐球心：calc(半球宽 + 比例 × (100% - 球宽))。纯百分比在低值时会露出
+  // "球和条没连上"的缝（2026-10-02 用户实测 10/60 差约 6px）。三个滑条都必须走这个算法。
+  const bindSrc = fs.readFileSync(path.join(ROOT, 'ui', 'pages', 'settings-bind.js'), 'utf8');
+  const fillPosUses = (bindSrc.match(/sliderFillPos\(/g) || []).length;
+  const fillPin = /function sliderFillPos\(/.test(bindSrc)
+    && /100% - \$\{SLIDER_THUMB_PX\}px/.test(bindSrc)
+    && fillPosUses >= 4;   // 定义 1 处 + 统一/分群/两个收藏滑条各 1 处调用
+  fillPin ? pass++ : fail++;
+  console.log('  ' + (fillPin ? 'OK   ' : 'FAIL ')
+    + `滑条填充按球心对齐（calc 共 ${fillPosUses} 处，低值不再露缝）`);
+
   const originalFetch = sandbox.fetch;
   const assetDeleteCalls = [];
   sandbox.fetch = async (url, options = {}) => {

@@ -217,6 +217,17 @@ function isSplitThinking(c) {
   return Boolean(raw && typeof raw === 'object' && !Array.isArray(raw));
 }
 
+// 滑条填充色的终点必须对齐滑块**球心**：range 的球心在轨道两端各内缩半个球宽，
+// 纯百分比渐变在低值时会露出"球和条没连上"的缝（2026-10-02 用户实测：10/60 时差约 6px；
+// 另外两个滑条恰好停在高位、填充多出一两个像素盖住球心，所以看不出来）。用 calc 精确对齐。
+// 18px 与 style.css 里 ::-webkit-slider-thumb 的宽度一致 —— 改样式时这里要同步。
+const SLIDER_THUMB_PX = 18;
+function sliderFillPos(ratio) {
+  const n = Number(ratio);
+  const r = Math.min(1, Math.max(0, Number.isFinite(n) ? n : 0));
+  return `calc(${SLIDER_THUMB_PX / 2}px + ${Number(r.toFixed(4))} * (100% - ${SLIDER_THUMB_PX}px))`;
+}
+
 // 设置页事件绑定：原来是一个 1544 行的单函数，按**安全边界**（两侧无共享局部名）切成 4 段。
 // 只切不改 —— 每段的语句与切分前逐字节一致，顺序、条件、守卫都没动；这里按原顺序调用。
 function bindSettingsEvents(c) {
@@ -858,8 +869,8 @@ function bindSettingsListsAndGroups(c) {
       document.querySelectorAll('#tier-scale .tier-seg').forEach((el) => {
         el.classList.toggle('on', Number(el.dataset.seg) === seg);
       });
-      // 滑条填充色（用 CSS 变量告诉样式当前百分比）
-      tierSlider.style.setProperty('--pos', pos + '%');
+      // 滑条填充色（用 CSS 变量告诉样式当前百分比；终点对齐球心，见 sliderFillPos 注释）
+      tierSlider.style.setProperty('--pos', sliderFillPos(pos / 100));
     };
     tierSlider.addEventListener('input', sync);
     sync();   // 初始同步一次
@@ -883,7 +894,7 @@ function bindSettingsListsAndGroups(c) {
       const v = Number.isFinite(raw) ? Math.min(max, Math.max(min, raw)) : min;
       const text = String(Math.round(v));
       if (now && now.textContent !== text) now.textContent = text;   // 只在整数值变化时写 DOM
-      slider.style.setProperty('--pos', `${((v - min) / Math.max(1, max - min)) * 100}%`);
+      slider.style.setProperty('--pos', sliderFillPos((v - min) / Math.max(1, max - min)));
     };
     slider.addEventListener('input', syncStickerSlider);
     slider.addEventListener('keydown', (event) => {
@@ -1036,7 +1047,7 @@ function bindSettingsListsAndGroups(c) {
       const seg = segOfProbability(pos);
       document.querySelectorAll('#tier-scale-g .tier-seg')
         .forEach((el) => el.classList.toggle('on', Number(el.dataset.seg) === seg));
-      gSlider.style.setProperty('--pos', pos + '%');
+      gSlider.style.setProperty('--pos', sliderFillPos(pos / 100));
     };
     const loadGroup = () => {
       const gid = groupSel.value;
