@@ -1,6 +1,7 @@
 // 群日报：每天固定时刻，把"昨天群里聊了啥"汇总成一条（模型生成、口语化）发到配置的群。
 // 白名单制（groupDigest.chats 列表），默认关；发送走 sender 的正常通道（限频/留档与普通发言一致）。
 import { getConfig } from '../core/config.js';
+import { canRun } from '../core/access.js';
 import { chatCompletion } from '../llm/llm.js';
 import { nextAtFromHHMM } from '../core/reminders.js';
 import { sanitizeUserText } from '../core/util.js';
@@ -96,6 +97,10 @@ export class GroupDigestManager {
 
   async #digestOne(chatKey, cfg) {
     if (!String(chatKey).startsWith('group:')) return { ok: false, error: '只支持群聊' };
+    // 门禁放在**读消息与调模型之前**：原来只在最后 sendTextBatch 时才被 access 挡住，
+    // 于是观察/暂停模式、已移出白名单（allow）或被手改 deny 的群，每天照样读 400 条消息 +
+    // 调一次 chatCompletion 才被拒 —— 白花钱还把群消息送出了网（2026-10-03 全量审查）。
+    if (!canRun(chatKey)) return { ok: false, error: '观察/暂停模式，或该会话不在白名单内' };
     const since = this.now() - WINDOW_MS;
     const rows = this.store.recent(chatKey, { limit: 400, includeSelf: true, readOnly: true })
       .filter((m) => Number(m?.ts) >= since);

@@ -251,7 +251,10 @@ export function ttsServiceOf(cfg) {
 export function ttsKeyFor(cfg, serviceId = '') {
   const current = ttsServiceOf(cfg)?.id || '';
   const id = serviceId || current;
-  const fromMap = String(cfg?.keys?.[id] || '').trim();
+  // 用**自有属性**读映射：serviceId 来自端点查询串（外部可控），`keys['constructor']` 会命中原型链，
+  // 把函数源码当成"这家存过的 Key"（与 config-legacy 的 imageGenKeyFor 同款，2026-10-03 全量审查）
+  const map = cfg?.keys;
+  const fromMap = map && typeof map === 'object' && Object.hasOwn(map, id) ? String(map[id] || '').trim() : '';
   if (fromMap) return fromMap;
   // 旧配置只有一个 apiKey（没有 keys 映射）：只在问"当前这家"时兜底 —— 否则会把硅基流动的
   // Key 拿去打火山的接口（2026-09-28：豆包那条路会因此报 45000010，报错还指向错误的 Key）

@@ -747,6 +747,29 @@ describe('Orchestrator', () => {
     assert.equal([...system.matchAll(/stickerId：/g)].length, 10, '条数按配置取满');
   });
 
+  it('语音回复/提醒关掉时：工具表与提示词同步撤（send_voice 必失败、remind 不会被派发）', async (t) => {
+    const { cfg, runner, append } = fixture(t);
+    cfg.tts = { ...(cfg.tts || {}), enabled: false };       // 语音回复关（出厂默认就是关）
+    cfg.reminders = { ...(cfg.reminders || {}), enabled: false };
+    setRuntimeConfig(cfg);
+    let system = '';
+    let tools = [];
+    globalThis.fetch = async (_url, options) => {
+      const body = JSON.parse(options.body);
+      system = body.messages[0].content;
+      tools = body.tools || [];
+      return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
+    };
+    append(1, '在吗', '42');
+    await runner.wake('group:1');
+    const names = tools.map((tool) => tool.function?.name);
+    assert.equal(names.includes('send_voice'), false, '语音回复关掉 → send_voice 不该在工具表里（调了必然失败）');
+    assert.equal(names.includes('remind'), false, '提醒关掉 → remind 不该在工具表里（不会被派发）');
+    // 提示词侧不许再教这两个（只看平台自己写的工具引导段，角色卡正文是管理员内容）
+    const rules = system.slice(system.indexOf('【群游戏规则】'));
+    assert.equal(rules.includes('send_voice'), false, '提示词不该再教 send_voice');
+  });
+
   it('图片输入关掉时，表情清单不能再教模型"先看一眼"（提示词不能自相矛盾）', async (t) => {
     const { cfg, runner, append } = fixture(t);
     cfg.sticker.enabled = true;
@@ -1620,6 +1643,55 @@ it('换卡后 24 小时内，历史与交接口径会说明"旧口癖不作数"'
     // #6：wake 开 trace —— 运行期上下文带 id，lastTraceId 记录的就是这一次
     assert.match(traceAtSend, /^[0-9a-f]{8}$/, 'wake 运行期必须处于 trace 上下文');
     assert.equal(lastTraceId(), traceAtSend, 'lastTraceId 必须是最近一次运行的 id');
+  });
+
+  it('每日预算 block：主动唤醒（冷场开话题/自安排唤醒）也不跑模型、不发文案', async (t) => {
+    const sentTo = [];
+    const { runner, cfg } = fixture(t, {
+      sender: {
+        sendTextBatch: async (chatKey, messages) => {
+          sentTo.push({ chatKey, messages });
+          return { sent: messages.map((text, i) => ({ text, at: Date.now(), messageId: i + 1 })), failed: [] };
+        }
+      }
+    });
+    cfg.api.budget = { enabled: true, dailyYuan: 1, onExceed: 'block', notify: false };
+    setRuntimeConfig(cfg);
+    fs.writeFileSync(path.join(root, 'usage-today.json'), JSON.stringify({ dayKey: todayKey(), estimatedYuan: 2 }));
+    let modelCalls = 0;
+    globalThis.fetch = async () => {
+      modelCalls += 1;
+      return Response.json({ choices: [{ message: { content: 'x' } }] });
+    };
+    await runner.wake('group:1', { proactive: true });
+    assert.equal(modelCalls, 0, 'block 策略下主动唤醒同样不许调模型（"今天别再花钱"就该真的停）');
+    assert.equal(sentTo.filter((s) => s.messages.join('').includes('今天的额度用完了')).length, 0,
+      'proactive 不该往群里发"额度用完"（那是新消息场景的回话）');
+  });
+
+  it('"今天的额度用完了"同一天同一会话只发一次（否则兜底回收每 5~25s 重排一次 → 刷屏）', async (t) => {
+    const sentTo = [];
+    const { runner, store, cfg, append } = fixture(t, {
+      sender: {
+        sendTextBatch: async (chatKey, messages) => {
+          sentTo.push({ chatKey, messages });
+          return { sent: messages.map((text, i) => ({ text, at: Date.now(), messageId: i + 1 })), failed: [] };
+        }
+      }
+    });
+    cfg.api.budget = { enabled: true, dailyYuan: 1, onExceed: 'block', notify: false };
+    setRuntimeConfig(cfg);
+    fs.writeFileSync(path.join(root, 'usage-today.json'), JSON.stringify({ dayKey: todayKey(), estimatedYuan: 2 }));
+    globalThis.fetch = async () => Response.json({ choices: [{ message: { content: 'x' } }] });
+    append(1);
+    await runner.wake('group:1');
+    const first = sentTo.filter((s) => s.messages.join('').includes('今天的额度用完了')).length;
+    assert.equal(first, 1, '第一轮应发一次');
+    // 兜底回收会因"未读未被消费"重排（这正是刷屏的成因）→ 再来一轮仍只应有一条
+    await runner.wake('group:1');
+    const total = sentTo.filter((s) => s.messages.join('').includes('今天的额度用完了')).length;
+    assert.equal(total, 1, '同一天同一会话不该重复说额度用完');
+    assert.equal(store.findByMid('group:1', 1).read, false, '消息仍保留未读');
   });
 
   it('每日预算 degrade：群里非 @ 跳过（保留未读）；有 @ 的同批照常运行（改进方案 #8）', async (t) => {

@@ -621,18 +621,34 @@ export class StickerManager {
     };
   }
 
-  /** 收藏一条消息里的图片（本地新增条目，不入 QQ 收藏）。 */
-  async collect(messageId, { url, note = '', srcKey = '', signal, chatKey = '' } = {}) {
-    note = String(note ?? '').slice(0, 300);
-    if (!getConfig().sticker?.collectEnabled) throw new Error('收藏表情功能未开启');
-    // 限频（#9 双闸：每会话 + 全局；只查，落库成功后才扣）
+  /**
+   * 收藏一条消息里的图片（本地新增条目，不入 QQ 收藏）。
+   * 限频（#9 双闸：每会话 + 全局）用**事前原子消费**，失败/写库失败再 refund 退回 ——
+   * 原来是 peek → 下载/判定/落库 → tryConsume（还忽略返回值）：两个并发收藏会双双通过 peek、
+   * 都落库并超上限（quota.js 文件头把这个形态列为并发下封不住的反例；生图 2026-10-01 已修）。
+   * 2026-10-03 全量审查。
+   */
+  async collect(messageId, opts = {}) {
+    const chatKey = String(opts?.chatKey || '');
     const now = Date.now();
-    const gate = this.collectPeek(now, chatKey);
+    this.#configureCollectQuota();
+    const gate = this.collectQuota.tryConsume(chatKey, now);
     if (!gate.ok) {
       throw new Error(gate.scope === 'chat'
         ? '本会话收藏太频繁了（每小时有上限），过一会儿再收'
         : '收藏太频繁了（全局每小时有上限），过一会儿再收');
     }
+    try {
+      return await this.#collect(messageId, opts);
+    } catch (error) {
+      this.collectQuota.refund(chatKey, now);   // 没成功就退回去（不能白扣用户的额度）
+      throw error;
+    }
+  }
+
+  async #collect(messageId, { url, note = '', srcKey = '', signal } = {}) {
+    note = String(note ?? '').slice(0, 300);
+    if (!getConfig().sticker?.collectEnabled) throw new Error('收藏表情功能未开启');
     url = String(url || '');
     if (!url) throw new Error('该消息没有可收藏的图片地址');
     const id = `collected_${messageId}`;
@@ -678,7 +694,6 @@ export class StickerManager {
       try { fs.rmSync(assetFile, { force: true }); } catch { /* 清不掉无害 */ }
       throw error;
     }
-    this.collectQuota.tryConsume(chatKey, now);   // 落库成功才扣额度
     return entry;
   }
 }

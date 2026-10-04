@@ -1098,8 +1098,9 @@ function cmdScan(args) {
     : ignoreRaw === null ? new Set(KNOWN_IGNORE)
       : new Set(ignoreRaw.split(',').map((item) => item.trim()).filter(Boolean));
   if (!exists(dir)) {
+    // --strict 是 CI 门禁：路径写错时必须让 CI 变红，否则扫了个空气还判绿（2026-10-03 全量审查）
     ngLine(`目录不存在: ${dir}`);
-    return 0;
+    return hasFlag(args, '--strict') ? 1 : 0;
   }
   const report = scanDirectory(dir, ignore);
   for (const line of report.lines) say(line);
@@ -1993,10 +1994,12 @@ function cmdInstallTimers(args) {
     return 0;
   }
   if (!reload.ok) ngLine(`daemon-reload 失败: ${text(reload)}`);
+  const reloadOk = reload.ok;
   const enable = systemctlUser(['enable', '--now', 'qq-agent-backup.timer', 'process-guard.timer', 'qq-agent-health.timer', 'qq-agent-audit-prune.timer'], { timeout: 60000 });
   if (enable.ok) okLine('定时器已启用：qq-agent-backup.timer（每周日 04:10）、process-guard.timer（每 10 分钟）、qq-agent-health.timer（每 5 分钟巡检）、qq-agent-audit-prune.timer（每月 1 日 04:20 清理审计日志）');
   else ngLine(`启用定时器失败: ${text(enable)}`);
-  return 0;
+  // 挂在部署链上时退出 0 等于告诉 systemd"成功"，而四个定时器其实一个都没起来（2026-10-03 全量审查）
+  return reloadOk && enable.ok ? 0 : 1;
 }
 
 // ───────────────────────────────── audit-prune ─────────────────────────────────
@@ -2206,6 +2209,7 @@ function printMainHelp() {
   say('  deploy          非交互部署（需 --confirm）');
   say('  console         SSH 隧道 + 打开控制台（Windows/macOS/Linux）');
   say('  install-timers  生成并安装 systemd user 定时器（需 --confirm）');
+  say('  health-check    健康巡检（备份/看门狗/健康/审计清理等单元与数据面）；退出码 0=健康');
   say('  help            显示本帮助');
   say();
   say('环境变量与常用示例见 docs/OPS.md。');

@@ -25,11 +25,35 @@ const fmtYuan = (n) => {
   return `¥${v.toFixed(2)}`;
 };
 
+// 统一按 **Asia/Shanghai** 显示：服务端业务时间（说说排期、日报、提醒）一律按上海时间解释，
+// 另外三处显示（impressionMetaLabel / moments 定时提醒 / status 时间控制）也都钉死了时区，
+// 只有覆盖面最广的这个用浏览器本地时区 —— 管理员从非 UTC+8 的机器打开控制台时，
+// 同一屏会出现两套时间线（2026-10-03 全量审查）。格式化器缓存一次，别每次调用重建。
+const TIME_FMT = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', hour12: false
+});
+
 function fmtTime(ts) {
-  if (!ts) return '-';
-  const d = new Date(ts);
-  const p = (n) => String(n).padStart(2, '0');
-  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  // 坏值（负数/纳秒级/非数字）会让 toLocaleString 抛 RangeError，整页挂掉 → 兜底成 '-'
+  // （与 impressionMetaLabel 的 ?? 兜底同一口径，那个坑本仓已经踩过一次）
+  const n = Number(ts);
+  if (!Number.isFinite(n) || n <= 0 || n > 8.64e15) return '-';
+  const p = (x) => String(x).padStart(2, '0');
+  const parts = TIME_FMT.formatToParts(new Date(n));
+  const get = (type) => Number(parts.find((x) => x.type === type)?.value ?? 0);
+  return `${p(get('month'))}-${p(get('day'))} ${p(get('hour'))}:${p(get('minute'))}`;
+}
+
+/**
+ * 图片生成每小时上限：与运行期 imageGenMaxPerHour 同一口径（非正数/坏值按默认 6，而不是夹到 1）。
+ * 原来前端是 clampInt 式的 Math.max(1, …)：手填 -5 会存成"每小时 1 张"——比默认更严格，
+ * 与 ASR 那次修过的坑同型（2026-10-03 全量审查）。
+ */
+function normalizeImageGenMax(value, fallback = 6) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(100, Math.max(1, Math.round(n)));
 }
 
 /**
@@ -615,7 +639,7 @@ export {
   asrHostOf, asrServiceOf, asrServiceOptions, asrSlotOf, chatNameOf, clampInt, effectivePriceFor, fmtClock, fmtRate,
   fmtRemainingMs, fmtTime, fmtTok, fmtTokens, fmtWaitRemain, fmtYuan, formatChatTitle, formatElapsed,
   formatReleaseNotes, formatRevision, groupSliderPosForUi, hasOwnPrice, hostOfUrl, initialServiceNote,
-  legacyServiceDeployed, matchPriceTable, memThreshold, mulOf, normalizeAsrMax, normalizeStickerMax,
+  legacyServiceDeployed, matchPriceTable, memThreshold, mulOf, normalizeAsrMax, normalizeImageGenMax, normalizeStickerMax,
   normalizeStickerCollectMax,
   onebotIssueText, onebotStatusLineHtml, paramActiveForProbability, parseList, priceTxt, segOfProbability,
   serviceTileState, serviceUrl, sliderDesc, sliderToTierUI, sliderToTierUI_tierToSlider,

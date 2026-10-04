@@ -34,7 +34,14 @@ const htmlFilesUpToApp = () => {
 // 用 app.js 单文件去断言会假红（"这里没有"其实是"搬到别处了"）。按 index.html 顺序全量拼接。
 const code = htmlScriptFiles().map((f) => fs.readFileSync(path.join(ROOT, 'ui', f), 'utf8')).join('\n');
 
-// ── 极简 DOM 桩 ──
+// 把一个元素挂到某个父容器下（焦点守卫用例需要 contains 成立）
+function makeElIn(parent, id) {
+  const el = makeEl(id);
+  parent.children.push(el);
+  return el;
+}
+
+// ── 极简 DOM 桩 ──// ── 极简 DOM 桩 ──
 function makeEl(id = '', cls = '') {
   const el = {
     id,
@@ -70,7 +77,7 @@ function makeEl(id = '', cls = '') {
     scrollIntoView() {},
     getBoundingClientRect: () => ({ top: 0, left: 0, width: 100, height: 20 }),
     insertAdjacentHTML() {},
-    contains: () => false,
+    contains(node) { return this === node || this.children.includes(node); },
     scrollTop: 0, scrollHeight: 100, clientHeight: 50
   };
   el.classList = {
@@ -1282,7 +1289,75 @@ try {
       + (slotOk ? '' : ` -> ${slotNotes.join('；')}`));
   }
 
-  // 语音合成 Key：并入统一开关后的三件事（2026-10-01 审查的两条 low）
+  // 切换「语音转文字」服务预设只可就地更新，**不许整块重画**（2026-10-03 全量审查）：
+  // 整块重画会把同分区里用户还没保存的输入（TTS 音色、图片生成模型…）统统退回后端上次保存的值
+  // —— 与 2026-10-02「屏蔽名单搜索框只能输一个字」同族。
+  {
+    ctx.bindSettingsEvents(cfg);
+    const ttsVoice = document.querySelector('#cfg-tts-voice');
+    const imgModel = document.querySelector('#cfg-img-model');
+    ttsVoice.value = 'unsaved-voice';
+    imgModel.value = 'unsaved-image-model';
+    const svc = document.querySelector('#cfg-asr-service');
+    svc.value = 'groq';
+    for (const h of [...(svc?._listeners?.change || [])]) h();
+    const kept = ttsVoice.value === 'unsaved-voice'
+      && imgModel.value === 'unsaved-image-model'
+      && document.querySelector('#cfg-asr-key')?.value === '';
+    if (kept) { pass++; console.log('  OK    切换语音识别服务预设不会清空同分区其它未保存的输入'); }
+    else {
+      fail++;
+      console.log(`  FAIL  切换识别服务预设吞掉了未保存输入（voice=${ttsVoice.value} imgModel=${imgModel.value}）`);
+    }
+  }
+
+  // 生图每小时上限：保存口径必须与运行期 imageGenMaxPerHour 一致（非正数/坏值按默认 6）。
+  // 以前前端是 clampInt 式的 Math.max(1, …)：手填 -5 会存成"每小时 1 张"，比默认更严格。
+  {
+    const normalize = ctx.normalizeImageGenMax || sandbox.normalizeImageGenMax;
+    const cases = [[-5, 6], [0, 6], ['x', 6], [999, 100], [3.7, 4], [8, 8]];
+    const bad = typeof normalize !== 'function'
+      ? 'normalizeImageGenMax 没导出'
+      : cases.filter(([input, want]) => normalize(input) !== want).map(([i, w]) => `${i}→${normalize(i)}（期望 ${w}）`).join('，');
+    if (!bad) { pass++; console.log('  OK    生图每小时上限的收口与运行期同口径（非正数按 6，不是夹到 1）'); }
+    else { fail++; console.log(`  FAIL  生图每小时上限的收口与运行期不一致：${bad}`); }
+  }
+
+  // 后台重拉时若焦点落在区域内某个输入框里，这一轮重写要让路（setHtmlIfChanged 的焦点守卫）
+  {
+    const setter = ctx.setHtmlIfChanged || sandbox.setHtmlIfChanged;
+    const box = document.querySelector('#edit-guard-box');
+    const field = makeElIn(box, 'gi-1');
+    field.tagName = 'INPUT';
+    field.value = 'typed-by-user';
+    box.children.push(field);
+    setter(box, '<b>v1</b>');
+    const before = String(box.innerHTML);
+    const prevActive = document.activeElement;
+    document.activeElement = field;
+    const wrote = setter(box, '<b>v2</b>');
+    document.activeElement = prevActive;
+    const blocked = wrote === false && String(box.innerHTML) === before && field.value === 'typed-by-user';
+    if (typeof setter !== 'function') { fail++; console.log('  FAIL  setHtmlIfChanged 没导出'); }
+    else if (blocked) { pass++; console.log('  OK    后台重拉不会覆盖正在输入的那一块（焦点在输入框里时让路）'); }
+    else { fail++; console.log(`  FAIL  焦点守卫没起作用（wrote=${wrote}）`); }
+  }
+
+  // 源码钉子：切语音服务预设的回调里不许出现 renderSettings() —— 垫片表达不了"输入框被换掉"
+  // （上面那条行为断言在这个垫片下抓不住这一类回归，静态钉子才抓得住）
+  {
+    const src = fs.readFileSync(new URL('../ui/pages/settings-bind.js', import.meta.url), 'utf8');
+    const start = src.indexOf("serviceSel.addEventListener('change'");
+    const end = src.indexOf('syncAsrFields();', start);
+    const block = src.slice(start, end);
+    // 先剥掉 // 注释：这段代码里正好有一句"这里**不能** renderSettings()"，不剥会自己误判
+    const code = block.replace(/\/\/[^\n]*/g, '');
+    const reRender = /renderSettings\(\)/.test(code);
+    if (reRender) { fail++; console.log('  FAIL  切换语音识别服务预设又调了 renderSettings()（会清空同分区未保存输入）'); }
+    else { pass++; console.log('  OK    切换语音识别服务预设的回调里没有整块重画（源码钉子）'); }
+  }
+
+  // 语音合成 Key：并入统一开关后的三件事（2026-10-01 审查的两条 low）  // 语音合成 Key：并入统一开关后的三件事（2026-10-01 审查的两条 low）
   //  · 「显示」向 /api/tts/key 要明文时要带上当前选中的那家（它按服务分家存 Key）；
   //  · 用户手输了一半就点「显示」：**不许**用回读值盖掉他没保存的输入，也不该白发请求；
   //  · 「隐藏」不许把用户刚输入（或刚粘上）的新 Key 盖成 ****** —— 服务端把 ****** 当

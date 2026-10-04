@@ -943,6 +943,20 @@ function migrateConfig(parsed) {
     if (out[sec] !== undefined && !isPlainObject(out[sec])) out[sec] = {};
     if (isPlainObject(out[sec]) && out[sec].keys !== undefined && !isPlainObject(out[sec].keys)) out[sec].keys = {};
   }
+  // webSearch 同理：sanitize 生成的 hasApiKey 属于派生位，回传展开后会跟着落进 config.json
+  // （界面每次展开 { ...c.webSearch } 都会带上；2026-10-03 全量审查）
+  if (isPlainObject(out.webSearch)) {
+    for (const [key, value] of Object.entries(out.webSearch)) {
+      if (/^has[A-Z]/.test(key)) delete out.webSearch[key];
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          if (isPlainObject(item)) for (const sub of Object.keys(item)) if (/^has[A-Z]/.test(sub)) delete item[sub];
+        }
+      } else if (isPlainObject(value)) {
+        for (const sub of Object.keys(value)) if (/^has[A-Z]/.test(sub)) delete value[sub];
+      }
+    }
+  }
   // ── 语音转写（asr）──
   if (isPlainObject(out.asr)) {
     // 剔掉运行时结论（见 ASR_DERIVED_KEYS 的说明），连 sanitizeConfig 生成的 hasXxx 一起。
@@ -1257,6 +1271,11 @@ export function updateConfig(patch) {
   // 直接把这个键从 patch 里摘掉，免得它在合并/迁移里被当成"恢复默认人设"，甚至抛错。
   const safePatch = isPlainObject(patch) ? { ...patch } : {};
   if ('persona' in safePatch && !isPlainObject(safePatch.persona)) delete safePatch.persona;
+  // 三个带凭据的段同理：它们被 migrateConfig 归一化成 {}，等于**整段清空**（连 keys 映射与
+  // 归属钉一起丢），而不是"这次没改"。坏输入最该被忽略，不该当成用户要求清空（2026-10-03 全量审查）。
+  for (const sec of ['asr', 'tts', 'imageGen']) {
+    if (sec in safePatch && !isPlainObject(safePatch[sec])) delete safePatch[sec];
+  }
   const next = migrateConfig(deepMerge(getConfig(), safePatch));
   const oldTimeControl = JSON.stringify(getConfig().timeControl);
   // 人设绑定与正文的优先级，只在配置保存这一层定：

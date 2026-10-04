@@ -490,10 +490,26 @@ function bindSettingsSaveAndSections() {
         secretKeyUsable: serviceChanged ? slotKinds.includes('secretKey') : draft.asr?.secretKeyUsable
       };
       state.settingsSection = 'asr';
-      renderSettings();
+      // ⚠️ 这里**不能** renderSettings()（2026-10-03 全量审查）：那一整块重画会把同分区里其它
+      // 还没保存的输入（TTS 的音色/语速、图片生成的模型/尺寸…）统统退回后端上次保存的值 ——
+      // 与 2026-10-02「屏蔽名单搜索框只能输一个字」同族（那次是输入回调重画了含输入框自己的
+      // 整栏，这次是切下拉把整块重画了）。同页的 TTS / 图片生成切换都是**就地更新**，这里对齐。
+      const wants = (kind) => !item || (item.creds || []).includes(kind);
+      const setFieldVisibility = (id, kind) => {
+        const el = $(`#${id}`);
+        if (el) el.style.display = wants(kind) ? '' : 'none';
+      };
+      setFieldVisibility('asr-appid-field', 'appId');
+      setFieldVisibility('asr-key-field', 'key');
+      setFieldVisibility('asr-secretid-field', 'secretId');
+      setFieldVisibility('asr-secretkey-field', 'secretKey');
+      const serviceNote = $('#asr-service-note');
+      if (serviceNote) serviceNote.textContent = item?.note || '';
+      const baseUrlRow = $('#asr-openai-fields');
+      if (baseUrlRow) baseUrlRow.style.display = item && item.needsBaseUrl === false ? 'none' : '';
+      syncAsrFields();
     });
     syncAsrFields();
-
     bindTtsControls();
     bindImageGenPreset();
 

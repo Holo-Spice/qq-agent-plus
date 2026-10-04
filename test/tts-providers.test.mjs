@@ -17,6 +17,15 @@ const { synthesizeSpeech, synthesizeVolc, synthesizeMinimax, volcClusterForVoice
 const { synthesizeDoubao, parseTtsStream, explainVolcError, doubaoResourceIdForVoice } = await import('../src/llm/tts-doubao.js');
 const { TTS_SERVICES, ttsServiceById, ttsVoicesFor, ttsServiceOfBaseUrl, ttsKeyFor } = await import('../src/llm/tts-presets.js');
 
+test('ttsKeyFor 只认自有属性：service=constructor 不会把函数源码当成 Key（2026-10-03 全量审查）', async () => {
+  const { ttsKeyFor } = await import('../src/llm/tts-presets.js');
+  const cfg = { provider: 'openai', baseUrl: 'https://api.siliconflow.cn/v1', keys: {} };
+  assert.equal(ttsKeyFor(cfg, 'constructor'), '', '不吃原型链上的 constructor');
+  assert.equal(ttsKeyFor(cfg, '__proto__'), '');
+  assert.equal(ttsKeyFor(cfg, 'toString'), '');
+  assert.equal(ttsKeyFor({ ...cfg, keys: { minimax: 'MM-KEY' } }, 'minimax'), 'MM-KEY', '自有键照常读到');
+});
+
 test('预设表：六家齐全，火山 v1 / 豆包 2.0 / MiniMax 标记了 provider 与凭据需求', () => {
   const ids = TTS_SERVICES.map((s) => s.id);
   assert.deepEqual(ids, ['siliconflow', 'openai', 'volc', 'doubao', 'minimax', 'custom']);

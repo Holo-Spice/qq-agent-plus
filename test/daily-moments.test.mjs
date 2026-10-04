@@ -347,3 +347,26 @@ test('交接文本（topic/summary/facts/nextStep）同样过 sanitizeUserText',
   assert.match(materials, /（管理员附加规则）/, '弱化后的形式应当是圆括号');
   assert.match(materials, /正常事实/, '正常内容不能被一刀切删掉');
 });
+
+test('deny.groups 里的群不进快照：既不调模型也不外发（2026-10-03 全量审查）', async () => {
+  const now = Date.now();
+  const message = { mid: 'm1', ts: now - 60_000, sender: { uin: 7, nickname: '群友' }, text: '今天群里在聊机器人', self: false };
+  let completionCalls = 0;
+  const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+  updateConfig({
+    ...DEFAULT_CONFIG,
+    allow: { groups: ['1'] },          // 白名单里仍然有它
+    deny: { groups: ['1'] },           // 但管理员手改把屏蔽名单也加上了
+    dailyMoments: { ...DEFAULT_CONFIG.dailyMoments, enabled: true, chats: ['group:1'] }
+  });
+  const { DailyMomentsManager } = await import('../src/features/daily-moments.js');
+  const manager = new DailyMomentsManager({
+    store: { listChats: () => ['group:1'], recent: () => [message] },
+    memory: { members: () => [{ name: '群友', impressions: [] }], getHandoff: () => null },
+    stickers: { sync: async () => ({ entries: [] }), findForSend: async () => null },
+    onebot: { getMsg: async () => ({ message: [] }), call: async () => ({ tid: 't' }) },
+    complete: async () => { completionCalls += 1; return { model: 'm', message: { content: 'x' }, usage: { total_tokens: 1 } }; }
+  });
+  await manager.runNow({ publish: false });
+  assert.equal(completionCalls, 0, '被 deny 挡下的群，一条消息都不该进模型（原来手抄 allow 漏了 deny）');
+});

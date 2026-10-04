@@ -61,8 +61,8 @@ In particular:
   要延后的就放进 `init()`（它挂在 `DOMContentLoaded` 之后）。
 - **改了 `ui/` 就跑一遍 `docs/UI-SMOKE.md`**：自动化只覆盖"渲染不抛 + 钩子接上了"，
   布局与事件只有人能看。
-- **安全网**：`node test/render-test.mjs`（178）/ `node test/scroll-test.mjs`（19）/
-  `node test/usage-e2e.mjs`（31）/
+- **安全网**：`node test/render-test.mjs`/ `node test/scroll-test.mjs`（19）/
+  `node test/usage-e2e.mjs`/
   `node --test test/ui-smoke.test.mjs test/ui-module-graph.test.mjs test/ui-real-modules.test.mjs test/ui-registry.test.mjs test/ui-modules.test.mjs`。
   前四个是"剥掉 import/export 按 classic 跑"的 vm 沙箱，`ui-real-modules` 才是真模块语义
   （求值顺序、TDZ 只有它看得见），别把两层的用途混了。

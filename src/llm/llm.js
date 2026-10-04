@@ -236,6 +236,7 @@ async function runCompletionWithRetries(args, retries) {
       args.signal?.throwIfAborted();
       const response = await chatCompletion(args);
       if (!moderationRetried && isModerationRefusal(response)) {
+        if (attempt >= retries) return response;   // 最后一轮还被拦：把拦截结果如实返回（重试预算已耗尽）
         moderationRetried = true;
         args = { ...args, messages: trimForModerationRetry(args.messages) };
         log.warn('[llm] 服务商审核拦截整次请求，改用精简上下文重试一次');
@@ -270,6 +271,14 @@ function pickFallback(args) {
   try { fb = getConfig().api?.fallback; } catch { return null; }
   if (!fb || fb.enabled === false || !String(fb.model || '').trim()) return null;
   const api = effectiveApi();
+  const fbBase = String(fb.baseUrl || '').trim();
+  // 备用地址换了主机、却没单独给 Key 时**绝不沿用主渠道那把** —— 那等于把 A 家的密钥发给 B 家
+  // （这类事故本项目在 asr / 生图 / tts 上都修过，兜底模型是最后一个漏口）。
+  // 文档里 api.fallback.apiKey 本就是"另一个服务商的 key"；留空就当"没配兜底"，退回主渠道的错。
+  if (fbBase && hostOf(fbBase) !== hostOf(api.baseUrl) && !String(fb.apiKey || '').trim()) {
+    log.warn(`[llm] 兜底地址 ${hostOf(fbBase)} 与主渠道不同却没配 api.fallback.apiKey，本次不切兜底`);
+    return null;
+  }
   return {
     ...api,
     baseUrl: fb.baseUrl || api.baseUrl,
@@ -299,6 +308,9 @@ export async function chatCompletionWithRetry(args, retries = 2) {
   const fb = shouldFallback ? pickFallback(args) : null;
   if (!fb || args.signal?.aborted) {
     if (primaryError) throw primaryError;
+    // 兜底不可用时把**本次结果**如实返回；null 只能来自内部异常路径（throw null 已被上面堵死），
+    // 但调用方（orchestrator 等）会直接读 response.model / .message —— 这里显式兜一层，别让它崩在调用方。
+    if (!response) throw new Error('模型请求没有返回结果');
     return response;
   }
 

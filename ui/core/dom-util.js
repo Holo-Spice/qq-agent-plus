@@ -179,6 +179,13 @@ function patchKeyedList(container, entries, keyAttr = 'data-key') {
 function setHtmlIfChanged(el, html) {
   if (!el) return false;
   if (el.__renderedHtml === html) return false;
+  // 用户正在这块区域里打字时，这一轮重拉先别写：整块 innerHTML 会把输入框连同内容一起换掉
+  //（焦点丢失、正在敲的字符消失）—— 与 2026-10-02「屏蔽名单搜索框只能输一个字」同族。
+  // 只拦焦点在输入类控件上：按钮上的焦点不拦（保存后的「已保存」提示要能画出来），
+  // 焦点离开后下一轮自动补上，不会卡住页面。
+  const active = typeof document !== 'undefined' ? document.activeElement : null;
+  if (active && active !== el && el.contains?.(active)
+    && /^(input|textarea|select)$/i.test(active.tagName || '')) return false;
   el.__renderedHtml = html;
   el.innerHTML = html;
   return true;

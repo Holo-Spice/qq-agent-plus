@@ -2551,8 +2551,10 @@ export function createApp({
     return json(res, 200, { ok: true, results, okCount, total: Object.keys(results).length });
   });
   router.add('POST', '/api/vision/scan', async (req, res) => {
-    if (visionScan.running) return json(res, 409, { ok: false, error: '已有一次扫描正在进行' });
+    // 读体放在守卫**之前**：检查与置位之间有 await 时，两个并发请求会双双通过 409 守卫、
+    // 把要花钱的模型探测跑两遍并交错覆盖结果（2026-10-03 全量审查）。顺序与 /api/memory-files/consolidate 一致。
     const body = await readBody(req).catch(() => ({}));
+    if (visionScan.running) return json(res, 409, { ok: false, error: '已有一次扫描正在进行' });
     const onlyProviderIds = Array.isArray(body?.providerIds) ? body.providerIds.map(String) : null;
     visionScan.running = true;
     emit('vision-scan', { phase: 'start' });
@@ -3303,8 +3305,37 @@ export function createApp({
     );
     delete patch.runtime;
     if (patch.server) {
-      delete patch.server.token;
-      delete patch.server.hasToken;
+      // 整节替换（`__replace__`）时 delete 删的是节点层，替换体里的 token 会直接落盘 ——
+      // 服务重启后 authorize 读不到令牌（控制台全部登出），下次 start() 还会因"绑非回环却无令牌"
+      // 直接 throw 起不来（2026-10-03 全量审查）。归属与派生位一律取**有效体**处理。
+      const serverBody = sectionBody(patch.server);
+      delete serverBody.token;
+      delete serverBody.hasToken;
+    }
+    // webSearch：自定义搜索服务列表 providers 是**密钥数组**，而 deepMerge 对数组是整体替换 ——
+    // 界面回传的是脱敏副本（apiKey 被删、hasApiKey 被加），直接提交会把每家的 Key 冲掉
+    // （2026-10-03 全量审查）。这里按 id 与服务端对齐：客户端没带新值就沿用服务端那把。
+    if (patch?.webSearch && typeof patch.webSearch === 'object') {
+      const wsBody = sectionBody(patch.webSearch);
+      if (Array.isArray(wsBody.providers)) {
+        const stored = new Map((cfgNow.webSearch?.providers || [])
+          .map((item) => [String(item?.id || ''), item]));
+        wsBody.providers = wsBody.providers
+          .filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+          .map((item) => {
+            const next = { ...item };
+            delete next.hasApiKey;
+            const submitted = String(next.apiKey ?? '').trim();
+            if (!submitted || submitted === '******') {
+              const prev = stored.get(String(next.id || ''));
+              if (prev && String(prev.apiKey || '').trim()) next.apiKey = prev.apiKey;
+              else delete next.apiKey;
+            }
+            return next;
+          });
+      }
+      // 派生位（sanitize 生成的 hasApiKey）由 migrateConfig 统一剔 —— 它是所有写入路径的必经口，
+      // 路由层再剥一遍是冗余（同一语义写两处，反而会让人以为两边口径不同）。
     }
     let next;
     try {

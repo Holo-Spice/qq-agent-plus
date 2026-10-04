@@ -33,8 +33,14 @@ const asrQuota = createQuota({ windowMs: 3600_000 });
 /** 取一次转写配额；返回 { ok, scope:'chat'|'global'|'', retryAfterMs }。导出仅供测试。 */
 export function consumeAsrQuota(now = Date.now(), cfg = getConfig(), chatKey = '') {
   asrQuota.configure({ globalMax: asrMaxPerHour(cfg), perChatMax: asrMaxPerHourPerChat(cfg) });
-  return asrQuota.tryConsume(chatKey, now);
+  return { ...asrQuota.tryConsume(chatKey, now), at: now };   // 带出消费时刻：失败可精确 refund
 }
+
+/** 还没向服务商发出请求就失败（下载/转码/本地超长）：把这次额度退回去，别让用户白扣。 */
+function refundAsrQuota(chatKey, at) {
+  if (Number.isFinite(at)) asrQuota.refund(chatKey, at);
+}
+
 /** 测试用：重置窗口。 */
 export function resetAsrQuota() { asrQuota.reset(); }
 
@@ -434,12 +440,14 @@ export async function transcribeMessageAudio(ctx, entry) {
     try {
       ({ buffer } = await safeFetchBinary(target.url, AUDIO_MAX_BYTES, ctx.signal));
     } catch (e) {
+      refundAsrQuota(ctx.chatKey, quota.at);
       return { ok: false, error: `音频下载失败：${String(e?.message ?? e)}` };
     }
     let pcm;
     try {
       pcm = await audioBufferToPcm(buffer, { name: target.name, signal: ctx.signal });
     } catch (e) {
+      refundAsrQuota(ctx.chatKey, quota.at);
       return { ok: false, error: String(e?.message ?? e) };
     }
     const cfg = getConfig();
@@ -450,6 +458,7 @@ export async function transcribeMessageAudio(ctx, entry) {
     const pacedLimit = pacedAudioLimitSeconds(cfg, asrProvider(cfg));
     if (pacedLimit > 0 && pcm.length > pacedLimit * 32000) {
       const seconds = Math.round(pcm.length / 32000);
+      refundAsrQuota(ctx.chatKey, quota.at);
       return { ok: false, error: `音频太长（${seconds} 秒）：当前这家的转写要按音频实际时长逐帧推流，`
         + `一次运行时限里大约只能转 ${pacedLimit} 秒，再长会中途超时。`
         + '可以换「火山 / 硅基流动」这类一次上传的服务，或把音频截短后再发' };

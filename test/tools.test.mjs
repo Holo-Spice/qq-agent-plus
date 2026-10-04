@@ -396,3 +396,19 @@ test('过去状态：有历史但这次没带（档位 0 条）时，不说"你�
   assert.match(empty, /第一次参与这个会话/, '库里真没有历史时才说第一次');
   store.close();
 });
+
+test('memory_query 有条数上限：跨会话记忆不会被一次全灌进一个群的上下文（2026-10-03 全量审查）', async () => {
+  const many = Array.from({ length: 200 }, (_, i) => ({
+    userId: String(1000 + i), name: `人${i}`, impression: 'x'.repeat(120),
+    lastObservedAt: Date.now() - i * 1000, sourceChatKeys: ['private:1']
+  }));
+  const fx = context({
+    memory: { query: () => ({ memberImpression: many }) },
+    chatKey: 'group:1'
+  });
+  const all = JSON.parse((await tool('memory_query').execute(fx.ctx, {})).content);
+  assert.ok(all.memberImpression.length <= 40, `不传 userId 时应截断到 40 条以内，实际 ${all.memberImpression.length}`);
+  assert.match(String(all.note || ''), /前|共/, '要如实说明截断了');
+  const one = JSON.parse((await tool('memory_query').execute(fx.ctx, { userId: '1005' })).content);
+  assert.equal(one.memberImpression.length, 1, '指定 userId 时只给这个人的');
+});

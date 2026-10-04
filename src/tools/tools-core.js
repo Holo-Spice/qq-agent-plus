@@ -1090,12 +1090,27 @@ export function buildToolDefs() {
       async execute(ctx, args) {
         const mem = ctx.memory.query(ctx.chatKey);
         const userId = String(args.userId ?? '').trim();
+        // 条数上限：自动注入那条路径本来就有（每人 3 条 / 整块 6000 字符），工具口却整个丢了约束 ——
+        // 200 个人的记忆一次就能吃掉大半轮 maxRunTokens，下一轮预算检查直接把本轮掐断，
+        // 而且这是把跨会话私聊来源的记忆灌进群上下文的隐私面（2026-10-03 全量审查）。
+        // 口径与 memory-global.js 一致：按最近观察排序截断；指定 userId 时给更高的单点上限。
+        const MAX_ALL = 40;
+        const MAX_ONE = 20;
+        const byRecency = (a, b) => Number(b.lastObservedAt || 0) - Number(a.lastObservedAt || 0);
         const list = userId
-          ? mem.memberImpression.filter((e) => String(e.userId) === userId)
-          : mem.memberImpression;
+          ? mem.memberImpression.filter((e) => String(e.userId) === userId).sort(byRecency).slice(0, MAX_ONE)
+          : [...mem.memberImpression].sort(byRecency).slice(0, MAX_ALL);
         // 印象是跨群共享的，但"来自哪个会话"不能交给模型：sourceChatKeys 里含 private:<QQ>，
         // 等于告诉模型"对方和机器人私聊过"。控制台的人物记忆页照旧能看来源。
-        return ok({ memberImpression: list.map(stripMemorySources) });
+        const total = userId
+          ? mem.memberImpression.filter((e) => String(e.userId) === userId).length
+          : mem.memberImpression.length;
+        return ok({
+          memberImpression: list.map(stripMemorySources),
+          note: total > list.length
+            ? `共 ${total} 条，已按最近观察排序取前 ${list.length} 条；要看某人全部请传 userId`
+            : `共 ${total} 条`
+        });
       }
     },
     {

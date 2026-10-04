@@ -926,14 +926,13 @@ export class DailyMomentsManager {
     const start = dayStartFromKey(dayKey);
     const end = start + DAY_MS;
     const rootConfig = getConfig();
-    const allowed = new Set((rootConfig.allow?.groups || []).map(String));
+    // 白名单/黑名单口径只留 chatAllowed 一处：这里原来手抄了一份 allow 的判断、**漏了 deny.groups**
+    // （deny 没有界面控件，只能手改 config.json）** —— 被管理员屏蔽的群，当天消息照样进模型提示词。
+    // #assertPublishAllowed 用的也是 chatAllowed，但它在模型跑完之后才抛，等于只挡了发布没挡外发。
     const chatKeys = this.store.listChats()
-      .filter((chatKey) => {
-        const [kind, id] = String(chatKey).split(':');
-        if (kind !== 'group') return false;
-        if (!isTimeActive(chatKey)) return false;
-        return allowed.size ? allowed.has(id) : rootConfig.allowAllWhenEmpty === true;
-      });
+      .filter((chatKey) => String(chatKey).startsWith('group:'))
+      .filter((chatKey) => isTimeActive(chatKey))
+      .filter((chatKey) => chatAllowed(chatKey, rootConfig));
     const collected = [];
 
     for (const chatKey of chatKeys) {

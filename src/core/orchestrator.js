@@ -121,6 +121,7 @@ import { currentProviders } from './providers.js';
 import { buildSlangContextForChat } from '../console/asset-observer.js';
 import { parseInlineToolCalls } from '../tools/inline-tools.js';
 import { createLogger, newTraceId, withTrace } from './logger.js';
+import { ttsConfigured } from '../llm/tts-openai.js';
 
 const log = createLogger('orchestrator');
 
@@ -756,7 +757,7 @@ export class Orchestrator {
       // 概率档下"要不要回"是随机的：预判与实跑必须是同一次掷骰，
       // 否则会出现"会话页显示等待中、随后又干净消失"或者反过来的自相矛盾
       // （2026-09-22 审查发现）。这里掷一次存起来，wake 时取走。
-      const roll = Math.random() * 100;
+      const roll = this.random() * 100;
       this.pendingRolls.set(chatKey, { roll, at: Date.now() });
       const predicted = this.#predictTier(chatKey, { roll });
       if (predicted.shouldRespond === false) {
@@ -831,6 +832,25 @@ export class Orchestrator {
    * 只有真正运行过（消耗了 token）的会话才走 #finishWaiting 留痕。
    */
   #budgetNotifiedDay = '';
+
+  /** 「今天的额度用完了」这句按 chatKey × 天去重：没有它，兜底回收每 5~25s 重排一次就会在群里刷屏。 */
+  #budgetSaid = new Map();
+
+  /**
+   * 额度用完的固定文案：同一天同一会话只发一次（2026-10-03 全量审查：原来无条件发，
+   * 而该分支又不消费未读 → 兜底回收无限重排 → 同一天同一个群能刷出几十条）。
+   * 跨天自动重来；条目按天淘汰（只保留当天的，内存不涨）。
+   */
+  async #maybeSayBudgetExhausted(chatKey) {
+    const day = todayKey();
+    if (this.#budgetSaid.get(chatKey) === day) return;
+    this.#budgetSaid.set(chatKey, day);
+    if (this.#budgetSaid.size > 500) {
+      for (const [key, seenDay] of this.#budgetSaid) if (seenDay !== day) this.#budgetSaid.delete(key);
+    }
+    try { await this.sender.sendTextBatch(chatKey, ['今天的额度用完了，明天再聊'], {}); }
+    catch { /* 发送失败不阻断 */ }
+  }
 
   /**
    * 超限当天私聊管理员一次（改进方案 #8/J.3：去重键 = dayKey，内存态即可 —— 重启最多重发一条，
@@ -950,6 +970,24 @@ export class Orchestrator {
     const conversation = conversationConfigForChat(chatKey);
     let pendingEntries = [];
     let tierResult = null;
+    // ── 每日预算拦截（改进方案 #8/J.3）──
+    // block：本次运行不进行（active 模式下同一天同一会话只回一句固定文案）；degrade：只回应 @ ——
+    // 群聊里非 @ 触发直接跳过、消息保留未读（等被 @ 或明天）。两者都只影响**新**运行，
+    // 不打断进行中的会话；私聊、手动唤醒与主动唤醒不受 degrade 限制。
+    // ⚠️ 这一段必须在 `if (!proactive)` **之外**：原来整段被塞在里面，于是"停止"策略下
+    // 冷场开话题、模型自安排唤醒这些 proactive 唤醒照常整轮跑模型、照常花钱 ——
+    // 管理员设 block 的意思就是"今天别再花钱"（2026-10-03 全量审查）。
+    const budget = budgetStatus(getConfig(), this.sessions?.todayUsage?.(todayKey()) || {});
+    if (budget.enabled && budget.exceeded) {
+      if (budget.notify) this.#maybeNotifyBudgetExceeded(budget);
+      if (budget.onExceed === 'block' && !manual) {
+        const activeMode = String(getConfig().runtime?.mode || 'active') !== 'observe';
+        // 只在"有新消息"这一路回话：主动唤醒没有人在等，插一句只会变成刷屏
+        if (activeMode && !proactive) await this.#maybeSayBudgetExhausted(chatKey);
+        if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted', '本轮额度已用完');
+        return;
+      }
+    }
     if (!proactive) {
       // peekUnread 只看不取，limit 给足以免漏判（判定用的是这批的文本）
       pendingEntries = this.store.peekUnread(chatKey, 100) || [];
@@ -957,28 +995,13 @@ export class Orchestrator {
       const pendingRoll = this.pendingRolls.get(chatKey);
       this.pendingRolls.delete(chatKey);
       const roll = pendingRoll && Date.now() - pendingRoll.at < 120000 ? pendingRoll.roll : undefined;
-      // ── 每日预算拦截（改进方案 #8/J.3）──
-      // block：本次运行不进行（active 模式下回一句固定文案）；degrade：只回应 @ ——
-      // 群聊里非 @ 触发直接跳过、消息保留未读（等被 @ 或明天）。两者都只影响**新**运行，
-      // 不打断进行中的会话；私聊、手动唤醒与主动唤醒不受 degrade 限制。
-      const budget = budgetStatus(getConfig(), this.sessions?.todayUsage?.(todayKey()) || {});
-      if (budget.enabled && budget.exceeded && budget.notify) this.#maybeNotifyBudgetExceeded(budget);
-      if (budget.enabled && budget.exceeded) {
-        const activeMode = String(getConfig().runtime?.mode || 'active') !== 'observe';
-        if (budget.onExceed === 'block' && !manual) {
-          if (activeMode) {
-            try { await this.sender.sendTextBatch(chatKey, ['今天的额度用完了，明天再聊'], {}); }
-            catch { /* 发送失败不阻断 */ }
-          }
-          if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted', '本轮额度已用完');
-          return;
-        }
-        if (budget.onExceed === 'degrade' && !manual && !proactive && String(chatKey).startsWith('group:')) {
-          const mentioned = pendingEntries.some((entry) => entry?.mentionsSelf === true);
-          if (!mentioned) {
-            if (waitingSessionId) this.#discardWaiting(waitingSessionId);
-            return;   // 保留未读：被 @ 时（或跨日重置后）自然会再进这里
-          }
+      // degrade 只拦"新消息触发"的这一路（主动唤醒不在这个分支里，上面的 block 已经先判过了）
+      if (budget.enabled && budget.exceeded && budget.onExceed === 'degrade' && !manual
+        && String(chatKey).startsWith('group:')) {
+        const mentioned = pendingEntries.some((entry) => entry?.mentionsSelf === true);
+        if (!mentioned) {
+          if (waitingSessionId) this.#discardWaiting(waitingSessionId);
+          return;   // 保留未读：被 @ 时（或跨日重置后）自然会再进这里
         }
       }
 
@@ -1452,10 +1475,16 @@ export class Orchestrator {
       // 只能反复用记得的那一个（2026-10-02 用户反馈："不开那个按钮，它就一直发一个表情"）。
       // 与 schedule_wake / generate_image 是同一口径：开关关掉就连工具带提示词一起撤。
       if (!stickerEnabled && (d.name === 'send_sticker' || d.name === 'list_stickers'
-        || d.name === 'get_sticker_image' || d.name === 'collect_sticker')) return false;
+        || d.name === 'get_sticker_image' || d.name === 'collect_sticker'
+        || d.name === 'sticker_note')) return false;   // sticker_note 是第五个，别再漏（2026-10-03）
       // 收藏总闸关掉（表情包功能还开着）：只摘"主动收藏"这一个工具 —— 发送/列表/看图不受影响；
       // 留着的话模型会去调一个必然失败的收藏（还先白花一次看图判断，2026-10-02）。
       if (cfg.sticker?.collectEnabled === false && d.name === 'collect_sticker') return false;
+      // 语音回复与提醒：提示词侧已按开关收敛（prompt.js 里 send_voice 只在 tts 开启时教、
+      // remind 只在 reminders 开启时教），工具表却没跟上 —— 模型调过去必然失败，白花一轮
+      // 模型往返（send_voice 的描述还极具诱导性）。与上面几项同一口径（2026-10-03 全量审查）。
+      if (!ttsConfigured(cfg) && d.name === 'send_voice') return false;
+      if (cfg.reminders?.enabled === false && d.name === 'remind') return false;
       if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
       if (!selfWakeEnabled && d.name === 'schedule_wake') return false;
       // ASR 按量计费：开关关掉或没配 key 就不注入，避免模型调用必失败；也防误配置导致意外计费
@@ -1923,7 +1952,10 @@ export class Orchestrator {
   startScheduledWakeTicker() {
     if (this.scheduledWakeTicker) return;
     this.scheduledWakeTicker = setInterval(() => {
-      try { this.fireDueScheduledWakes(); } catch { /* 调度失败不影响主流程 */ }
+      // 不空吞：这条链路会碰 sqlite（SQLITE_BUSY/库锁）——静默抛每 30 秒一次，运维从日志里
+      // 看不出"机器人不说话了"和"本来就没到点"的区别（2026-10-03 全量审查）。
+      try { this.fireDueScheduledWakes(); }
+      catch (error) { log.error('[wake] 自安排唤醒调度出错（不影响下一轮）:', error?.message ?? error); }
     }, 30000);
     if (this.scheduledWakeTicker.unref) this.scheduledWakeTicker.unref();
   }
@@ -2109,7 +2141,7 @@ export class Orchestrator {
         log.info('[proactive] 跳过：并发任务已满');
         return;
       }
-      if (Math.random() > proactiveProbability(cfg.proactive?.probability)) {
+      if (this.random() > proactiveProbability(cfg.proactive?.probability)) {
         log.info('[proactive] 跳过：这次摇到了不发言');
         // 摇了不发言也算把这一轮用掉
         writeProactiveLastAttempt(nowTick);
@@ -2126,7 +2158,7 @@ export class Orchestrator {
       }
       // 真要开口了，才把这一轮用掉（本间隔内不再判定）
       writeProactiveLastAttempt(nowTick);
-      const chatKey = candidates[Math.floor(Math.random() * candidates.length)];
+      const chatKey = candidates[Math.floor(this.random() * candidates.length)];
       log.info('[proactive] 主动开话题 → ' + chatKey);
       this.wake(chatKey, { proactive: true }).catch((error) => log.error('[orchestrator] proactive 出错:', error));
     };

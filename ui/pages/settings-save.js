@@ -13,7 +13,7 @@ import {
 } from '../core/dom-util.js';
 import { $, $$ } from '../core/dom.js';
 import {
-  asrHostOf, clampInt, hasOwnPrice, hostOfUrl, memThreshold, mulOf, normalizeAsrMax,
+  asrHostOf, clampInt, hasOwnPrice, hostOfUrl, memThreshold, mulOf, normalizeAsrMax, normalizeImageGenMax,
   normalizeStickerCollectMax, normalizeStickerMax, parseList, sliderToTierUI
 } from '../core/format.js';
 import { pickedGroups, state } from '../core/state.js';
@@ -484,7 +484,7 @@ async function saveConfig({ quiet = false } = {}) {
           baseUrl: String(val('#cfg-img-baseurl', g.baseUrl || '') || '').trim(),
           model: String(val('#cfg-img-model', g.model || '') || '').trim(),
           size: String(val('#cfg-img-size', g.size || '') || '').trim(),
-          maxPerHour: Math.min(100, Math.max(1, Math.round(Number(val('#cfg-img-max', g.maxPerHour ?? 6)) || 6))),
+          maxPerHour: normalizeImageGenMax(val('#cfg-img-max', g.maxPerHour), 6),   // 与运行期 imageGenMaxPerHour 同口径
           // 服务端据此合并：掩码/空 = 保持原 Key；新输入才替换
           ...(rawKey && rawKey !== '******' ? { apiKey: rawKey } : {})
         };
@@ -539,9 +539,12 @@ async function saveConfig({ quiet = false } = {}) {
         sources: val('#cfg-aggregate-sources', '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean).slice(0, 4),
         count: Math.min(6, Math.max(2, Number(val('#cfg-aggregate-count', '')) || 4))
       },
-      // 自定义搜索服务走 webSearch.providers 数组（由「添加自定义搜索服务」按钮维护），
-      // 不在这里随表单提交 —— 避免每次保存都把动态列表覆盖掉。
-      providers: c.webSearch?.providers || []
+      // ⚠️ 这里**故意不带** webSearch.providers（自定义搜索服务列表）：它由「添加自定义搜索服务」
+      // 按钮单独管理（POST /api/search-providers），且每家的 Key 存在 providers[].apiKey。
+      // 以前这里回传了整份列表（上方 ...c.webSearch 已经带上了），而列表来自脱敏视图（apiKey 被删）
+      // —— deepMerge 对数组是整体替换，于是"保存设置"一次就把所有自定义搜索服务的 Key 清空
+      // （2026-10-03 全量审查实测）。置 undefined = 这一项本次不提交。
+      providers: undefined
     };
   }
 
@@ -742,7 +745,8 @@ async function saveConfig({ quiet = false } = {}) {
       // 主题在点选项时就已应用并写入 localStorage，这里把它一并存到后端以便跨设备保留
       theme: getThemePref(),
       showVision: chk('#cfg-showvision', c.ui?.showVision !== false),
-      refreshMs: Number(val('#cfg-refreshms', c.ui?.refreshMs ?? 15000)) || 15000
+      // 兜底与运行期 refreshIntervalMs 一样夹到 >=1000：原来不夹，界面显示 500、实际按 15000 跑
+      refreshMs: Math.max(1000, Number(val('#cfg-refreshms', c.ui?.refreshMs ?? 15000)) || 15000)
     };
     patch.memberNotes = {
       ...(c.memberNotes || {})

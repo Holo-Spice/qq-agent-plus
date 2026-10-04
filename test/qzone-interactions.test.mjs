@@ -639,3 +639,27 @@ test('repeated friend-feed failure still runs replies and the unread backlog', a
   assert.equal(f.manager.status().unreadFeeds, 0);
   assert.equal(f.manager.status().unreadReplies, 0);
 });
+
+test('写入前中止：未执行的条目保持未读，留给下个活跃窗口（2026-10-03 全量审查）', async () => {
+  const feed = [
+    { uin: 111, nickname: 'A', time: nowSec - 30, appid: 311, key: 'k1', html: htmlPost('one') },
+    { uin: 222, nickname: 'B', time: nowSec, appid: 311, key: 'k2', html: htmlPost('two') }
+  ];
+  let mgr = null;
+  const f = fixture({
+    feed,
+    complete: async ({ messages }) => {
+      const ids = idsFromMessages(messages, 'feed');
+      // 模型已经给出计划、即将开始写入时用户点了"停止"
+      mgr?.abort();
+      return response({
+        feedActions: ids.map((id) => ({ id, action: 'like_comment', content: '赞', reason: '好' })),
+        replyActions: []
+      });
+    }
+  });
+  mgr = f.manager;
+  await f.manager.runNow('feed');
+  assert.equal(f.writes.length, 0, '中止后不该再发出写入');
+  assert.equal(f.manager.status().unreadFeeds, 2, '未执行的条目必须仍是未读（提前标 reviewed 会让它们永远不再进批次）');
+});

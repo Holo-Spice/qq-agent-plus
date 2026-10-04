@@ -72,6 +72,17 @@ test('GroupDigestManager：消息够时生成一条并发送；不够时跳过',
   const rows = store.recent('group:123', { limit: 400, includeSelf: true, readOnly: true });
   assert.equal(rows.length, 8, '已确认消息应能被日报读取');
 
+  // 群日报现在会在**读消息与调模型之前**过门禁（观察模式 / 白名单外的群不花钱，
+  // 2026-10-03 全量审查）→ 这条用例必须把配置摆成真实放行的样子，不能靠默认值恰好通过
+  // ⚠️ 必须动态 import：静态 import 会被 ESM 提前求值，那时 QQ_AGENT_DATA_DIR 还没设 →
+  // config 模块按默认数据目录加载，上面那份临时 config.json 根本不生效（本文件里其它 src 模块都是动态 import）
+  const { getConfig, setRuntimeConfig } = await import('../src/core/config.js');
+  const base = getConfig();
+  setRuntimeConfig({
+    ...base,
+    allow: { ...(base.allow || {}), groups: ['123'] },
+    deny: { ...(base.deny || {}), groups: [] }
+  });
   const sent = [];
   const sender = { sendTextBatch: async (chatKey, msgs) => { sent.push({ chatKey, msgs }); return { message_id: 1 }; } };
   const origFetch = globalThis.fetch;

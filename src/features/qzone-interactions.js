@@ -1257,11 +1257,10 @@ export class QzoneInteractionManager {
       run.usage = decided.usage;
       run.model = decided.model;
       run.plan = decided.plan;
-      for (const item of [...batch.feeds, ...batch.replies]) {
-        item.state.status = 'reviewed';
-        item.state.reviewedAt = this.now();
-        item.state.updatedAt = this.now();
-      }
+      // ⚠️ 这里**不要**提前把整批标成 reviewed（2026-10-03 全量审查）：下面 #executePlan 的两个
+      // 循环头会在"手动停止/窗口关闭"时 break，未执行的条目必须保持 unread 留给下个活跃窗口重试 ——
+      // 提前标记会让它们既没被互动、又永远不再进批次（下一轮只挑 unread），静默吞掉。
+      // 状态由 #executePlan 逐条落（成功 reviewed / 失败 unknown / 未尝试保持原样）。
       this.#save();
       await this.#executePlan(decided.plan, batch, cfg, this.controller.signal, run);
       run.status = run.actions.some((action) => action.status === 'unknown')

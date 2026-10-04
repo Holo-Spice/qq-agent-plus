@@ -502,3 +502,31 @@ test('收藏双闸（#9）：会话额度互不影响；全局额度共享（配
   assert.equal(globalDenied.ok, false, '全局 4 张已满，第三个会话也受限');
   assert.equal(globalDenied.scope, 'global');
 });
+
+
+test('收藏配额记账：成功扣一次、取不到图退还（事前原子消费，2026-10-03 全量审查）', async (t) => {
+  const http = await import('node:http');
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6300010000050001' + '0d0a2db4' + '0000000049454e44ae426082', 'hex');
+  const server = http.createServer((req, res) => {
+    if (req.url.includes('missing')) { res.writeHead(404); res.end('nope'); return; }
+    res.writeHead(200, { 'content-type': 'image/png' });
+    res.end(png);
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => new Promise((r) => server.close(r)));
+  const { updateConfig, DEFAULT_CONFIG } = await import('../src/core/config.js');
+  updateConfig({
+    security: { ...DEFAULT_CONFIG.security, allowPrivateImageHosts: true },
+    sticker: { ...DEFAULT_CONFIG.sticker, collectEnabled: true, maxCollectPerHour: 5, maxCollectPerHourPerChat: 5 }
+  });
+  const manager = new StickerManager({ async call() { return []; } });
+  const chatKey = 'group:quota-1';
+  const base = manager.collectQuota.snapshot();
+  const port = server.address().port;
+  await manager.collect('-601', { url: `http://127.0.0.1:${port}/a.png`, note: 'x', chatKey });
+  const afterOk = manager.collectQuota.snapshot();
+  assert.equal((afterOk.chats[chatKey] || 0) - (base.chats[chatKey] || 0), 1, '收藏成功要扣一次额度');
+  await assert.rejects(() => manager.collect('-602', { url: `http://127.0.0.1:${port}/missing.png`, note: 'x', chatKey }), /取不到/);
+  const afterFail = manager.collectQuota.snapshot();
+  assert.equal((afterFail.chats[chatKey] || 0) - (base.chats[chatKey] || 0), 1, '失败的那次要退还（净消耗仍为 1）');
+});
