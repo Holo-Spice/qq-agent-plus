@@ -169,6 +169,21 @@ function err(message, metadata = {}) {
  * 被禁言（GROUP_MUTED）期间每轮都会撞上，记成 warning 只会把控制台刷满 ——
  * 模型当轮拿到原因、决定先不发言就够了。
  */
+/**
+ * 送达之后的记账：写本地库（markUsed）、记 session.sent、发 session-update。
+ * 这些都在 `await sender.sendXxx()` **之后**，失败绝不能改判成「发送失败」——
+ * 工具返回失败会让模型以为没发出去而重发，群里就多一条/多一张（2026-10-04 全面复审 P3
+ * 实测：stub markUsed 抛 disk full，贴纸已在线上（message_id=7），工具却返回
+ * 「错误：disk full」）。与 onebot/sender.js 的 #afterSent 同一口径。
+ */
+function afterSent(run) {
+  try {
+    run();
+  } catch (error) {
+    console.warn('[tools] 消息已送达但记账失败（该条仍算已发出，不会上报失败）:', error?.message ?? error);
+  }
+}
+
 function sendErr(error, metadata = {}) {
   return err(error?.message ?? error, {
     incidentCaptured: error?.incidentCaptured === true,
@@ -339,8 +354,10 @@ export function buildToolDefs() {
             replyToMessageId: normalizeMid(args.replyToMessageId) || null,
             atUserId: normalizeMid(args.atUserId) || null
           });
-          ctx.session.sent.push(...result.sent.map((s) => ({ type: 'text', text: s.text, at: s.at })));
-          ctx.emit('session-update', ctx.session.id);
+          afterSent(() => {
+            ctx.session.sent.push(...result.sent.map((s) => ({ type: 'text', text: s.text, at: s.at })));
+            ctx.emit('session-update', ctx.session.id);
+          });
           const note = ['已发送。不要输出"已发送"类汇报，继续思考下一步或直接结束。'];
           if (result.failed.length) note.push(`（另有 ${result.failed.length} 条发送失败：${result.failed.map((f) => f.error).join('；')}——成功的不需要重发，失败的请稍后再试或减少条数）`);
           return ok({ sent: result.sent.length, messageIds: result.sent.map((s) => s.messageId), note: note.join('') });
@@ -392,9 +409,11 @@ export function buildToolDefs() {
             replyToMessageId: normalizeMid(args.replyToMessageId) || null,
             atUserId: normalizeMid(args.atUserId) || null
           });
-          ctx.stickers.markUsed(sticker.id, String(ctx.session.triggerText || '').slice(0, 100));
-          ctx.session.sent.push({ type: 'sticker', text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
-          ctx.emit('session-update', ctx.session.id);
+          afterSent(() => {
+            ctx.stickers.markUsed(sticker.id, String(ctx.session.triggerText || '').slice(0, 100));
+            ctx.session.sent.push({ type: 'sticker', text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
+            ctx.emit('session-update', ctx.session.id);
+          });
           return ok({ sent: true, messageId: result?.message_id ?? null, note: '表情已发送。' });
         } catch (error) {
           return sendErr(error);
@@ -615,8 +634,10 @@ export function buildToolDefs() {
             atUserId: normalizeMid(args.atUserId) || null,
             text: args.text ? unquoteJsonString(args.text) : null
           });
-          ctx.session.sent.push({ type: 'face', text: `${args.text ? unquoteJsonString(args.text) : ''}[表情:${hit.face.name}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
-          ctx.emit('session-update', ctx.session.id);
+          afterSent(() => {
+            ctx.session.sent.push({ type: 'face', text: `${args.text ? unquoteJsonString(args.text) : ''}[表情:${hit.face.name}]`, at: new Date().toLocaleTimeString('zh-CN', { hour12: false }) });
+            ctx.emit('session-update', ctx.session.id);
+          });
           return ok({ sent: true, faceId: hit.face.id, name: hit.face.name, messageId: result?.message_id ?? null, note: '系统表情已发送。' });
         } catch (error) {
           return sendErr(error);

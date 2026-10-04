@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRouter } from './router.js';
 
-import { asrApiKey, asrAvailable, asrConfigured, asrCredentialForSlot, asrCredentialResolve, asrCredentialSlot, asrCredentialSlotOf, asrCredentials, asrEndpointHost, asrKeyHost, asrKeySlots, asrKeySource, asrLocalBin, asrLocalModel, asrSecretId, asrSecretKey, conversationConfigForChat, findWhisperBinSync, getConfig, identityPilotEnabled, imageGenAvailable, imageGenKeyHosts, imageGenKeyOwnedBy, imageGenKeyResolve, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, pinImageGenKeyHost, DATA_DIR, ROOT } from '../core/config.js';
+import { asrApiKey, asrAvailable, asrConfigured, asrCredentialForSlot, asrCredentialResolve, asrCredentialSlot, asrCredentialSlotOf, asrCredentials, asrEndpointHost, asrKeyHost, asrKeySlots, asrKeySource, asrLocalBin, asrLocalModel, asrSecretId, asrSecretKey, ASR_PROVIDERS, conversationConfigForChat, findWhisperBinSync, getConfig, identityPilotEnabled, imageGenAvailable, imageGenKeyHosts, imageGenKeyOwnedBy, imageGenKeyResolve, incidentPilotEnabled, slangPilotEnabled, updateConfig, onTimeControlChange, pinImageGenKeyHost, DATA_DIR, ROOT } from '../core/config.js';
 import { tokenSaverEffective } from '../core/token-saver.js';
 import { catchupReplyWindowMs, catchupLogLine, isFreshForReply } from '../core/catchup-policy.js';
 import { budgetStatus } from '../core/budget.js';
@@ -1278,6 +1278,21 @@ export function createApp({
   }
 
   // ── HTTP API ──
+  // 键序无关的深比较（序列化前把对象键排序）：判断"客户端提交的这份"与"服务端那份"
+  // 是不是同一份东西 —— 掩码语义要用（脱敏视图原样回传 = 用户没动过）。
+  const stableJson = (value) => {
+    const seen = new WeakSet();
+    const norm = (x) => {
+      if (x === null || typeof x !== 'object') return x;
+      if (seen.has(x)) return undefined;
+      seen.add(x);
+      if (Array.isArray(x)) return x.map(norm);
+      const out = {};
+      for (const k of Object.keys(x).sort()) out[k] = norm(x[k]);
+      return out;
+    };
+    try { return JSON.stringify(norm(value)); } catch { return null; }
+  };
   const server = http.createServer((req, res) => {
     handleHttp(req, res).catch((error) => {
       incidentPilot?.capture(error, {
@@ -3100,6 +3115,57 @@ export function createApp({
       && node.__replace__ && typeof node.__replace__ === 'object' && !Array.isArray(node.__replace__)
       ? node.__replace__
       : node);
+    // ── api 的两个"逃生口"文本域：提交内容与当前值的**脱敏形态**逐字相同时，当作没改 ──
+    // extraBody / thinkingParams 在界面上是文本域，用脱敏视图回填、保存时原样 __replace__ 提交。
+    // 脱敏会把对象形态的密钥字段换成 hasXxx（F6 的修复），于是"打开设置页什么都不改直接保存"
+    // 就会把真配置覆盖成 {normal:'ok', hasAuthorization:true} —— 用户的自定义请求头没了，
+    // 还多一个 hasAuthorization 进请求体（2026-10-04 复审 P2 实测）。
+    // 判据与 Key 字段的掩码语义同款：脱敏视图原样回传 = "没动过"。
+    // 用户真要删某个字段时提交内容与脱敏形态不同（少了那项），照样生效 —— 不影响"清空"。
+    // ⚠️ 光有"逐字相同→没改"还不够（2026-10-04 复审 P2）：用户在**同一个框里改了别的字段**
+    // 再保存，提交内容 ≠ 脱敏形态 → 守卫不删 → hasXxx 占位照样整键落盘 —— 真请求头被替换掉、
+    // hasAuthorization 还会以最高优先级并进每一次模型请求。所以凡是提交里出现 hasXxx、
+    // 而服务端现值里有对应的真键，就把真值**回填**回去（等价于"掩码 = 保持原值"的 Key 语义）。
+    const unmaskSubmitted = (submitted, current) => {
+      if (!submitted || typeof submitted !== 'object' || Array.isArray(submitted)) return submitted;
+      const cur = (current && typeof current === 'object' && !Array.isArray(current)) ? current : {};
+      const out = Array.isArray(submitted) ? [...submitted] : { ...submitted };
+      for (const key of Object.keys(out)) {
+        const value = out[key];
+        if (/^has[A-Z]/.test(key)) {
+          const realKey = key.charAt(3).toLowerCase() + key.slice(4);
+          if (Object.hasOwn(cur, realKey)) {
+            out[realKey] = structuredClone(cur[realKey]);
+            delete out[key];
+          }
+          continue;
+        }
+        if (value && typeof value === 'object' && Object.hasOwn(cur, key)) {
+          out[key] = unmaskSubmitted(value, cur[key]);
+        }
+      }
+      return out;
+    };
+    if (patch?.api && typeof patch.api === 'object') {
+      const apiGuard = sectionBody(patch.api);
+      const sanitizedApi = sanitizeConfigSecrets({ api: cfgNow.api || {} }).api || {};
+      for (const field of ['extraBody', 'thinkingParams']) {
+        const raw = apiGuard[field];
+        if (raw === undefined) continue;
+        const isReplace = raw && typeof raw === 'object' && !Array.isArray(raw) && '__replace__' in raw;
+        const submitted = isReplace ? raw.__replace__ : raw;
+        if (stableJson(submitted) === stableJson(sanitizedApi[field])) {
+          // 视图原样回传 = 用户没动这个框 → 整项当没改（快速路径）
+          if (isReplace) delete apiGuard[field];
+          else apiGuard[field] = structuredClone(sanitizedApi[field] ?? {});
+          continue;
+        }
+        // 用户改了内容：把视图里的 hasXxx 占位换回服务端真值再落盘
+        const healed = unmaskSubmitted(submitted, cfgNow.api?.[field]);
+        if (isReplace) raw.__replace__ = healed;
+        else apiGuard[field] = healed;
+      }
+    }
     // 控制台保存总会带上显式的 provider（来自服务预设）：等于用户确认过这一家，
     // 清掉"升级默认值"的标记，让环境变量 Key 恢复生效（2026-09-26 审查 P2）。
     // 要删在**有效体**上：整节替换时节点层的 delete 落不到最终配置上，替换体里那份
@@ -3243,8 +3309,19 @@ export function createApp({
       delete asrBody.keySlots;                // 服务端派生的视图口径：不回写配置
       delete asrBody.keys;                    // 映射由服务端维护，绝不接受整份覆盖
       const curAsr = cfgNow.asr || {};
-      const nextProvider = String(asrBody.provider ?? curAsr.provider ?? '').trim().toLowerCase()
-        || String(curAsr.provider || 'openai');
+      // ⚠️ provider 必须在**写盘前**校验：它直接决定槽位名（asrCredentialSlot）。
+      // 客户端送 `provider:"constructor"` 时槽位名就成了 "constructor"，而落盘的
+      // keys['constructor'] 之后会让 asrKeySlots 取到 Object.prototype.constructor 并抛错，
+      // **每一次读 /api/config 都 500**，且没有任何 API 能删掉那个槽位（2026-10-04 复审 P2 实测）。
+      // ASR_PROVIDERS 之外的取值一律当"没改这一项"，沿用当前配置（坏输入最该被忽略）。
+      const submittedProvider = String(asrBody.provider ?? '').trim().toLowerCase();
+      const currentProvider = String(curAsr.provider || 'openai').trim().toLowerCase();
+      const nextProvider = (submittedProvider && ASR_PROVIDERS.includes(submittedProvider))
+        ? submittedProvider
+        : currentProvider;
+      if (asrBody.provider !== undefined && submittedProvider !== nextProvider) {
+        delete asrBody.provider;   // 非法值/空串都别带进 deepMerge（空 = "这次没改这一项"）
+      }
       const nextBaseUrl = asrBody.baseUrl !== undefined ? asrBody.baseUrl : (curAsr.baseUrl || '');
       const targetSlot = asrCredentialSlot(nextProvider, nextBaseUrl);
       const nextKeys = { ...(curAsr.keys || {}) };

@@ -412,10 +412,28 @@ export class ChatStore {
       const outbox = this.db.prepare(`DELETE FROM outbox
         WHERE chat_key=? AND state IN ('sending','unknown')`).run(chatKey).changes;
       // 已核对过的终态行不在上面那条里，一并清掉（不然它们永久留在库里）。
-      this.db.prepare(`DELETE FROM outbox
-        WHERE chat_key=? AND state IN ('reconciled_sent','reconciled_failed')`).run(chatKey);
+      // ⚠️ `sent` 也要清：正常收尾由 ackLease 删它，但租约从未 ack 的那些（进程在"标记已发"
+      // 与"确认租约"之间挂掉）只剩这一条清理路径 —— 不清就是人工点完"核对"还留一地残骸
+      //（2026-10-04 全面复审 P3 实测：5 次 resolveHeld 后 5/5 行仍在）。
+      // ⚠️⚠️ 但**只能清已终止租约**的：'sent' 行同时是 failLease 里 hasEffects 的判据
+      //（outbox 有 sending/sent/unknown → 该 run 的消息转 held 等人工，而不是回 pending 重跑）。
+      // 无差别按 chat_key 删的话，会把**正在运行租约**的在途证据一起删掉 —— 那次运行随后以
+      // 可重试错误收尾时 hasEffects=false，整批消息回队 5 秒后被兜底循环重跑，群里重复发言
+      //（2026-10-04 复审 P1）。
+      const terminal = this.db.prepare(
+        `SELECT id FROM runs WHERE chat_key=? AND state IN ('held','failed','acked')`
+      ).all(String(chatKey || '')).map((r) => r.id);
+      let terminalRows = 0;
+      for (const runId of terminal) {
+        terminalRows += this.db.prepare(`DELETE FROM outbox
+          WHERE run_id=? AND state IN ('sent','reconciled_sent','reconciled_failed')`).run(runId).changes;
+      }
       this.db.prepare("UPDATE runs SET state='acked' WHERE chat_key=? AND state='held'").run(chatKey);
-      return Math.max(messages, outbox);
+      // 「核对 N 条」的 N：held 消息是主项；终态残骸只在**没有** held 消息时才作为计数
+      //（求和会把"1 条消息 + 它自己的 outbox 记账行"算成 2，store.test.mjs 钉的就是这个）。
+      // 只用 Math.max(messages, outbox) 的旧行为在"只剩 sent/reconciled 残骸"时报 0，
+      // 控制台显示"核对 0 条"（2026-10-04 复审 P3）。
+      return Math.max(messages, outbox + terminalRows);
     });
   }
 

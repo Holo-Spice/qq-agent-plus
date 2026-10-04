@@ -214,12 +214,12 @@ function renderApiSection(c) {
         <div class="field">
           <label>自定义档位映射（JSON，表外/自定义渠道用）</label>
           <textarea id="cfg-thinking-params" rows="3" style="width:100%" placeholder='例如 {"low":{"reasoning_effort":"low"},"high":{"reasoning_effort":"high"}}。填了这里，档位条就会按这些键出现（仅对表外/自定义渠道生效）。'>${esc(extraBodyText(c.api?.thinkingParams))}</textarea>
-          <div class="hint" id="cfg-thinking-params-hint">键是档位（off/low/medium/high/max），值是请求里要带的字段；内置预设渠道走内置形状，不受这里影响。</div>
+          <div class="hint" id="cfg-thinking-params-hint">键是档位（off/low/medium/high/max），值是请求里要带的字段；内置预设渠道走内置形状，不受这里影响。　<strong>密钥类字段（如 authorization）在下面显示为 hasXxx 占位，明文不下发；不改这两个框＝原样保留，动了就会按你看到的存。</strong></div>
         </div>
         <div class="field">
           <label>额外请求参数（JSON）</label>
           <textarea id="cfg-extra-body" rows="3" style="width:100%" placeholder='例如 {"reasoning":{"enabled":false}}。留空 = 不附加。'>${esc(extraBodyText(c.api?.extraBody))}</textarea>
-          <div class="hint" id="cfg-extra-body-hint">填了就以最高优先级合并进每次请求（JSON 对象）；服务商文档里的怪参数都填这里，不用等适配。注意 stream 会被强制回非流式；model / messages / tools 会整段替换对应字段，排查异常时先清空这里。</div>
+          <div class="hint" id="cfg-extra-body-hint">填了就以最高优先级合并进每次请求（JSON 对象）；服务商文档里的怪参数都填这里，不用等适配。注意 stream 会被强制回非流式；model / messages / tools 会整段替换对应字段，排查异常时先清空这里。　<strong>密钥类字段（如 authorization）在下面显示为 hasXxx 占位，明文不下发；不改这两个框＝原样保留，动了就会按你看到的存。</strong></div>
         </div>
       </div>
     </details>

@@ -225,3 +225,561 @@ test('⑥ 段被送成标量/数组时按"没改这一段"处理，不 500', asy
   assert.equal(disk().api.baseUrl, 'https://api.openai.com/v1', '坏输入不许清空整段');
   assert.equal(disk().api.model, 'gpt-x');
 });
+
+test('⑦ provider 送原型链上的属性名：被忽略，且控制台不会永久 500（2026-10-04 复审 P2）', async (t) => {
+  const { request, disk } = await withConsole(t, (cfg) => {
+    cfg.asr = { ...cfg.asr, provider: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: 'SK-LEGACY' };
+  });
+
+  // 前提：注入前一切正常
+  assert.equal((await request('/api/config')).status, 200);
+
+  // provider 直接决定槽位名；送 "constructor" 会让 keys 里出现同名槽位，
+  // 之后 asrKeySlots 取到 Object.prototype.constructor 并抛 "list.includes is not a function"
+  const attack = await request('/api/config', {
+    method: 'POST',
+    body: { asr: { enabled: true, provider: 'constructor', baseUrl: 'https://api.openai.com/v1', apiKey: 'SK-ATK' } }
+  });
+  assert.equal(attack.status, 200, `不该 500：${JSON.stringify(attack.body).slice(0, 120)}`);
+
+  // 非法 provider 不落盘，槽位名也不产生
+  assert.equal(disk().asr.provider, 'openai', '非法 provider 被忽略，沿用当前那家');
+  const slots = Object.keys(disk().asr.keys || {});
+  for (const name of slots) {
+    assert.equal(Object.hasOwn(Object.prototype, name), false,
+      `槽位名 "${name}" 撞上了 Object.prototype 上的属性 —— 这正是让 asrKeySlots 抛错的那一类`);
+    assert.notEqual(name, '__proto__', '__proto__ 不许作为槽位名');
+  }
+  assert.equal(slots.includes('constructor'), false, '绝不能生成 constructor 槽位（修复的落点）');
+
+  // 关键：控制台没有被这一下打成永久 500
+  assert.equal((await request('/api/config')).status, 200, '注入之后 GET 仍要正常');
+  // 再来一次"正常"保存也不能把状态搞坏
+  assert.equal((await request('/api/config', {
+    method: 'POST', body: { asr: { enabled: true, provider: 'openai', apiKey: 'SK-NEW' } }
+  })).status, 200);
+  assert.equal((await request('/api/config')).status, 200);
+});
+
+test('⑦ 附：ASR_PROVIDERS 里的合法值照常生效（别把守卫做成"永远不认新 provider"）', async (t) => {
+  const { request, disk } = await withConsole(t, (cfg) => {
+    cfg.asr = { ...cfg.asr, provider: 'openai', baseUrl: 'https://api.openai.com/v1' };
+  });
+  for (const provider of ['tencent', 'iflytek', 'baidu', 'volc', 'local']) {
+    const res = await request('/api/config', { method: 'POST', body: { asr: { enabled: true, provider } } });
+    assert.equal(res.status, 200, JSON.stringify(res.body).slice(0, 120));
+    assert.equal(disk().asr.provider, provider, `合法 provider ${provider} 要能保存`);
+  }
+  // 空 provider = "没改这一项"，沿用当前值
+  const cur = disk().asr.provider;
+  await request('/api/config', { method: 'POST', body: { asr: { enabled: true, provider: '' } } });
+  assert.equal(disk().asr.provider, cur, '空 provider 不该把当前那家冲掉');
+});
+test('⑦ 附二：配置里**已经有**毒槽位时也不抛错（旧版本留下的 / 手改的 config.json）', async () => {
+  // provider 白名单只挡住"新产生"的坏槽位；已经躺在盘上的那些照样会被读到，
+  // 所以读路径本身必须对原型链上的键名免疫 —— 否则升级前中招的实例永远起不来。
+  const { asrKeySlots, asrCredentialFor } = await import('../src/core/config-legacy.js');
+  const poisoned = {
+    provider: 'constructor',
+    baseUrl: 'https://api.openai.com/v1',
+    apiKey: 'SK-KEPT',
+    apiKeyProvider: 'openai',
+    apiKeyHost: 'api.openai.com',
+    keys: {
+      constructor: { apiKey: 'SK-POISON' },
+      __proto__: { apiKey: 'SK-PROTO' },
+      toString: { apiKey: 'SK-TOSTRING' },
+      'openai|api.openai.com': { apiKey: 'SK-REAL' }
+    }
+  };
+
+  let slots = null;
+  assert.doesNotThrow(() => { slots = asrKeySlots(poisoned); },
+    'asrKeySlots 碰到 constructor/__proto__/toString 这类键名不能抛（抛了就是整个控制台 500）');
+  assert.equal(typeof slots, 'object', '返回的槽位表要是普通对象');
+  for (const [name, kinds] of Object.entries(slots)) {
+    assert.equal(Array.isArray(kinds), true, `槽位 ${name} 的取值必须是数组（原型链上的键会取到函数）`);
+  }
+  // 正常那家照常可见（不能因为防住坏键就把好的也一起丢了）
+  assert.ok(slots['openai|api.openai.com']?.includes('apiKey'), '合法槽位照常上报');
+
+  // 取凭据：合法那家照常取得到；keys 里没有的自有槽位不许顺着原型链取值
+  //（keys 里有**自有**的 constructor 槽时读到它是合理的 —— 那只是名字古怪的普通槽位；
+  //  真正的危险是 keys 没有该键时顺着原型链取到 Object.prototype 上的东西）
+  assert.equal(asrCredentialFor(poisoned, 'apiKey', 'openai', 'https://api.openai.com/v1'), 'SK-REAL',
+    '合法那家的凭据照常取得到');
+  const withoutOwn = { provider: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: '', keys: {} };
+  assert.equal(asrCredentialFor(withoutOwn, 'apiKey', 'constructor', ''), '',
+    'keys 里没有该槽位时必须返回空，不能顺着原型链取到 Object.prototype.constructor');
+});
+
+// ── 第二轮复审仍未修的五条（F3–F7）──
+
+test('⑧ F3：老配置内联在 providers[].apiKey 的 Key，「加/删模型」后不许丢（2026-10-04 P2）', async () => {
+  // providers[] 里不留明文 Key 是既定约定，重建列表时都要剥掉 —— 但剥之前必须归档进
+  // providerKeys。老配置（Key 直接写在 providers[] 里）一次「加模型」就永久丢失：
+  // 实测装完能用，加一次模型之后运行期解析成空串，控制台也没处找回来。
+  const { addModelsToProvider, removeModelFromProvider, currentProviders } =
+    await import('../src/core/providers.js');
+  const { getConfig } = await import('../src/core/config.js');
+
+  // 造一份"老形态"：Key 内联，且 providerKeys 里没有
+  const cfg = getConfig();
+  cfg.providers = [{
+    id: 'legacy-1', name: '旧服务', baseURL: 'https://legacy.example/v1',
+    models: ['m1', 'm2'], modelNames: { m1: 'M1', m2: 'M2' }, apiKey: 'sk-LEGACY-INLINE'
+  }];
+  cfg.providerKeys = {};
+  assert.equal(currentProviders()[0]?.apiKey, 'sk-LEGACY-INLINE', '前提：老配置装完运行期能用');
+
+  addModelsToProvider('legacy-1', [{ id: 'm3', name: 'M3' }]);
+  assert.equal(getConfig().providerKeys['legacy-1'], 'sk-LEGACY-INLINE',
+    '剥掉内联字段之前必须先归档进 providerKeys（F3 的落点）');
+  assert.equal(currentProviders()[0]?.apiKey, 'sk-LEGACY-INLINE', '加模型之后仍然能用那把 Key');
+  assert.notEqual(getConfig().providers?.[0]?.apiKey, 'sk-LEGACY-INLINE', 'providers[] 里不留明文');
+
+  removeModelFromProvider('legacy-1', 'm3');
+  assert.equal(currentProviders()[0]?.apiKey, 'sk-LEGACY-INLINE', '删模型之后同样不能丢');
+  // 已经在 providerKeys 里的不被内联那份覆盖（内联可能更旧）
+  cfg.providers[0].apiKey = 'sk-OLDER-INLINE';
+  addModelsToProvider('legacy-1', [{ id: 'm4', name: 'M4' }]);
+  assert.equal(getConfig().providerKeys['legacy-1'], 'sk-LEGACY-INLINE', '已归档的值不被更旧的内联值覆盖');
+});
+
+test('⑨ F4：非对象的 __replace__ 当"这一项没给"，不许静默清空整段（2026-10-04 P3）', async (t) => {
+  const { request, disk } = await withConsole(t, (cfg) => {
+    cfg.asr = { ...cfg.asr, provider: 'tencent', secretId: 'AKID', secretKey: 'SECRET', secretIdProvider: 'tencent', secretKeyProvider: 'tencent' };
+    cfg.tts = { ...cfg.tts, enabled: true, apiKey: 'SK-TTS' };
+    cfg.imageGen = { ...cfg.imageGen, enabled: true, apiKey: 'SK-IMG' };
+  });
+  const res = await request('/api/config', {
+    method: 'POST',
+    body: {
+      asr: { __replace__: null },
+      tts: { __replace__: 'x' },
+      imageGen: { __replace__: [] }
+    }
+  });
+  assert.equal(res.status, 200, JSON.stringify(res.body).slice(0, 120));
+  const onDisk = disk();
+  for (const sec of ['asr', 'tts', 'imageGen']) {
+    assert.equal(onDisk[sec] === null || onDisk[sec] === '' || Array.isArray(onDisk[sec]),
+      false, `${sec} 段被非对象的 __replace__ 清掉了`);
+  }
+  assert.equal(onDisk.asr.secretKey, 'SECRET', 'asr 的凭据不能因为一个坏替换体消失');
+  assert.equal(onDisk.tts.apiKey, 'SK-TTS', 'tts 的 Key 同理');
+  assert.equal(onDisk.imageGen.apiKey, 'SK-IMG', 'imageGen 的 Key 同理');
+  // 合法的对象替换体照旧生效（别把守卫做成"永远不许整节替换"）
+  const ok = await request('/api/config', { method: 'POST', body: { imageGen: { __replace__: { enabled: true, baseUrl: 'https://zhipu.example/v1' } } } });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body).slice(0, 120));
+  assert.equal(disk().imageGen.baseUrl, 'https://zhipu.example/v1', '对象替换体要照常生效');
+});
+
+test('⑩ F6：对象/数组形态的密钥字段也要脱敏（2026-10-04 P3）', async () => {
+  const { sanitizeConfigSecrets } = await import('../src/core/secret-keys.js');
+  const out = sanitizeConfigSecrets({
+    api: {
+      extraBody: { authorization: { value: 'Bearer sk-AUTH-NESTED' } },
+      apiKey: { value: 'sk-NESTED' },
+      token: ['sk-ARR'],
+      apiSecret: 'sk-PLAIN',
+      safeField: 'not-a-secret'
+    }
+  });
+  const text = JSON.stringify(out);
+  for (const leak of ['sk-AUTH-NESTED', 'sk-NESTED', 'sk-ARR', 'sk-PLAIN']) {
+    assert.equal(text.includes(leak), false, `${leak} 仍明文出现在脱敏结果里`);
+  }
+  assert.equal('apiKey' in out.api, false, '对象形态的 apiKey 要整条删掉');
+  assert.equal('authorization' in out.api.extraBody, false, '嵌套在 extraBody 里的也要删');
+  assert.equal('token' in out.api, false, '数组形态的 token 要整条删掉');
+  assert.equal(out.api.safeField, 'not-a-secret', '非密钥字段不受影响');
+  // hasXxx 仍要正确生成（界面靠它显示"已填"）
+  assert.equal(out.api.hasApiKey, true, '对象形态也要算出 hasApiKey=true');
+  assert.equal(out.api.hasToken, true);
+  assert.equal(out.api.hasApiSecret, true);
+});
+
+test('⑪ F7：api / providers 的 has* 派生位不许落盘（2026-10-04 P3）', async (t) => {
+  const { request, disk } = await withConsole(t, (cfg) => {
+    cfg.api = { ...cfg.api, baseUrl: 'https://api.openai.com/v1' };
+  });
+  // 模拟"整份配置展开回传"的客户端：把 GET 看到的派生位原样送回来
+  const res = await request('/api/config', {
+    method: 'POST',
+    body: {
+      api: { baseUrl: 'https://api.openai.com/v1', hasApiKey: true, hasKey: true },
+      providers: [{ id: 'p1', name: 'x', baseURL: 'https://x.example/v1', hasKey: true, hasApiKey: true }]
+    }
+  });
+  assert.equal(res.status, 200, JSON.stringify(res.body).slice(0, 120));
+  const onDisk = disk();
+  assert.equal('hasApiKey' in (onDisk.api || {}), false, 'api.hasApiKey 不许落盘');
+  assert.equal('hasKey' in (onDisk.api || {}), false, 'api.hasKey 不许落盘');
+  assert.equal('hasKey' in (onDisk.providers?.[0] || {}), false, 'providers[].hasKey 不许落盘');
+  assert.equal('hasApiKey' in (onDisk.providers?.[0] || {}), false, 'providers[].hasApiKey 不许落盘');
+  // 正字段要照常写进去
+  assert.equal(onDisk.api.baseUrl, 'https://api.openai.com/v1');
+});
+
+test('⑫ F5：人物印象 / 异常日志两页的加载要有"只认最后一次"守卫（2026-10-04 P3）', async () => {
+  // 这两条加载路径在 ui/app.js 里，要复现"慢的旧响应盖掉新结果"必须并发两个请求；
+  // 而单独加载整个控制台会留下 1.5 秒自我续期的状态轮询（Node 定时器，window.close()
+  // 停不掉，见 test/ui-preserve-editable.test.mjs 头注）—— 所以这里用源码锚点断言，
+  // 强度弱于行为用例，如实标注：它能咬住"删掉守卫"，但证明不了竞态真的被挡住。
+  const fs = await import('node:fs');
+  const app = fs.readFileSync('ui/app.js', 'utf8');
+  const state = fs.readFileSync('ui/core/state.js', 'utf8');
+  assert.match(state, /state\.identityLoadToken\s*=\s*0/, 'state 上要有 identityLoadToken');
+  assert.match(state, /state\.incidentLoadToken\s*=\s*0/, 'state 上要有 incidentLoadToken');
+  for (const [fn, token] of [['loadIdentityFeaturePage', 'identityLoadToken'], ['loadIncidentFeaturePage', 'incidentLoadToken']]) {
+    const start = app.indexOf(`async function ${fn}(`);
+    assert.ok(start >= 0, `ui/app.js 里找不到 ${fn}`);
+    // 窗口给足余量：identity 侧的守卫在 ~757 字符处，900 的窗口余量只剩 ~140，
+    // 以后在函数头加长注释就会把守卫挤出窗口、断言假红（2026-10-04 复审 P3）
+    const body = app.slice(start, start + 1300);
+    assert.ok(body.includes(`++state.${token}`), `${fn} 每次加载要递增自己的序号`);
+    assert.ok(body.includes(`if (token !== state.${token}) return;`),
+      `${fn} 必须丢弃过期结果（只认最后一次）`);
+    const catchAt = body.indexOf('catch (error) {');
+    assert.ok(catchAt >= 0 && body.slice(catchAt).includes(`if (token !== state.${token}) return;`),
+      `${fn} 的 catch 分支也要过同一道守卫（过期失败不许盖掉新结果）`);
+  }
+});
+
+// ── 第三轮复审：F9（我引入的回归）+ F7 补漏 + F3 语义副作用 + F8 ──
+
+test('⑬ F9：extraBody 里的自定义请求头要扛过「打开设置页 → 原样保存」（2026-10-04 P2）', async (t) => {
+  // F6 把对象形态的密钥字段换成 hasXxx 之后，脱敏视图里就只剩 {hasAuthorization:true}；
+  // 文本域原样回填 + 保存时原样 __replace__ 提交 → 用户的真配置被覆盖掉，还多一个
+  // hasAuthorization 进请求体。这是修 F6 时引入的回归。
+  const { request, disk } = await withConsole(t, (cfg) => {
+    cfg.api = {
+      ...cfg.api, baseUrl: 'https://api.example/v1',
+      extraBody: { normal: 'ok', authorization: { scheme: 'Bearer', value: 'sk-AUTH-REAL' } }
+    };
+  });
+  // 界面看到的（脱敏视图）
+  const view = (await request('/api/config')).body;
+  assert.equal('authorization' in view.api.extraBody, false, '前提：视图里没有明文');
+  assert.equal(view.api.extraBody.hasAuthorization, true, '前提：视图里是 hasAuthorization 占位');
+
+  // 用户什么都不改，直接保存（文本域原样回传）
+  const echoed = JSON.parse(JSON.stringify(view.api.extraBody));
+  assert.equal((await request('/api/config', {
+    method: 'POST', body: { api: { baseUrl: 'https://api.example/v1', extraBody: { __replace__: echoed } } }
+  })).status, 200);
+  assert.deepEqual(disk().api.extraBody, { normal: 'ok', authorization: { scheme: 'Bearer', value: 'sk-AUTH-REAL' } },
+    '原样保存不许吃掉真配置（F9 的落点）');
+  assert.equal('hasAuthorization' in disk().api.extraBody, false, '也不许把 hasAuthorization 写进请求体');
+
+  // 用户真要改 → 照常生效（别把守卫做成"永远不接受 extraBody"）
+  await request('/api/config', {
+    method: 'POST', body: { api: { baseUrl: 'https://api.example/v1', extraBody: { __replace__: { reasoning: { enabled: false } } } } }
+  });
+  assert.deepEqual(disk().api.extraBody, { reasoning: { enabled: false } }, '用户真改的内容要生效');
+  // 用户真要清空 → 生效（配错一个会让所有请求 400 的逃生口必须能从界面清掉）
+  await request('/api/config', {
+    method: 'POST', body: { api: { baseUrl: 'https://api.example/v1', extraBody: { __replace__: {} } } }
+  });
+  assert.deepEqual(disk().api.extraBody, {}, '清空要生效');
+});
+
+test('⑭ F7 补漏：onebot 的 has* 派生位也不许落盘（2026-10-04 P3）', async (t) => {
+  const { request, disk } = await withConsole(t, (cfg) => {
+    cfg.onebot = { ...cfg.onebot, accessToken: 'ONEBOT-TOKEN', httpAccessToken: 'HTTP-TOKEN' };
+  });
+  const view = (await request('/api/config')).body;
+  assert.equal((await request('/api/config', {
+    method: 'POST',
+    body: { onebot: { ...view.onebot, hasAccessToken: true, hasHttpAccessToken: true } }
+  })).status, 200);
+  assert.equal('hasAccessToken' in (disk().onebot || {}), false, 'onebot.hasAccessToken 不许落盘');
+  assert.equal('hasHttpAccessToken' in (disk().onebot || {}), false, 'onebot.hasHttpAccessToken 不许落盘');
+  assert.equal(disk().onebot.accessToken, 'ONEBOT-TOKEN', '真令牌不受影响');
+});
+
+test('⑮ F3：providerKeys 是权威存储 —— 两份 Key 不同时既不丢也不被换掉', async () => {
+  // providerKeyValue 与 archiveInlineProviderKeys 必须同一套口径，否则会出现
+  // 「读取看这份、落盘写那份」：一次与 Key 无关的「加模型」就把实际发出的 Key 换掉。
+  // 2026-10-04 复审 P3：先做成「内联优先 + 归档以内联为准」，结果控制台刚写进去的
+  // 新 Key 被旧的内联值覆盖掉（丢数据）。正解是**目录优先**（providerKeys 是权威存储，
+  // providers[].apiKey 只是老配置残留），两边都不覆盖 —— 两份值都保住。
+  const { addModelsToProvider, currentProviders } = await import('../src/core/providers.js');
+  const { getConfig } = await import('../src/core/config.js');
+  // ⚠️ updateConfig 会**替换**内存里的配置对象：每次改完都要重新 getConfig()，
+  // 否则改到的是上一轮的过期对象（这个坑让本用例第一版假阴性）。
+  const live = () => getConfig();
+
+  // ① 只有内联那一份（老实例）：能用，且加模型后归档进目录，两份一致
+  const c1 = live();
+  c1.providers = [{ id: 'p1', name: 'x', baseURL: 'https://x.example/v1', models: ['m1'], apiKey: 'sk-ONLY-INLINE' }];
+  c1.providerKeys = {};
+  assert.equal(currentProviders()[0].apiKey, 'sk-ONLY-INLINE', '前提：只有内联时按内联兜底');
+  addModelsToProvider('p1', [{ id: 'm2', name: 'M2' }]);
+  assert.equal(live().providerKeys.p1, 'sk-ONLY-INLINE', '老实例的 Key 要归档进目录');
+  assert.equal(currentProviders()[0].apiKey, 'sk-ONLY-INLINE', '归档后发出的 Key 不变');
+
+  // ② 两份都在且不同：目录（控制台写的）为准，且**不许被内联那份覆盖**
+  const c2 = live();
+  c2.providers[0].apiKey = 'sk-OLD-INLINE';
+  c2.providerKeys.p1 = 'sk-NEW-CATALOG';
+  assert.equal(currentProviders()[0].apiKey, 'sk-NEW-CATALOG', '读取以目录为准（权威存储）');
+  addModelsToProvider('p1', [{ id: 'm3', name: 'M3' }]);
+  assert.equal(live().providerKeys.p1, 'sk-NEW-CATALOG',
+    '控制台刚写入的 Key 不能被旧的内联残留覆盖（这条曾被写成内联优先，于是丢数据）');
+  assert.equal(currentProviders()[0].apiKey, 'sk-NEW-CATALOG', '加模型之后实际发出的 Key 也不变');
+});
+
+test('⑰ G1：目录里是掩码时，不能把内联真值归档丢掉（2026-10-04 复审 P3）', async () => {
+  // 读取侧把 '******' 当"没有"（回退内联），归档侧若当成"已有"就跳过 → 重建时内联被剥掉，
+  // 目录只剩掩码、读取又当它不存在 → 真 Key 彻底消失。两边口径必须一致。
+  const { addModelsToProvider, currentProviders, setProviderKey, upsertProvider } = await import('../src/core/providers.js');
+  const { getConfig } = await import('../src/core/config.js');
+  const live = () => getConfig();
+
+  const c1 = live();
+  c1.providers = [{ id: 'p1', name: 'x', baseURL: 'https://x.example/v1', models: ['m1'], apiKey: 'sk-INLINE-REAL' }];
+  c1.providerKeys = { p1: '******' };               // 目录里是掩码（老界面回传过掩码就会这样）
+  assert.equal(currentProviders()[0].apiKey, 'sk-INLINE-REAL', '前提：掩码当没有，回退内联真值');
+
+  addModelsToProvider('p1', [{ id: 'm2', name: 'M2' }]);
+  assert.equal(live().providerKeys.p1, 'sk-INLINE-REAL', '归档要把真值写进目录（掩码不算"已有"）');
+  assert.equal(currentProviders()[0].apiKey, 'sk-INLINE-REAL', '加模型之后那把 Key 仍然可用');
+
+  // 入口也要堵：掩码 = "没改这一项"，不该被当成新 Key 写进存储
+  const before = JSON.stringify(live().providerKeys);
+  setProviderKey('p1', '******');
+  assert.equal(JSON.stringify(live().providerKeys), before, 'setProviderKey 不接受掩码（掩码=保持原值）');
+  assert.equal(currentProviders()[0].apiKey, 'sk-INLINE-REAL', '传掩码不会把 Key 清掉');
+
+  // upsertProvider 同样不许把掩码当成新 Key 写进存储
+  upsertProvider({ baseUrl: 'https://x.example/v1', apiKey: '******', models: [] });
+  assert.equal(live().providerKeys.p1, 'sk-INLINE-REAL', 'upsertProvider 也不接受掩码');
+  assert.equal(currentProviders()[0].apiKey, 'sk-INLINE-REAL', '传掩码后那把 Key 仍然可用');
+
+  // 新建分支同样不许把掩码当成新 Key（此前只挡了既有分支）
+  const created = upsertProvider({ baseUrl: 'https://brand-new.example.com/v1', apiKey: '******', models: [{ id: 'm1', name: 'M' }] });
+  const newId = created.provider.id;
+  assert.notEqual(live().providerKeys[newId], '******', '新建分支也不接受掩码');
+  assert.equal(created.provider.apiKey, '', '新建时传掩码 = 这个新提供商没填 Key');
+});
+
+// ── 全面复审：预算/运行时与出站/工具（2026-10-04 两条独立深挖路线的发现）──
+
+test('⑱ A2/A1：预算闸门不按 manual 豁免 paced；block 下兜底回收不再反复排唤醒', async () => {
+  // ⚠️ 这是**源码锚点**断言，强度弱于行为用例：要让 wake() 真的走到预算闸门，得把
+  // Orchestrator 的 store/sessions/sender/runAgent 全套接上，第一版行为用例就是这么
+  // 空过的（wake 在更早处就 return 了）。锚点能咬住「把修复改回去」，但证明不了
+  // 预算超限时确实不会调模型 —— 那部分靠人工/线上核对。
+  const src = fs.readFileSync('src/core/orchestrator.js', 'utf8');
+  assert.match(src, /const budgetExempt = manual && !paced;/,
+    'paced 不是人工：预算豁免必须区分两者');
+  const gates = [...src.matchAll(/budget\.onExceed === '(block|degrade)' && !(\w+)/g)];
+  assert.ok(gates.length >= 2, `前置条件：两道预算闸门，实际 ${gates.length}`);
+  for (const g of gates) {
+    assert.equal(g[2], 'budgetExempt', `预算闸门不能按 ${g[2]} 判（manual 会把 paced 一起豁免掉）`);
+  }
+  assert.match(src, /#budgetHardStop\(\)/, '要有「今天别再花钱」的判据');
+  // block/degrade 都要挡：恢复循环与 drainBacklogAfterResume 现在逐会话走 #budgetWouldDrop
+  assert.ok((src.match(/this\.#budgetWouldDrop\(/g) || []).length >= 3,
+    '兜底回收、恢复后排期、提醒派发三处都要先判「这个唤醒会不会被闸门丢掉」');
+});
+test('⑲ B1：协议端明确拒绝与结果不确定，走两条不同的记账口径', async () => {
+  const { OneBotActionError } = await import('../src/onebot/onebot.js');
+  // ⚠️ 下面两条只验证「构造器会保留 outcome/retcode 字段」—— isDefinite 是用例内的
+  // 局部拷贝，不是生产实现；生产侧 definite 的计算若日后漂移，靠本用例末尾那条
+  // 源码字符串锚点兜住，这两条管不到它。
+  // 明确拒绝：带 outcome:'failed' 与 retcode —— 代码里判 definite 据此
+  const definite = new OneBotActionError('retcode=100', { action: 'send_qzone_msg', outcome: 'failed', retcode: 100 });
+  const isDefinite = (e) => e?.outcome === 'failed'
+    || (e?.retcode !== undefined && e?.retcode !== null && e?.retcode !== '');
+  assert.equal(isDefinite(definite), true, '前提：明确拒绝的错误能被判成 definite');
+
+  // 结果不确定（超时 / 无 tid）：两者皆无，必须留在 publish-unknown 那一侧
+  const uncertain = new Error('The operation was aborted due to timeout');
+  assert.equal(isDefinite(uncertain), false, '超时类不该被当成明确拒绝（否则该记的待核对被吞掉）');
+
+  // 记账口径本身（daily-moments 的 catch 分支）
+  const src = fs.readFileSync('src/features/daily-moments.js', 'utf8');
+  assert.ok(src.includes("record.status = definite ? 'failed' : 'publish-unknown';"),
+    '明确拒绝记 failed、不确定记 publish-unknown（B1 的落点）');
+});
+test('⑳ B3：内联兜底里 arguments 是 JSON 字符串时要解出来，不能整包丢成 {}', async () => {
+  const { parseInlineToolCalls } = await import('../src/tools/inline-tools.js');
+  // OpenAI 的 function.arguments 就是**字符串**形态
+  const asString = '<tool_call>' + JSON.stringify({ name: 'send_message', arguments: JSON.stringify({ content: '在吗' }) }) + '</tool_call>';
+  const fromString = parseInlineToolCalls(asString);
+  assert.equal(fromString.length, 1, '前提：解析出一条调用');
+  assert.equal(fromString[0].name, 'send_message');
+  assert.deepEqual(fromString[0].args, { content: '在吗' }, '字符串形态的参数不能整包丢掉');
+
+  // 对象形态照旧
+  const fromObject = parseInlineToolCalls('<tool_call>' + JSON.stringify({ name: 'send_message', arguments: { content: '在吗' } }) + '</tool_call>');
+  assert.deepEqual(fromObject[0].args, { content: '在吗' });
+  // 解不出来的字符串按空对象（而不是让整条调用崩掉）
+  const broken = parseInlineToolCalls('<tool_call>' + JSON.stringify({ name: 'send_message', arguments: '{not json' }) + '</tool_call>');
+  assert.deepEqual(broken[0].args, {}, '解不出的字符串按空对象');
+});
+test('㉑ B2：中止落在动作间隔等待里时，未执行的条目保持 unread（不记 unknown）', async () => {
+  const src = fs.readFileSync('src/features/qzone-interactions.js', 'utf8');
+  // 两处「间隔等待之后、标记 acting 之前」都必须复查一次 abort
+  const pauses = [...src.matchAll(/await this\.#pauseBetweenActions\(/g)];
+  assert.ok(pauses.length >= 2, `前置条件：至少两处间隔等待，实际 ${pauses.length}`);
+  let checked = 0;
+  for (const m of pauses) {
+    const after = src.slice(m.index, m.index + 900);
+    if (/if \(signal\?\.aborted\)/.test(after)) checked += 1;
+  }
+  assert.equal(checked, pauses.length,
+    '每次动作间隔等待之后都要复查 abort —— 间隔是不感知 abort 的 setTimeout，中止正好落在那里时，'
+    + '下面那次调用根本没发出去却被 catch 记成 unknown（源码锚点断言，见下方说明）');
+});
+
+test('㉒ A4：resolveHeld 要连 never-acked 的 sent 行一起清（人工核对完不留残骸）', async () => {
+  // 源码锚点（同 A5/B4）：真跑一遍要构造完整 Store 与 sqlite 夹具，性价比不划算。
+  const src = fs.readFileSync('src/core/store.js', 'utf8');
+  const body = src.slice(src.indexOf('  resolveHeld(chatKey) {'), src.indexOf('  resolveHeld(chatKey) {') + 1400);
+  assert.match(body, /run_id=\? AND state IN \('sent','reconciled_sent','reconciled_failed'\)/,
+    "租约从未 ack 的 'sent' 行只剩这一条清理路径，不清就是人工点完核对还留一地残骸");
+  // ⚠️ 但必须按 run_id 限定在**已终止**的租约上：无差别按 chat_key 删会把正在运行租约的
+  // 在途证据一起删掉 —— 那次运行随后可重试收尾时 hasEffects=false，整批消息回队重跑（P1）。
+  assert.match(body, /state IN \('held','failed','acked'\)/,
+    '清理范围要限定在已终止租约');
+});
+test('㉓ A5：discard 也要清节流时间戳（否则那个 Map 只涨不消）', async () => {
+  const src = fs.readFileSync('src/core/sessions.js', 'utf8');
+  const body = src.slice(src.indexOf('  discard(id) {'), src.indexOf('  discard(id) {') + 700);
+  assert.ok(body.includes('this._lastPersistAt?.delete(id);'),
+    'discard 与 finish 同款：会话没了，节流时间戳也要跟着清（否则反复丢弃 waiting 会让 Map 无界）');
+});
+
+test('㉔ A3：整理写回前要并回「快照之后新增」的印象', async () => {
+  const src = fs.readFileSync('src/core/orchestrator.js', 'utf8');
+  assert.ok(src.includes('appendedDuring'), '整理期间新增的印象要被识别出来');
+  assert.ok(src.includes('replaceMember(chatKey, mem.userId, mem.name, merged)'),
+    '写回要用「并回之后」的列表，而不是模型那份整表覆盖');
+});
+
+test('㉕ B4：消息已送达后，记账失败不能改判成「发送失败」抛出去', async () => {
+  const src = fs.readFileSync('src/onebot/sender.js', 'utf8');
+  const at = src.indexOf('finishSend(id, { messageId: data?.message_id });');
+  assert.ok(at > 0, '前置条件：找到发送成功后的记账调用');
+  const window = src.slice(at, at + 700);
+  assert.ok(window.includes('catch (accountingError)'), '记账要单独兜住，不能落进外层的发送失败分支');
+  assert.ok(!/catch \(accountingError\)[\s\S]{0,300}throw accountingError/.test(window),
+    '兜住之后不能把记账错误再抛出去 —— 那会让模型以为没送达而重发');
+});
+
+test('㉖ B4 正解：送达后的记账（appendSelf + onSent）五条路径都要被单独兜住', async () => {
+  // 上一版只包了 #deliver 里的 finishSend，而复现点是 appendSelf / onSent ——
+  // 锚点认证了一个没覆盖复现路径的修复（2026-10-04 全面复审）。这里盯真正的落点。
+  const src = fs.readFileSync('src/onebot/sender.js', 'utf8');
+  assert.match(src, /#afterSent\(run\) \{/, '要有「送达后记账」的统一兜底');
+  const wrapped = (src.match(/this\.#afterSent\(\(\) => \{/g) || []).length;
+  assert.equal(wrapped, 5, `文本/贴纸/语音/拍一拍/表情五条发送路径都要包（实际 ${wrapped}）`);
+  // 每处包里必须真的同时含 appendSelf 与 onSent
+  // 每处包里必须真的同时含 appendSelf 与 onSent（按出现位置取窗口：花括号嵌套正则不可靠）
+  let from = 0;
+  for (let i = 0; i < wrapped; i += 1) {
+    const at = src.indexOf('this.#afterSent(() => {', from);
+    const win = src.slice(at, at + 700);
+    assert.ok(win.includes('appendSelf'), `第 ${i + 1} 处没含 appendSelf`);
+    assert.ok(win.includes('onSent'), `第 ${i + 1} 处没含 onSent`);
+    from = at + 1;
+  }
+  // 兜底里绝不能再把记账错误抛出去
+  const helper = src.slice(src.indexOf('#afterSent(run) {'), src.indexOf('#afterSent(run) {') + 420);
+  // 任意 throw 都算违规（正则别写窄成 \w*error —— 将来改名叫 err/e 就漏了）
+  assert.ok(!/throw\s/.test(helper), '兜住之后不能把记账错误再抛出去（那会让模型重发 → 重复消息）');
+});
+
+test('㉗ R1：feed 路径中止早退要把 acting 退回 unread（与 reply 路径同口径）', async () => {
+  const src = fs.readFileSync('src/features/qzone-interactions.js', 'utf8');
+  const feed = src.slice(src.indexOf('for (const action of plan.feedActions) {'));
+  // feed 循环把 status 置 'acting' 在**等待之前**，所以中止早退必须显式退回 unread；
+  // acting → unknown 的回收只在构造时那段恢复里，运行期无人回收 → 卡住既不重试也不上报。
+  const resets = (feed.match(/item\.status = 'unread';/g) || []).length;
+  assert.ok(resets >= 2, `feed 的两处等待后早退都要退回 unread（实际 ${resets}）`);
+});
+
+// ── 第十一轮（自查）：两路独立审查的发现 ──
+
+test('㉘ P1：feed 的 like_comment 组合动作，评论已成功后点赞中止不许退回 unread', async () => {
+  const src = fs.readFileSync('src/features/qzone-interactions.js', 'utf8');
+  // 点赞阶段的早退里必须有「评论已发过就不退回」的分支
+  const likeStart = src.indexOf("if (wantsLike && !item.post.isLiked) {");
+  const likeBody = src.slice(likeStart, likeStart + 1400);
+  assert.ok(likeBody.includes("item.commentStatus === 'done'"),
+    '点赞阶段中止要先看评论发没发过 —— like_comment 里评论已 done 时退回 unread，'
+    + '下轮会重新决策并重复评论（commentContent 还被抹掉）');
+  assert.ok(likeBody.includes("item.status = 'reviewed';"),
+    '评论已发过 → 置 reviewed 保住成果（点赞丢了就丢了，低价值不会重复）');
+});
+
+test('㉙ P1：resolveHeld 清 sent 行必须限定在已终止租约上（不碰在途租约的证据）', async () => {
+  const src = fs.readFileSync('src/core/store.js', 'utf8');
+  const body = src.slice(src.indexOf('  resolveHeld(chatKey) {'), src.indexOf('  resolveHeld(chatKey) {') + 1600);
+  // 不能再有「按 chat_key 无差别删 sent」的语句
+  assert.doesNotMatch(body, /chat_key=\? AND state IN \('sent'/,
+    '按 chat_key 无差别删 sent 会删掉在途租约的证据：该运行随后可重试收尾时 '
+    + 'hasEffects=false → 整批消息回 pending 重跑 → 群里重复发言');
+});
+
+test('㉚ P2：extraBody 提交里的 hasXxx 占位要回填成服务端真值（用户改了别的字段再保存）', async (t) => {
+  const { request, disk } = await withConsole(t, (cfg) => {
+    cfg.api = {
+      ...cfg.api, baseUrl: 'https://api.example/v1',
+      extraBody: { normal: 'ok', authorization: { scheme: 'Bearer', value: 'sk-AUTH-REAL' } }
+    };
+  });
+  const view = (await request('/api/config')).body;
+  assert.equal(view.api.extraBody.hasAuthorization, true, '前提：视图里是占位');
+  // 用户改了 normal 字段（提交内容 ≠ 脱敏形态 → 逐字守卫不删），占位仍留在提交里
+  const submitted = { normal: 'changed', hasAuthorization: true };
+  assert.equal((await request('/api/config', {
+    method: 'POST', body: { api: { baseUrl: 'https://api.example/v1', extraBody: { __replace__: submitted } } }
+  })).status, 200);
+  const after = disk().api.extraBody;
+  assert.deepEqual(after.authorization, { scheme: 'Bearer', value: 'sk-AUTH-REAL' },
+    '占位必须换回服务端真值（光靠"逐字相同→没改"守卫罩不住这个场景）');
+  assert.equal('hasAuthorization' in after, false, '占位不许落盘（会以最高优先级并进每次模型请求）');
+  assert.equal(after.normal, 'changed', '用户改的其它字段照常生效');
+});
+
+test('㉛ P2：extraBody 清空不受回填影响（用户真要清掉整段）', async (t) => {
+  const { request, disk } = await withConsole(t, (cfg) => {
+    cfg.api = { ...cfg.api, extraBody: { authorization: { value: 'sk-X' } } };
+  });
+  await request('/api/config', {
+    method: 'POST', body: { api: { baseUrl: 'x', extraBody: { __replace__: {} } } }
+  });
+  assert.deepEqual(disk().api.extraBody, {}, '清空要生效（回填只针对占位键，不针对空对象）');
+});
+
+test('㉜ P2：预算闸门不吞到点提醒（markFired 在派发后才跑，必须先在派发前挡住）', async () => {
+  const src = fs.readFileSync('src/core/orchestrator.js', 'utf8');
+  const at = src.indexOf("const dispatchable = !this.#wakeBlockedNow(chatKey)");
+  const win = src.slice(at, at + 400);
+  assert.ok(win.includes('#budgetWouldDrop'), '提醒派发预检要含预算判据（否则提醒被 markFired 后吞掉）');
+});
+
+test('㉝ P2：两个 load 函数的 catch 也要过 token 守卫（过期失败不许盖掉新结果）', async () => {
+  const src = fs.readFileSync('ui/app.js', 'utf8');
+  for (const [fn, token] of [['loadIdentityFeaturePage', 'identityLoadToken'], ['loadIncidentFeaturePage', 'incidentLoadToken']]) {
+    const start = src.indexOf(`async function ${fn}(`);
+    const body = src.slice(start, src.indexOf('\n}', start));
+    const catchAt = body.indexOf('catch (error) {');
+    assert.ok(catchAt >= 0, `${fn} 要有 catch 分支`);
+    assert.ok(body.slice(catchAt).includes(`if (token !== state.${token}) return;`),
+      `${fn} 的 catch 分支同样要判序号：重叠加载时旧请求在新的渲染成功之后才失败，`
+      + '「读取失败」会把后发的好结果整个盖掉');
+  }
+});
+
+test('㉞ P3：记忆整理要先给"期间新增的"留配额（否则整批并不进去还虚报日志）', async () => {
+  const src = fs.readFileSync('src/core/orchestrator.js', 'utf8');
+  assert.match(src, /const room = Math\.max\(0, maxKeep - appendedDuring\.length\);/,
+    'clean 之前已 slice 到 maxKeep，先满再并一条都进不去（2026-10-04 复审 P3）');
+  assert.match(src, /mergedCount \+= 1;/, '日志要按实际并回数打，不能按 appendedDuring.length 虚报');
+});

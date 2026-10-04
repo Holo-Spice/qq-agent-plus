@@ -139,3 +139,57 @@ test('force：用户自己触发的刷新不会被焦点守卫挡掉，焦点还
   assert.equal(doc.activeElement?.id, 'filter', '重画换掉了节点，焦点要还给同一个控件');
   window.close();
 });
+
+test('保留未保存输入**要能连续保多轮**：还原后不能把基线污染成用户值（2026-10-04 复审 P1）', { skip: SKIP }, async () => {
+  const window = loadDomUtil();
+  const doc = window.document;
+  const box = doc.createElement('div');
+  doc.body.appendChild(box);
+  // tick 每轮都变，否则 setHtmlIfChanged 按「HTML 没变」跳过，测不到重画
+  const html = (value, tick) => `<input id="cfg-num" type="number" value="${value}">`
+    + '<select id="cfg-sel"><option value="a">A</option><option value="b">B</option></select>'
+    + `<span id="live">${tick}</span>`;
+
+  window.setHtmlIfChanged(box, html('1', 't1'));
+  box.querySelector('#cfg-num').value = '42';     // 用户改了数字框
+  box.querySelector('#cfg-sel').value = 'b';      // 和下拉（好友管理页有二十多个这样的控件）
+
+  // 连续三轮「内容确实变了」的重画 —— 服务端值一直是 1/a
+  for (const tick of ['t2', 't3', 't4']) {
+    const changed = window.setHtmlIfChanged(box, html('1', tick));
+    assert.equal(changed, true, `${tick} 这一轮确实重画了`);
+  }
+  const num = box.querySelector('#cfg-num');
+  const sel = box.querySelector('#cfg-sel');
+  assert.equal(num.value, '42', '第三轮之后用户输入仍在（只保得住一轮 = 基线被污染）');
+  assert.equal(sel.value, 'b', '下拉选择同样要保住');
+  // 基线必须始终是「服务端渲染出来的值」，不是还原后的用户值
+  assert.equal(num.__renderedValue, '1', '__renderedValue 要记服务端值，不是还原后的用户值');
+  window.close();
+});
+test('同一容器里重复 id 的控件：重画后按出现序号配对、不串（2026-10-04 复审 F8）', { skip: SKIP }, async () => {
+  const window = loadDomUtil();
+  const doc = window.document;
+  const box = doc.createElement('div');
+  doc.body.appendChild(box);
+  // 两个同名 id 的输入框：还原必须一对一 —— 只按 id 配对会让第二个拿到第一个的值
+  const html = (a, b, tick) => `<input id="dup" type="text" value="${a}"><input id="dup" type="text" value="${b}">`
+    + `<span id="live">${tick}</span>`;
+  window.setHtmlIfChanged(box, html('1', '2', 't1'));
+  const inputs = box.querySelectorAll('#dup');
+  inputs[0].value = 'A';
+  inputs[1].value = 'B';
+
+  window.setHtmlIfChanged(box, html('1', '2', 't2'));
+  const after = box.querySelectorAll('#dup');
+  assert.equal(after[0].value, 'A', '第一个 dup 保住自己的输入');
+  assert.equal(after[1].value, 'B', '第二个 dup 保住自己的输入（不能串到 A）');
+  // 唯一 id 的控件不受影响（序号从 0 起，逐个配对）
+  const single = doc.createElement('div');
+  doc.body.appendChild(single);
+  window.setHtmlIfChanged(single, '<input id="only" type="text" value="1"><span id="live">t1</span>');
+  single.querySelector('#only').value = 'Z';
+  window.setHtmlIfChanged(single, '<input id="only" type="text" value="1"><span id="live">t2</span>');
+  assert.equal(single.querySelector('#only').value, 'Z', '唯一 id 的控件照旧保留输入');
+  window.close();
+});

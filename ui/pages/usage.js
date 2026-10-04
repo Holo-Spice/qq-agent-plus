@@ -239,7 +239,7 @@ function refreshModelPriceCard() {
       + '用下面的「给这个模型定价」填一条就行。';
   } else {
     const tag = eff.src === 'official' ? '厂商官方定价页直取' : '二手折算，仅供参考';
-    sourceTxt = `内置官方价格表已匹配到「${eff.matched || model}」（${tag}）。这是**估算**口径，不是你的账单；`
+    sourceTxt = `内置官方价格表已匹配到「${eff.matched || model}」（${tag}）。这是估算口径，不是你的账单；`
       + '要按实付价算，用下面的「给这个模型定价」。';
     if (eff.confidence === 'alias') {
       sourceTxt += `　按别名映射：${eff.via}。`;

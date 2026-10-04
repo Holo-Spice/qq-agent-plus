@@ -896,6 +896,8 @@ async function loadSettings() {
 async function loadIdentityFeaturePage(options = {}) {
   const box = $('#identity-page');
   if (!box) return;
+  // 竞态：连点两次筛选时，先发的请求后到会把后发的结果盖回去（2026-10-04 复审 P3）
+  const token = ++state.identityLoadToken;
   if (!box.__renderedHtml) box.innerHTML = '<div class="empty-hint">正在读取人物与旧印象…</div>';
   try {
     const query = encodeURIComponent(state.identityFeatureQuery || '');
@@ -906,12 +908,16 @@ async function loadIdentityFeaturePage(options = {}) {
       api(`/api/assets/memory?query=${query}`),
       api('/api/chats').catch(() => ({ chats: [] }))
     ]);
+    if (token !== state.identityLoadToken) return;
     if (state.tab !== 'identity') return;
     state.config = cfg;
     state.chats = chats.chats || state.chats;
     syncGraduatedFeatureNavigation(cfg);
     renderIdentityFeaturePage(status, identities, memories, options);
   } catch (error) {
+    // 序号守卫不能只护成功分支：重叠加载时**旧的那份**在新的已经渲染之后才失败，
+    // 不挡的话「读取失败」会把后发的好结果整个盖掉（2026-10-04 复审 P2）。
+    if (token !== state.identityLoadToken) return;
     setBoxError(box, `<div class="empty-hint">人物统一印象读取失败：${esc(error.message)}</div>`);
   }
 }
@@ -944,6 +950,8 @@ async function loadFriendFeaturePageImpl() {
 async function loadIncidentFeaturePage(options = {}) {
   const box = $('#incident-page');
   if (!box) return;
+  // 竞态：连点两次筛选时，先发的请求后到会把后发的结果盖回去（2026-10-04 复审 P3）
+  const token = ++state.incidentLoadToken;
   if (!box.__renderedHtml) box.innerHTML = '<div class="empty-hint">正在读取异常日志…</div>';
   try {
     const params = new URLSearchParams({ limit: '200' });
@@ -953,11 +961,13 @@ async function loadIncidentFeaturePage(options = {}) {
       api('/api/config'),
       api(`/api/incidents?${params}`)
     ]);
+    if (token !== state.incidentLoadToken) return;
     if (state.tab !== 'incidents') return;
     state.config = cfg;
     syncGraduatedFeatureNavigation(cfg);
     renderIncidentFeaturePage(cfg, data.status || {}, data.incidents || [], options);
   } catch (error) {
+    if (token !== state.incidentLoadToken) return;   // 同上：过期失败不许盖掉新结果
     setBoxError(box, `<div class="empty-hint">异常日志读取失败：${esc(error.message)}</div>`);
   }
 }

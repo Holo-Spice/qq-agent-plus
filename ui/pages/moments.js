@@ -265,10 +265,10 @@ function renderGroupGameSection(c) {
       <div class="field"><label for="cfg-game-recruit">开局报名时长（秒，0=不报名直接发牌）</label>
         <input type="number" id="cfg-game-recruit" min="0" max="300" value="${esc(c.groupGame?.recruitSeconds ?? 45)}" /></div>
     </div>
-    <div class="hint">需要私聊的游戏（谁是卧底/狼人杀）默认先**报名**：想玩的在群里发一句「我玩」或「报名」，
+    <div class="hint">需要私聊的游戏（谁是卧底/狼人杀）默认先<strong>报名</strong>：想玩的在群里发一句「我玩」或「报名」，
       够人数才发牌、发牌才发私聊——不会把只是在群里插话的围观者拉进局（把报名时长设 0 就回到"按最近发言者直接发牌"）。</div>
-    <div class="hint">白天讨论到点会自动进投票；中途**超过半数**存活玩家说一句「投吧 / 直接投」也会立刻开投
-      （说「投 3」这种带目标的算投票，不算想开投）。讨论时长与单回合超时**小于 30 秒按 30 秒生效**（0 = 用插件默认）。</div>
+    <div class="hint">白天讨论到点会自动进投票；中途<strong>超过半数</strong>存活玩家说一句「投吧 / 直接投」也会立刻开投
+      （说「投 3」这种带目标的算投票，不算想开投）。讨论时长与单回合超时<strong>小于 30 秒按 30 秒生效</strong>（0 = 用插件默认）。</div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-game-bomb" ${games.includes('number-bomb') ? 'checked' : ''} />
       <label for="cfg-game-bomb">允许「数字炸弹」</label></div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-game-undercover" ${games.includes('undercover') ? 'checked' : ''} />

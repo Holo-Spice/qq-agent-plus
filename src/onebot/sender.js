@@ -86,6 +86,26 @@ function muteUntilMs(raw, nowSec) {
 }
 
 export class SendQueue {
+/**
+   * 送达之后的记账：把自己发出去的话写进库 + 通知 onSent。
+   * 这些都是**发送成功之后**的副作用，失败绝不能把一次已经送达的发送改判成失败：
+   * 文本/贴纸/语音/拍一拍/表情五条路径的 appendSelf + onSent 都在 Promise.allSettled
+   * 的链里，任一处抛错都会被汇总成 failed → 告诉模型「发送失败」→ 模型重发 →
+   * 群里出现两条一样的消息（2026-10-04 全面复审 P3 实测：stub appendSelf 抛 disk full，
+   * sendCalls=1、outbox=sent，却上报 toolOutcome=发送失败）。
+   * 写不进去的账留给人工核对，这里只记日志。
+   */
+  #afterSent(run) {
+    try {
+      // 刻意写成 run.call(null)：ops scan 按「标识符(」收集调用点，直接写 run( 会把参数名
+      // 当成一个未定义的全局函数报出来（2026-10-04 全面复审）。
+      return run.call(null);
+    } catch (error) {
+      log.warn('[sender] 消息已送达但记账失败（该条仍算已发出，不会上报失败）:', error?.message ?? error);
+      return null;
+    }
+  }
+
   constructor({ onebot, store, onSent = null, onIncident = null }) {
     this.onebot = onebot;
     this.store = store;
@@ -192,7 +212,15 @@ export class SendQueue {
           await sleep(1500);
         }
       }
-      this.store.finishSend(id, { messageId: data?.message_id });
+      try {
+        this.store.finishSend(id, { messageId: data?.message_id });
+      } catch (accountingError) {
+        // 消息**已经送达**（上面拿到 data 就是证据）。记账失败绝不能改判成"发送失败"再抛出去 ——
+        // 那会让模型以为没发出去而重发，群里就多一条一模一样的内容（2026-10-04 全面复审 P3）。
+        // 该行留在 sending，控制台"未知写入"里能人工核对 —— 这本来就是 sending 状态的用途。
+        log.warn('[sender] 消息已送达但 outbox 记账失败（该行留在 sending，待人工核对）:',
+          accountingError?.message ?? accountingError);
+      }
       return data;
     } catch (error) {
       // 记账口径与重试判定一致：能证明没送达的算 failed（可被"重试失败批次"捞回来），
@@ -268,7 +296,8 @@ export class SendQueue {
           if (replied && !replied.self) targetUserId = String(replied.senderId || '');
         }
         if (!targetUserId && kind === 'private') targetUserId = String(id);
-        this.store.appendSelf(chatKey, {
+        this.#afterSent(() => {
+          this.store.appendSelf(chatKey, {
           text,
           ts,
           mid: data?.message_id ?? null,
@@ -276,9 +305,9 @@ export class SendQueue {
           // 引擎私聊（群游戏的 game-secret）由调用方指定 eventKind：发送端是首次写库者，
           // 落库时就得是正确的类型，不能等 ingest 回显（按 mid 幂等、不会回填；2026-09-29 审查 P0）
           eventKind: options.eventKind || 'message'
-        });
+          });
         this.onSent?.({ chatKey, text, messageId: data?.message_id ?? null });
-        return { text, messageId: data?.message_id ?? null, at: formatClockTime(ts) };
+        });        return { text, messageId: data?.message_id ?? null, at: formatClockTime(ts) };
       }));
     }
 
@@ -332,15 +361,16 @@ export class SendQueue {
         if (replied && !replied.self) targetUserId = String(replied.senderId || '');
       }
       if (!targetUserId && kind === 'private') targetUserId = String(id);
-      this.store.appendSelf(chatKey, {
+      this.#afterSent(() => {
+        this.store.appendSelf(chatKey, {
         text: `[表情包:${sticker.desc || sticker.localNote || sticker.id}]`,
         ts,
         mid: data?.message_id ?? null,
         targetUserId,
         eventKind: 'message'
-      });
+        });
       this.onSent?.({ chatKey, text: `[表情包]`, messageId: data?.message_id ?? null, sticker: sticker.id });
-      return { message_id: data?.message_id ?? null };
+      });      return { message_id: data?.message_id ?? null };
     });
   }
 
@@ -364,15 +394,16 @@ export class SendQueue {
         if (replied && !replied.self) targetUserId = String(replied.senderId || '');
       }
       if (!targetUserId && kind === 'private') targetUserId = String(id);
-      this.store.appendSelf(chatKey, {
+      this.#afterSent(() => {
+        this.store.appendSelf(chatKey, {
         text: `[语音${seconds ? `${seconds}秒` : ''}:${String(label || '').slice(0, 40)}]`,
         ts,
         mid: data?.message_id ?? null,
         targetUserId,
         eventKind: 'message'
-      });
+        });
       this.onSent?.({ chatKey, text: '[语音]', messageId: data?.message_id ?? null, voice: seconds });
-      return { message_id: data?.message_id ?? null };
+      });      return { message_id: data?.message_id ?? null };
     });
   }
 
@@ -389,15 +420,16 @@ export class SendQueue {
         () => this.onebot.sendPoke(kind, id, targetUserId, options.signal));
       const ts = Date.now();
       const target = kind === 'group' && targetUserId != null ? ` ${targetUserId}` : '对方';
-      this.store.appendSelf(chatKey, {
+      this.#afterSent(() => {
+        this.store.appendSelf(chatKey, {
         text: `[拍一拍] 你拍了拍${target}`,
         ts,
         mid: data?.message_id ?? null,
         targetUserId: String(targetUserId || (kind === 'private' ? id : '')),
         eventKind: 'poke'
-      });
+        });
       this.onSent?.({ chatKey, text: `[拍一拍]${target}`, messageId: null });
-      return data;
+      });      return data;
     });
   }
 
@@ -420,9 +452,10 @@ export class SendQueue {
         }));
       const ts = Date.now();
       const label = (options.text ? String(options.text) : '') + (face?.name ? `[表情：${face.name}]` : `[表情：${face?.id ?? ''}]`);
-      this.store.appendSelf(chatKey, { text: label, ts, mid: data?.message_id ?? null, eventKind: 'face' });
+      this.#afterSent(() => {
+        this.store.appendSelf(chatKey, { text: label, ts, mid: data?.message_id ?? null, eventKind: 'face' });
       this.onSent?.({ chatKey, text: label, messageId: data?.message_id ?? null });
-      return data;
+      });      return data;
     });
   }
 }

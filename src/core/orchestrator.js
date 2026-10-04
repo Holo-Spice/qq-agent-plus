@@ -457,8 +457,32 @@ export class Orchestrator {
    */
   drainBacklogAfterResume() {
     for (const chatKey of this.store.listChats()) {
-      if (this.store.unreadCount(chatKey) > 0) this.scheduleWake(chatKey, 0);
+      if (this.store.unreadCount(chatKey) <= 0) continue;
+      if (this.#budgetWouldDrop(chatKey)) continue;   // 同兜底回收：会丢的唤醒就不排
+      this.scheduleWake(chatKey, 0);
     }
+  }
+
+  /** 「今天别再花钱」是否生效（预算已超且策略是停止）。与 #wake 里的闸门同一判据。 */
+  #budgetHardStop() {
+    const b = budgetStatus(getConfig(), this.sessions?.todayUsage?.(todayKey()) || {});
+    return b.enabled && b.exceeded && b.onExceed === 'block';
+  }
+
+  /**
+   * 这次唤醒会不会被 #wake 里的预算闸门**直接丢掉**（而不是"稍后再来"）。
+   * 给"派发前预检"用：提醒这类派发完就 markFired 的路径，必须先在这里挡住 ——
+   * #wake 闸门只管"这轮不跑"，管不了"派发侧已经把提醒记成已触发"（那等于把
+   * 到点的提醒内容吞掉，2026-10-04 复审 P2）。
+   * block：一律会丢。degrade：群里当前未读里没有 @ 的会丢（闸门判的就是这个）。
+   */
+  #budgetWouldDrop(chatKey) {
+    const b = budgetStatus(getConfig(), this.sessions?.todayUsage?.(todayKey()) || {});
+    if (!b.enabled || !b.exceeded) return false;
+    if (b.onExceed === 'block') return true;
+    if (!String(chatKey).startsWith('group:')) return false;   // 私聊不受 degrade 影响
+    const pending = this.store.peekUnread(chatKey, 50) || [];
+    return !pending.some((m) => m?.mentionsSelf === true);
   }
 
   startRecoveryLoop() {
@@ -472,10 +496,19 @@ export class Orchestrator {
         this.store.recoverExpired();
         this.store.expireConversationThreads?.();
         if (this.paused || this.aborted) return;
+        // ⚠️ 「今天别再花钱」（onExceed=block）时**不能**继续给有未读的会话排唤醒：
+        // wake 会在预算闸门处直接 return，未读原地不动 → 下一个 tick 又排一次 ——
+        // 每 tick 新建并中止一个会话、当日 runs 计一次，永不停止（2026-10-04 全面复审 P2
+        // 实测：5 tick → 5 个会话文件、runs=5、模型调用 0；配合会话保留策略会挤掉真实历史）。
+        // ⚠️ degrade 同样会空转（只是没有模型调用与 runs 计数）：wake 走到 degrade 闸门 →
+        // 建好的等待会话被立刻丢弃 → 未读原地不动 → 下个 tick 再来。所以这里**逐会话**判
+        // 「这个唤醒会不会被预算闸门丢掉」，会丢的就不排（2026-10-04 复审 P2）。
         for (const key of this.store.listChats()) {
-          if (canRun(key) && !this.runningChats.has(key) && !this.pendingWake.has(key)
-            && this.#chatRuntimeDecision(key).allowed
-            && this.store.unreadCount(key) > 0) this.scheduleWake(key);
+          if (!canRun(key) || this.runningChats.has(key) || this.pendingWake.has(key)
+            || !this.#chatRuntimeDecision(key).allowed
+            || this.store.unreadCount(key) <= 0) continue;
+          if (this.#budgetWouldDrop(key)) continue;
+          this.scheduleWake(key);
         }
       } catch (error) {
         log.error('[recovery] 兜底回收这一轮出错（不影响下一轮）:', error?.message ?? error);
@@ -978,9 +1011,15 @@ export class Orchestrator {
     // 冷场开话题、模型自安排唤醒这些 proactive 唤醒照常整轮跑模型、照常花钱 ——
     // 管理员设 block 的意思就是"今天别再花钱"（2026-10-03 全量审查）。
     const budget = budgetStatus(getConfig(), this.sessions?.todayUsage?.(todayKey()) || {});
+    // ⚠️ **自主节奏唤醒（paced）不是人工**：#ensurePacedWake 用 manual:true 派发它，是为了绕开
+    // 唤醒侧的闸门（wakeBlockedNow / proactive 判定），但它**照样要花钱**。预算闸门若也按
+    // `!manual` 判，开了 pacing 的实例在 onExceed=block 之后照样每轮整跑模型，管理员设的
+    // 「今天别再花钱」形同虚设（2026-10-04 全面复审 P2 实测：block 与 degrade 下均有 12 次
+    // 模型调用）。真正人工触发的（控制台点一下）才豁免。
+    const budgetExempt = manual && !paced;
     if (budget.enabled && budget.exceeded) {
       if (budget.notify) this.#maybeNotifyBudgetExceeded(budget);
-      if (budget.onExceed === 'block' && !manual) {
+      if (budget.onExceed === 'block' && !budgetExempt) {
         const activeMode = String(getConfig().runtime?.mode || 'active') !== 'observe';
         // 只在"有新消息"这一路回话：主动唤醒没有人在等，插一句只会变成刷屏
         if (activeMode && !proactive) await this.#maybeSayBudgetExhausted(chatKey);
@@ -996,7 +1035,7 @@ export class Orchestrator {
       this.pendingRolls.delete(chatKey);
       const roll = pendingRoll && Date.now() - pendingRoll.at < 120000 ? pendingRoll.roll : undefined;
       // degrade 只拦"新消息触发"的这一路（主动唤醒不在这个分支里，上面的 block 已经先判过了）
-      if (budget.enabled && budget.exceeded && budget.onExceed === 'degrade' && !manual
+      if (budget.enabled && budget.exceeded && budget.onExceed === 'degrade' && !budgetExempt
         && String(chatKey).startsWith('group:')) {
         const mentioned = pendingEntries.some((entry) => entry?.mentionsSelf === true);
         if (!mentioned) {
@@ -2100,7 +2139,11 @@ export class Orchestrator {
       // 最后那条租约闸门对应 #wake 里 claimUnread 取不到租约的静默 return：
       // 硬崩溃（kill -9/OOM）会留下 runs.state='leased' 的残行，recoverExpired 最多 5 秒后回收。
       const dispatchable = !this.#wakeBlockedNow(chatKey)
-        && !this.store.hasLeasedRun(chatKey);
+        && !this.store.hasLeasedRun(chatKey)
+        // ⚠️ 预算闸门也要在派发**之前**判：下面 wake() 一发出就 markFired，而闸门会把
+        // 这次唤醒直接丢掉 —— 到点的提醒内容就永久丢了（block 全丢；degrade 丢群里
+        // 没 @ 的）。挡在这里提醒保持"到期"，明天预算重置后自然补发（2026-10-04 复审 P2）。
+        && !this.#budgetWouldDrop(chatKey);
       if (!dispatchable) continue;
       this.wake(chatKey, { manual: true, paced: true, wakeNote: note })
         .catch((error) => log.error('[reminder] 唤醒出错:', error?.message ?? error));
@@ -2554,7 +2597,34 @@ export class Orchestrator {
       .slice(0, maxKeep)
       .map((content) => safeSlice(content, 120));
 
-    return this.memory.replaceMember(chatKey, mem.userId, mem.name, clean);
+    // ⚠️ 整理期间的 `memory_append` 不能被这次写回整表覆盖（2026-10-04 全面复审 P2 实测：
+    // 快照是上面 await 之前取的，模型跑完这一分钟里新写进去的印象会被 replaceMember 静默抹掉）。
+    // 写回前重读一次当前值，把「快照里没有、现在有」的条目并回去；模型对已有条目的
+    // 增删改照旧生效（那正是整理要做的事），只补它看不见的那部分。
+    const snapshotTexts = new Set(existing.map((e) => String(e?.content ?? '').trim()));
+    const currentRow = (this.memory.members(chatKey) || [])
+      .find((m) => String(m?.userId || '') === String(mem.userId || ''));
+    const appendedDuring = (currentRow?.impressions || [])
+      .map((e) => String(e?.content ?? '').trim())
+      .filter((t) => t && !snapshotTexts.has(t));
+    // ⚠️ 先给"整理期间新增的"留出配额再截模型输出：clean 之前已经 slice 到 maxKeep，
+    // 若先满再并，一条都并不进去（break 直接触发），新增的印象还是会随整表替换被丢掉
+    //（2026-10-04 复审 P3：日志还按 appendedDuring.length 虚报"并回 N 条"）。
+    // 优先保留新增的、裁掉模型输出末尾的（越靠后越是模型排出来的低价值条目）。
+    const room = Math.max(0, maxKeep - appendedDuring.length);
+    const merged = [...clean.slice(0, room)];
+    let mergedCount = 0;
+    for (const text of appendedDuring) {
+      if (merged.length >= maxKeep) break;
+      if (merged.includes(text)) continue;
+      merged.push(safeSlice(text, 120));
+      mergedCount += 1;
+    }
+    if (mergedCount) {
+      log.info(`[memory] 整理 ${chatKey}/${mem.userId}：并回整理期间新增的 ${mergedCount} 条印象`);
+    }
+
+    return this.memory.replaceMember(chatKey, mem.userId, mem.name, merged);
   }
 
   /** 整理模式：合并/删减已有印象。 */

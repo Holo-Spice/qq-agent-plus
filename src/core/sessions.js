@@ -261,6 +261,11 @@ export class SessionRegistry {
     // 已运行过的不允许丢弃（会抹掉用量/成本记录，导致对不上账）
     if (s && s.status !== 'waiting') return false;
     this.current.delete(id);
+    // 与 finish() 同款：节流时间戳要随会话一起清（2026-10-04 全面复审 P3）。
+    // 丢弃不写文件、也不进 index，_lastPersistAt 就成了唯一没人回收的按会话键 ——
+    // 反复丢弃 waiting 会话（预算降级、时间窗、block 都会走这条路）就只涨不消
+    //（实测 50 次丢弃后 Map size = 50，无界）。
+    this._lastPersistAt?.delete(id);
     const before = this.index.length;
     this.index = this.index.filter((e) => e.id !== id);
     try {

@@ -206,6 +206,12 @@ state.chatMsgSortCache = { src: null, newestFirst: [] };
  */
 state.usageLoadToken = 0;          // 每次加载递增，用于丢弃过期结果
 
+// 人物印象页 / 异常日志页的同类竞态防护（2026-10-04 复审 P3）：这两页的加载路径原先只有
+// `state.tab !== …` 判断，挡不住**同一个页签内**的乱序 —— 用户连点两次筛选项时，先发的
+// 请求后到，会把后发的结果盖回去，界面显示的是上一次筛选的数据。口径与 usageLoadToken 一致。
+state.identityLoadToken = 0;
+state.incidentLoadToken = 0;
+
 state.usageLastData = null;        // 上一次加载成功的数据：{ range, stats, st, prices }
 
 // 整理中的计时刷新：让"已 Ns"持续走动，并在没有活跃任务时自动停掉。

@@ -244,7 +244,7 @@ function renderAsrSection(c) {
     <div class="checkbox-row"><input type="checkbox" id="cfg-img-enabled" ${c.imageGen?.enabled === true ? 'checked' : ''} />
       <label for="cfg-img-enabled">允许它画图（generate_image 工具；默认关）</label></div>
     <div class="hint">开启后群友说「画一张」时它会调服务商的生图接口生成图片、存进表情库再发出来。
-      这是**按张计费**的：每小时上限是唯一的闸门，模型也不会主动画（只在你让它画时）。</div>
+      这是<strong>按张计费</strong>的：每小时上限是唯一的闸门，模型也不会主动画（只在你让它画时）。</div>
     <div class="field"><label for="cfg-img-service">服务预设</label>
       <select id="cfg-img-service"><option value="">（加载中…）</option></select>
       <div class="hint" id="img-preset-hint"></div></div>

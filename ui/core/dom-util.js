@@ -185,11 +185,14 @@ function patchKeyedList(container, entries, keyAttr = 'data-key') {
 function captureEditableValues(root) {
   const values = new Map();
   if (!root?.querySelectorAll) return values;
+  const seen = new Map();     // id → 已出现几次：同容器内重复 id 时按出现序号配对，不串
   for (const node of root.querySelectorAll('input[id], select[id], textarea[id]')) {
     const box = node.type === 'checkbox' || node.type === 'radio';
     // __renderedValue = 上一轮**渲染出来**的值；与它不同才说明用户动过这个控件
     const current = box ? node.checked === true : String(node.value ?? '');
-    values.set(node.id, { box, current, rendered: node.__renderedValue });
+    const nth = seen.get(node.id) || 0;
+    seen.set(node.id, nth + 1);
+    values.set(`${node.id}|${nth}`, { box, current, rendered: node.__renderedValue });
   }
   return values;
 }
@@ -206,8 +209,11 @@ function restoreEditableValues(root, values) {
   // 不用 values.size 提前返回：**每个新控件都要记下这一轮渲染出来的值**（首轮容器是空的，
   // values 为空，但记录渲染值仍要做，否则第二次重画时无从判断"用户动过没有"）。
   if (!root?.querySelectorAll) return;
+  const seen = new Map();
   for (const node of root.querySelectorAll('input[id], select[id], textarea[id]')) {
-    const saved = values.get(node.id);
+    const nth = seen.get(node.id) || 0;
+    seen.set(node.id, nth + 1);
+    const saved = values.get(`${node.id}|${nth}`);
     const box = node.type === 'checkbox' || node.type === 'radio';
     const renderedNow = box ? node.checked === true : String(node.value ?? '');
     // 服务端这一轮有没有动这个值：动了就以服务端为准，不回填用户那份
@@ -220,7 +226,13 @@ function restoreEditableValues(root, values) {
         node.value = saved.current;
       }
     }
-    node.__renderedValue = box ? node.checked : String(node.value ?? '');
+    // ⚠️ 必须记 **renderedNow（这一轮 HTML 渲染出来的值）**，不能记还原后的 node.value
+    //（2026-10-04 复审 P1）。记成还原后的值等于把基线污染成"用户输入"：下一轮捕获时
+    // current === rendered，看起来用户没动过；而服务端这一轮又确实改了值（renderedNow ≠
+    // 基线）→ serverChanged 成立 → 不还原 → **未保存的输入在第二轮就被冲掉**。
+    // 也就是说"保留未保存输入"只保得住一轮。实测：render1=1 → 用户改 42 → render2 保住 42
+    // 但基线被写成 42 → render3 直接回到 1。
+    node.__renderedValue = renderedNow;
   }
 }
 

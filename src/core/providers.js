@@ -11,7 +11,11 @@ export function currentProviders() {
 
 /** 给指定提供商设置 API Key（密钥与公开目录元数据分开存储）。 */
 export function setProviderKey(providerId, apiKey) {
+  // 掩码 = "没改这一项"，不是"把 Key 设成 ******"。不挡的话掩码会落进 providerKeys，
+  // 读取侧当它不存在（回退内联）、归档侧当它存在（跳过）—— 两边口径一反就丢 Key
+  //（2026-10-04 复审 P3）。官方界面提交前会过滤，这里从入口也堵一道。
   const key = String(apiKey ?? '').trim();
+  if (key === '******') return currentProviders().find((p) => p.id === providerId) || null;
   const keys = { ...(getConfig().providerKeys || {}) };
   if (key) keys[providerId] = key;
   else delete keys[providerId];
@@ -52,12 +56,17 @@ function normalizeModelInput(models) {
 }
 
 /** 从当前配置里取 provider.apiKey 对应的真实值（含旧版 top-level key 回退）。 */
-function providerKeyValue(provider, cfg) {
+function providerKeyValue(provider, cfg = getConfig()) {
   if (provider && typeof provider === 'object') {
-    const top = String(provider.apiKey ?? '').trim();
-    if (top && top !== '******') return top;
+    // ⚠️ **目录优先**（2026-10-04 复审 P3 修正）：`providerKeys` 是权威存储 —— 控制台的
+    // 「设置 Key」和 upsert 都写它，providers[] 里按约定不留明文；`providers[].apiKey` 只是
+    // 老配置的残留。原来是内联优先，于是"控制台刚写进去的新 Key"会被一份更旧的内联值盖掉，
+    // 而一次与 Key 无关的「加模型」就会静默换掉实际发出的那把。
+    // 目录没有才回退内联（老实例只有内联那一份，不能因此失效）。
     const catalogKey = String(cfg?.providerKeys?.[provider.id] ?? '').trim();
     if (catalogKey && catalogKey !== '******') return catalogKey;
+    const top = String(provider.apiKey ?? '').trim();
+    if (top && top !== '******') return top;
   }
   return '';
 }
@@ -66,6 +75,38 @@ function providerKeyValue(provider, cfg) {
 function withResolvedKey(p, cfg = getConfig()) {
   const real = providerKeyValue(p, cfg);
   return { ...p, apiKey: real };
+}
+
+/**
+ * 重建 providers 列表之前，先把**内联**在 `providers[].apiKey` 里的旧式 Key 归档进
+ * `providerKeys`。下面几处（加模型 / 删模型 / upsert / 探测落盘）都要重建整份列表，
+ * 而 deepMerge 对数组是**整体替换**，所以重建时必须把 apiKey 剥掉（providers[] 里不留明文）；
+ * 但剥之前不归档的话，老配置（Key 直接写在 providers[] 里）一次「加/删模型」就**永久丢失** ——
+ * 实测：装完运行期解析得到 Key，加一次模型之后变成空串，控制台也没处找回来（2026-10-04 复审 P2）。
+ *
+ * 目录里已有**真值**就不覆盖（那一份是控制台/upsert 写的，比内联残留新；覆盖等于吃掉用户
+ * 刚存进去的 Key）。与 providerKeyValue 的「目录优先」是同一套口径。
+ * ⚠️ `******`（掩码）算**没有**，必须与 providerKeyValue 一致（2026-10-04 复审 P3）：
+ * 两边口径反了会丢 Key —— 目录里是掩码时读取会回退内联（还能用），而归档却因"目录非空"
+ * 跳过；随后重建把内联剥掉，目录只剩掩码、读取又当它不存在 → 真值彻底消失。
+ * 返回是否需要写回。
+ *
+ * 注：两份都在时**内联那份会在重建时被丢掉**（成了死数据，不再被使用）——能保住的是目录那份。
+ */
+function archiveInlineProviderKeys(providers) {
+  const keys = { ...(getConfig().providerKeys || {}) };
+  let changed = false;
+  for (const p of providers || []) {
+    const id = String(p?.id || '').trim();
+    const inline = String(p?.apiKey ?? '').trim();
+    if (!id || !inline || inline === '******') continue;
+    const existing = String(keys[id] ?? '').trim();
+    if (existing && existing !== '******') continue;   // 目录那份已是真值，不覆盖
+    keys[id] = inline;
+    changed = true;
+  }
+  if (changed) updateConfig({ providerKeys: keys });
+  return changed;
 }
 
 /** OpenCode Go 路由头：omen alpha 等模型缺 x-opencode-session 直接 400。
@@ -270,7 +311,9 @@ function saveProbe(provider, result, probedBase = '') {
       && provider.baseURL && probedBase
       && hostOf(provider.baseURL) === hostOf(probedBase));
     if (sameHost) {
-      const providers = currentProviders().map((x) => {
+      const resolved = currentProviders();
+      archiveInlineProviderKeys(resolved);   // 先归档内联 Key，再重建（否则剥掉即丢失）
+      const providers = resolved.map((x) => {
         const { apiKey: _ak, ...rest } = x;
         return rest;
       });
@@ -305,7 +348,13 @@ export function upsertProvider({ baseUrl, apiKey, models = [], preset = '' }) {
   const base = normalizeBaseUrl(baseUrl);
   if (!base) throw new Error('Base URL 不能为空');
   const presetId = String(preset || '').trim().toLowerCase();
-  const providers = currentProviders().map((p) => { const { apiKey: _ak, ...rest } = p; return { ...rest, models: [...(p.models || [])] }; });
+  // 掩码 = "没改这一项"，在**入口归一一次**，下面两个分支都只看它 ——
+  // 此前只有"既有"分支判了掩码，"新建"分支照样把 '******' 当新 Key 写进 providerKeys
+  //（2026-10-04 复审 P3）。入口收一次，比在每个分支各写一遍判据更不容易再漏。
+  const submittedKey = String(apiKey ?? '').trim() === '******' ? '' : String(apiKey ?? '').trim();
+  const resolved = currentProviders();
+  archiveInlineProviderKeys(resolved);   // 内联 Key 先归档，再重建列表
+  const providers = resolved.map((p) => { const { apiKey: _ak, ...rest } = p; return { ...rest, models: [...(p.models || [])] }; });
   const existing = providers.find((p) => normalizeBaseUrl(p.baseURL) === base);
   const entries = normalizeModelInput(models);
   if (existing) {
@@ -317,9 +366,9 @@ export function upsertProvider({ baseUrl, apiKey, models = [], preset = '' }) {
     existing.modelNames = { ...(existing.modelNames || {}) };
     for (const m of entries) existing.modelNames[m.id] = m.name;
     if (presetId && existing.preset !== presetId) existing.preset = presetId;
-    if (apiKey) {
+    if (submittedKey) {
       const keys = { ...(getConfig().providerKeys || {}) };
-      keys[existing.id] = String(apiKey).trim();
+      keys[existing.id] = submittedKey;
       updateConfig({ providers, providerKeys: keys });
     } else {
       updateConfig({ providers });
@@ -336,7 +385,7 @@ export function upsertProvider({ baseUrl, apiKey, models = [], preset = '' }) {
     anthropicOrigin: false,
     baseURL: base,
     apiKey: '',
-    apiKeyFrom: apiKey ? 'manual' : '',
+    apiKeyFrom: submittedKey ? 'manual' : '',
     models: entries.map((m) => m.id),
     modelNames,
     needsBaseUrl: false,
@@ -344,7 +393,7 @@ export function upsertProvider({ baseUrl, apiKey, models = [], preset = '' }) {
   };
   providers.push(provider);
   const keys = { ...(getConfig().providerKeys || {}) };
-  if (apiKey) keys[id] = String(apiKey).trim();
+  if (submittedKey) keys[id] = submittedKey;
   // 新建的提供商自动切换为当前模型（控制台"确认添加"的文案一直这么承诺，
   // 此前却只建目录不切换 —— 用户添加完看到「尚未选择模型」+ 空的模型目录框）。
   // api.baseUrl 一并同步：控制台地址框回显与思考设置的归属键都读它，不同步会出现
@@ -368,6 +417,7 @@ export function addModelsToProvider(providerId, models = []) {
     if (!p.models.includes(m.id)) p.models.push(m.id);
     p.modelNames[m.id] = m.name;
   }
+  archiveInlineProviderKeys(providers);   // 内联 Key 先归档，别被下面的重建剥掉
   updateConfig({ providers: providers.map((x) => { const { apiKey, ...rest } = x; return rest; }) });
   return p;
 }
@@ -379,9 +429,11 @@ export function removeModelFromProvider(providerId, modelId) {
   if (!p) return null;
   p.models = p.models.filter((id) => id !== modelId);
   if (p.modelNames) {
-    p.modelNames = { ...p.modelNames };
-    delete p.modelNames[modelId];
+    const modelNames = { ...p.modelNames };
+    delete modelNames[modelId];
+    p.modelNames = modelNames;
   }
+  archiveInlineProviderKeys(providers);   // 内联 Key 先归档，别被下面的重建剥掉
   updateConfig({ providers: providers.map((x) => { const { apiKey, ...rest } = x; return rest; }) });
   return p;
 }

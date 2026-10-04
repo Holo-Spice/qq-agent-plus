@@ -13,7 +13,16 @@ function parseInlineBlock(block) {
     try {
       const obj = JSON.parse(jsonMatch[0]);
       const name = obj.name || obj.function || obj.tool;
-      const args = obj.arguments || obj.parameters || obj.args || obj.input || {};
+      const rawArgs = obj.arguments || obj.parameters || obj.args || obj.input || {};
+      // ⚠️ `arguments` 经常是 **JSON 字符串**（OpenAI 的 function.arguments 就是这个形态）：
+      // 原来按「非对象 → {}」一判就整包丢掉，工具拿到空参数，消息根本没发出去
+      //（2026-10-04 全面复审 P3）。先试着解一次字符串，解不出再按空对象。
+      let args = rawArgs;
+      if (typeof rawArgs === 'string') {
+        const text = rawArgs.trim();
+        if (!text) args = {};
+        else { try { args = JSON.parse(text); } catch { args = {}; } }
+      }
       if (name) return { name: String(name), args: (args && typeof args === 'object' && !Array.isArray(args)) ? args : {} };
     } catch { /* 不是 JSON，继续按 XML 解析 */ }
   }

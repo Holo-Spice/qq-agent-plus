@@ -1028,6 +1028,12 @@ export class QzoneInteractionManager {
         continue;
       }
       await this.#pauseBetweenActions(cfg, writes++);
+      // ⚠️ 动作间隔是一次**不感知 abort 的 setTimeout**：中止正好落在这一步时，循环头那次
+      // 检查已经过去了。下面 replyComment 带着已中止的 signal 会立刻抛错，被 catch 里的
+      // `signal.aborted` 分支记成 unknown —— 而这条**根本没发出去**，本该保持 unread 留给
+      // 下个窗口重试（与 docs/QZONE_INTERACTIONS.md 的不变量、以及本文件「写入前中止」
+      // 那条用例直接矛盾）。所以等待**之后**必须再查一次（2026-10-04 全面复审 P2）。
+      if (signal?.aborted) break;
       item.status = 'acting';
       item.replyContent = action.content;
       this.#save();
@@ -1087,6 +1093,20 @@ export class QzoneInteractionManager {
       this.#save();
       if (wantsComment) {
         await this.#pauseBetweenActions(cfg, writes++);
+        // 同 reply 循环：间隔等待不感知 abort，这里必须再查一次，否则"根本没发出去"
+        // 的评论会被下面的 catch 记成 unknown（2026-10-04 全面复审 P2）。
+        if (signal?.aborted) {
+          // ⚠️ 本循环把 status 置 'acting' 在**等待之前**（reply 循环是在之后），
+          // 所以中止早退时条目会卡在 acting —— 而 acting → unknown 的回收只发生在
+          // **构造时**的恢复里（load 之后那段），运行期没人回收它：既不重试也不上报。
+          // 2026-10-04 全面复审 P3 实测：111:k1:acting / run=done，两条路径语义不一致。
+          // 这里退回 unread：本次根本没发出去，留给下个活跃窗口，与 reply 路径同口径。
+          item.status = 'unread';
+          item.commentContent = '';
+          item.updatedAt = this.now();
+          this.#save();
+          break;
+        }
         try {
           const result = await this.onebot.call('comment_qzone', {
             tid: item.post.tid,
@@ -1119,6 +1139,27 @@ export class QzoneInteractionManager {
       }
       if (wantsLike && !item.post.isLiked) {
         await this.#pauseBetweenActions(cfg, writes++);
+        // 同上：间隔等待不感知 abort，这里必须再查一次（2026-10-04 全面复审 P2）
+        if (signal?.aborted) {
+          // ⚠️ 本循环把 status 置 'acting' 在**等待之前**（reply 循环是在之后），
+          // 所以中止早退时条目会卡在 acting —— 而 acting → unknown 的回收只发生在
+          // **构造时**的恢复里（load 之后那段），运行期没人回收它：既不重试也不上报。
+          // 2026-10-04 全面复审 P3 实测：111:k1:acting / run=done，两条路径语义不一致。
+          //
+          // ⚠️⚠️ 但只有「评论还没发过」才允许退回 unread：like_comment 组合动作里评论阶段
+          // 可能**已经成功**（commentStatus='done'，评论真实发出去了），这时退回 unread 会让
+          // 下轮按 unread 重新决策 —— 模型看不到自己已评论过（commentContent 还被抹了），
+          // 大概率再评一次，正是下面 1122 行注释自己划的红线（2026-10-04 复审 P1）。
+          if (item.commentStatus === 'done') {
+            item.status = 'reviewed';   // 保住评论成果；点赞这一下丢了就算了（低价值、不会重复）
+          } else {
+            item.status = 'unread';     // 本次确实什么都没发出去 → 留给下个活跃窗口
+            item.commentContent = '';
+          }
+          item.updatedAt = this.now();
+          this.#save();
+          break;
+        }
         try {
           await this.onebot.call('like_qzone', {
             tid: item.post.tid,

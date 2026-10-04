@@ -799,7 +799,14 @@ export class DailyMomentsManager {
       this.#saveRecord(record);
       return { ok: true, record };
     } catch (error) {
-      record.status = 'publish-unknown';
+      // ⚠️ 只有**结果不确定**的失败才记 publish-unknown（超时 / 无 tid / 发送中重启 ——
+      // 见 docs/DAILY_MOMENTS.md 那张表）。协议端**明确拒绝**（OneBotActionError 带
+      // outcome:'failed' 与 retcode，如 retcode=100）是有确定答复的：这条根本没发出去，
+      // 记成待核对会让 unresolved 挡住**所有**后续时段，直到人工去点 resolveRecord()
+      //（2026-10-04 全面复审 P2：一个明确的拒绝就能把整条排期卡死）。
+      const definite = error?.outcome === 'failed'
+        || (error?.retcode !== undefined && error?.retcode !== null && error?.retcode !== '');
+      record.status = definite ? 'failed' : 'publish-unknown';
       record.error = cleanText(error?.message ?? error, 1000);
       record.endedAt = this.now();
       this.#saveRecord(record);

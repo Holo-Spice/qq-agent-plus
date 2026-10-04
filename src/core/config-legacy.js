@@ -761,7 +761,7 @@ export function asrCredentialSlot(provider, baseUrl) {
  */
 export function asrCredentialFor(asr, kind, provider, baseUrl) {
   const slot = asrCredentialSlot(provider, baseUrl);
-  const fromMap = String(asr?.keys?.[slot]?.[kind] || '').trim();
+  const fromMap = String(credentialSlotEntry(asr?.keys, slot)?.[kind] || '').trim();
   if (fromMap) return fromMap;
   const providerField = kind === 'apiKey' ? 'apiKeyProvider' : `${kind}Provider`;
   const hostField = kind === 'apiKey' ? 'apiKeyHost' : '';
@@ -789,7 +789,7 @@ export function asrCredentialResolve(asr, kind, provider, baseUrl) {
   if (stored && pin && asrCredentialApplies({ ...(asr || {}), baseUrl }, provider, stored, providerField, hostField)) {
     return { value: stored, owned: true };
   }
-  const fromMap = String(asr?.keys?.[slot]?.[kind] || '').trim();
+  const fromMap = String(credentialSlotEntry(asr?.keys, slot)?.[kind] || '').trim();
   if (fromMap) return { value: fromMap, owned: true };
   if (stored && !pin) return { value: stored, owned: false };
   return { value: '', owned: false };
@@ -809,13 +809,25 @@ export function asrCredentialForSlot(asr, kind, slot) {
   const baseUrl = host ? `https://${host}` : '';
   const providerField = kind === 'apiKey' ? 'apiKeyProvider' : `${kind}Provider`;
   const hostField = kind === 'apiKey' ? 'apiKeyHost' : '';
-  const fromMap = String(asr?.keys?.[s]?.[kind] || '').trim();
+  const fromMap = String(credentialSlotEntry(asr?.keys, s)?.[kind] || '').trim();
   if (fromMap) return { value: fromMap, owned: true };
   const stored = String(asr?.[kind] || '').trim();
   const pin = String(asr?.[providerField] || '').trim().toLowerCase();
   if (!stored || !pin) return { value: '', owned: false };
   return asrCredentialApplies({ ...(asr || {}), baseUrl }, provider, stored, providerField, hostField)
     ? { value: stored, owned: true } : { value: '', owned: false };
+}
+
+/**
+ * 按槽位名取条目，**只认自有属性**。槽位名来自 asr.provider / 地址主机，是外部可控的：
+ * `keys['constructor']` 会取到 Object.prototype.constructor（一个函数），`keys['__proto__']`
+ * 会取到原型对象 —— 既可能把函数源码当成"存过的凭据"，也可能让下游按数组处理时直接抛错
+ * （2026-10-04 复审 P2 实测）。与 ttsKeyFor / imageGenKeyResolveCore 同一口径。
+ */
+function credentialSlotEntry(keys, slot) {
+  if (!keys || typeof keys !== 'object' || !Object.hasOwn(keys, slot)) return null;
+  const entry = keys[slot];
+  return entry && typeof entry === 'object' && !Array.isArray(entry) ? entry : null;
 }
 
 /**
@@ -827,7 +839,13 @@ export function asrKeySlots(asr) {
   const push = (slot, kind, value) => {
     const s = String(slot || '').trim().toLowerCase();
     if (!s || !String(value || '').trim()) return;
-    const list = out[s] || (out[s] = []);
+    // ⚠️ 必须用自有属性判定：`out` 是普通对象，`out['constructor']` 会取到
+    // Object.prototype.constructor（一个函数），接着 `list.includes` 报
+    // "list.includes is not a function"，整个 /api/config 500（2026-10-04 复审 P2 实测：
+    // 一次 POST 就能把坏值写进 config.json，之后每次读配置都 500，且没有任何 API 能删掉它）。
+    // 槽位名来自 asr.provider —— 客户端可控，所以这里按"不可信键名"处理（与 ttsKeyFor 同款）。
+    if (!Object.hasOwn(out, s)) out[s] = [];
+    const list = out[s];
     if (!list.includes(kind)) list.push(kind);
   };
   for (const [slot, entry] of Object.entries(asr?.keys || {})) {
@@ -936,6 +954,23 @@ function migrateConfig(parsed) {
     delete out.server.closeToTray;
   }
   if (out.ui?.theme === '?') out.ui.theme = 'dark';
+  // ── 派生位 has* 的剥离要覆盖**每一段** ──
+  // sanitizeConfigSecrets 会给任何密钥类字段生成 hasXxx；GET /api/config 把它们一起下发，
+  // "整份配置展开回传"的客户端就会把它们送回来。不剥的话保存一次就落进 config.json，
+  // 往后每份配置都带着上个版本算出来的结论。原先只覆盖了 webSearch/tts/asr/imageGen，
+  // 漏了 api 与 providers[]（2026-10-04 复审 P3 实测：api.hasApiKey / api.hasKey /
+  // providers[].hasKey 全部落盘）。官方界面逐字段构造 patch，不会回传这些位，
+  // 但剥离规则按"所有段"统一，不留例外。
+  for (const sec of ['api', 'conversation', 'server', 'onebot', 'tts', 'asr', 'imageGen', 'webSearch', 'identityPilot', 'sticker']) {
+    if (isPlainObject(out[sec])) {
+      for (const key of Object.keys(out[sec])) if (/^has[A-Z]/.test(key)) delete out[sec][key];
+    }
+  }
+  if (Array.isArray(out.providers)) {
+    for (const item of out.providers) {
+      if (isPlainObject(item)) for (const key of Object.keys(item)) if (/^has[A-Z]/.test(key)) delete item[key];
+    }
+  }
   // ── 带凭据映射的三个段：手改坏成标量/数组时归一化成对象，段内的 keys 同理 ──
   // （`{ ...'sk-x' }` 会把字符串展开成字符索引的垃圾映射；与 persona/identityPilot 同款兜底。
   //   2026-10-02 全量审查：非对象形态的 keys 还会绕过控制台下发的"整包清空"——那条单独在
@@ -1159,7 +1194,15 @@ function deepMerge(base, override) {
     // 整体替换约定：{ __replace__: X } → 该键直接用 X，不做递归合并。
     // 用于映射型字段（如 api.modelPrices）需要"删掉旧键"的场景 ——
     // 普通深合并传 {} 是删不掉已有键的。
+    // ⚠️ X 必须是**对象**。X 是 null / 标量 / 数组时，整键**忽略**（当作"这一项没给"）：
+    // 替换会把整个键变成那种值，凭据段于是被清成 null/""—— 一次 `{"asr":{"__replace__":null}}`
+    // 就静默清空整段（keys 映射 + 单槽 Key + 归属钉一起没了），而 HTTP 仍返回 200。
+    // 与其默默毁掉一整段凭据，不如什么都不做（2026-10-04 复审 P3）。
+    // ⚠️ 必须 continue 而不是落回下面的合并分支：落回去会把 `__replace__` 当普通键合进去，
+    // 于是 `{keys:{__replace__:'sk-leaked'}}` 变成 `{keys:{__replace__:'sk-leaked'}}` ——
+    // 那个密钥字符串反而**留在配置里**了（config.test.mjs 钉的就是这一条）。
     if (value && typeof value === 'object' && !Array.isArray(value) && '__replace__' in value) {
+      if (!isPlainObject(value.__replace__)) continue;
       out[key] = structuredClone(value.__replace__);
       continue;
     }
