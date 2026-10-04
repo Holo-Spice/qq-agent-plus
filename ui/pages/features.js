@@ -993,7 +993,7 @@ function bindFeatureAssetActions(rootSelector, kind, entries) {
   });
 }
 
-function renderIdentityFeaturePageImpl(status, identities, memories) {
+function renderIdentityFeaturePageImpl(status, identities, memories, options = {}) {
   const box = $('#identity-page');
   if (!box) return;
   const query = state.identityFeatureQuery || '';
@@ -1030,12 +1030,14 @@ function renderIdentityFeaturePageImpl(status, identities, memories) {
       <h3>旧印象</h3>
       <div id="identity-feature-memories">${renderMemoryAssets(memories)}</div>
     </section>`;
-  if (!setHtmlIfChanged(box, __html)) return;
+  if (!setHtmlIfChanged(box, __html, options)) return;
 
   $('#identity-feature-refresh')?.addEventListener('click', () => loadIdentityFeaturePage());
   const search = () => {
     state.identityFeatureQuery = $('#identity-feature-query')?.value || '';
-    loadIdentityFeaturePage();
+    // force：搜索框此刻正拿着焦点，不 force 的话这次"用户自己点的搜索"会被焦点守卫挡掉，
+    // 结果还是上一批（2026-10-04 复审 P1）
+    loadIdentityFeaturePage({ force: true });
   };
   $('#identity-feature-search')?.addEventListener('click', search);
   $('#identity-feature-query')?.addEventListener('keydown', (event) => {
@@ -1293,7 +1295,8 @@ async function saveSlangFeatureConfig() {
 async function loadSlangFeaturePage() {
   const box = $('#slang-page');
   if (!box) return;
-  box.innerHTML = '<div class="empty-hint">正在读取黑话研究配置…</div>';
+  box.__renderedHtml = null;   // 与 setBoxError 同理：直接写 innerHTML 就得清去重缓存，
+  box.innerHTML = '<div class="empty-hint">正在读取黑话研究配置…</div>';   // 否则下轮 HTML 与缓存相同会被跳过
   try {
     const [cfg, status] = await Promise.all([
       api('/api/config'),
@@ -1308,7 +1311,7 @@ async function loadSlangFeaturePage() {
   }
 }
 
-function renderIncidentFeaturePageImpl(c, status, incidents = []) {
+function renderIncidentFeaturePageImpl(c, status, incidents = [], options = {}) {
   const box = $('#incident-page');
   if (!box) return;
   const settings = c.incidentPilot || {};
@@ -1382,17 +1385,19 @@ function renderIncidentFeaturePageImpl(c, status, incidents = []) {
       </table></div>
       ${incidents.length ? '' : '<div class="empty-hint">当前筛选条件下没有异常日志</div>'}
     </section>`;
-  if (!setHtmlIfChanged(box, __html)) return;
+  if (!setHtmlIfChanged(box, __html, options)) return;
 
   $('#incident-feature-refresh')?.addEventListener('click', () => loadIncidentFeaturePage());
   $('#incident-feature-save')?.addEventListener('click', saveIncidentFeatureConfig);
+  // force：选完筛选项焦点还在这个 <select> 上，不 force 的话表格不刷新 —— 用户看到的是
+  // "筛选完全没反应"，而这一屏此刻正把没筛选的那批行当筛选结果看（2026-10-04 复审 P1）
   $('#incident-state-filter')?.addEventListener('change', (event) => {
     state.incidentState = event.target.value;
-    loadIncidentFeaturePage();
+    loadIncidentFeaturePage({ force: true });
   });
   $('#incident-severity-filter')?.addEventListener('change', (event) => {
     state.incidentSeverity = event.target.value;
-    loadIncidentFeaturePage();
+    loadIncidentFeaturePage({ force: true });
   });
   $$('[data-incident-ack]', box).forEach((button) => button.addEventListener('click', async () => {
     await api(`/api/incidents/${encodeURIComponent(button.dataset.incidentAck)}/acknowledge`, {

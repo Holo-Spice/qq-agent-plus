@@ -893,7 +893,7 @@ async function loadSettings() {
 
 // 人设模板数据：state.personaTemplates（由 loadSettings 从后端填充）
 
-async function loadIdentityFeaturePage() {
+async function loadIdentityFeaturePage(options = {}) {
   const box = $('#identity-page');
   if (!box) return;
   if (!box.__renderedHtml) box.innerHTML = '<div class="empty-hint">正在读取人物与旧印象…</div>';
@@ -910,7 +910,7 @@ async function loadIdentityFeaturePage() {
     state.config = cfg;
     state.chats = chats.chats || state.chats;
     syncGraduatedFeatureNavigation(cfg);
-    renderIdentityFeaturePage(status, identities, memories);
+    renderIdentityFeaturePage(status, identities, memories, options);
   } catch (error) {
     setBoxError(box, `<div class="empty-hint">人物统一印象读取失败：${esc(error.message)}</div>`);
   }
@@ -941,7 +941,7 @@ async function loadFriendFeaturePageImpl() {
   }
 }
 
-async function loadIncidentFeaturePage() {
+async function loadIncidentFeaturePage(options = {}) {
   const box = $('#incident-page');
   if (!box) return;
   if (!box.__renderedHtml) box.innerHTML = '<div class="empty-hint">正在读取异常日志…</div>';
@@ -956,7 +956,7 @@ async function loadIncidentFeaturePage() {
     if (state.tab !== 'incidents') return;
     state.config = cfg;
     syncGraduatedFeatureNavigation(cfg);
-    renderIncidentFeaturePage(cfg, data.status || {}, data.incidents || []);
+    renderIncidentFeaturePage(cfg, data.status || {}, data.incidents || [], options);
   } catch (error) {
     setBoxError(box, `<div class="empty-hint">异常日志读取失败：${esc(error.message)}</div>`);
   }

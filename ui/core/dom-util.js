@@ -197,6 +197,9 @@ function captureEditableValues(root) {
 /** 还回用户改过、还没保存的那一份：
  *  · **只还原"用户真的动过"的控件**（当前值 ≠ 上一轮渲染值）——没动过的控件要跟着服务端新值走，
  *    否则服务端纠正过的值（越界被夹、别名改名…）会被永久挡在界面外（2026-10-03 复审指出）。
+ *  · **服务端这一轮也改了同一个值时不还原**（2026-10-04 复审 P2）：两个条件必须同时成立。
+ *    只判"用户动过"的话，一次保存后的回填会把服务端刚夹好的值又盖回用户输的那个 ——
+ *    好友管理页把 99999 输进 max=365 的框，服务端存 365，界面却显示 99999（存的不是显示的）。
  *  · 下拉只在**该选项还在**时还原（选项没了不强塞非法值）；控件换了类型（同名 checkbox↔text）不还原。
  *  · 遍历**新**节点而不是按 id 反查：省掉选择器转义，控件被删/改名时自然跳过。 */
 function restoreEditableValues(root, values) {
@@ -206,7 +209,12 @@ function restoreEditableValues(root, values) {
   for (const node of root.querySelectorAll('input[id], select[id], textarea[id]')) {
     const saved = values.get(node.id);
     const box = node.type === 'checkbox' || node.type === 'radio';
-    if (saved && saved.box === box && saved.rendered !== undefined && saved.current !== saved.rendered) {
+    const renderedNow = box ? node.checked === true : String(node.value ?? '');
+    // 服务端这一轮有没有动这个值：动了就以服务端为准，不回填用户那份
+    const serverChanged = saved && saved.rendered !== undefined
+      && String(renderedNow) !== String(saved.rendered);
+    if (saved && saved.box === box && saved.rendered !== undefined
+      && saved.current !== saved.rendered && !serverChanged) {
       if (box) node.checked = saved.current;
       else if (node.tagName !== 'SELECT' || [...node.options].some((option) => option.value === saved.current)) {
         node.value = saved.current;
@@ -216,20 +224,42 @@ function restoreEditableValues(root, values) {
   }
 }
 
-function setHtmlIfChanged(el, html) {
+/**
+ * 写一块 HTML，数据没变就跳过（去重靠 el.__renderedHtml）。
+ * options.force：**用户自己触发的刷新**要设 true（筛选下拉、按回车搜索…）。
+ *   背景：焦点守卫会拦下"焦点在输入类控件上"的整块重写，可它分不清"后台轮询要重画"和
+ *   "刚刚那个控件自己要重画"。异常处理页的状态/等级筛选选完不动（表格还是上一档）、
+ *   人物印象页搜索框按回车没反应，都是被自己触发的刷新被守卫挡了（2026-10-04 复审 P1）。
+ *   兜底的 1.5 秒状态轮询会在焦点移开后补上，但那让用户看到的是"筛选时灵时不灵"，
+ *   而异常日志页此刻正把没筛选的那批行当成筛选结果看。
+ *   force 时顺带把焦点还给同一个 id 的控件（重画会换掉节点，不还就得重按一次）。
+ */
+function setHtmlIfChanged(el, html, options = {}) {
   if (!el) return false;
   if (el.__renderedHtml === html) return false;
   const values = captureEditableValues(el);
+  const active = typeof document !== 'undefined' ? document.activeElement : null;
   // 用户正在这块区域里打字时，这一轮重拉先别写：整块 innerHTML 会把输入框连同内容一起换掉
   //（焦点丢失、正在敲的字符消失）—— 与 2026-10-02「屏蔽名单搜索框只能输一个字」同族。
   // 只拦焦点在输入类控件上：按钮上的焦点不拦（保存后的「已保存」提示要能画出来），
   // 焦点离开后下一轮自动补上，不会卡住页面。
-  const active = typeof document !== 'undefined' ? document.activeElement : null;
-  if (active && active !== el && el.contains?.(active)
-    && /^(input|textarea|select)$/i.test(active.tagName || '')) return false;
+  const focusedInput = active && active !== el && el.contains?.(active)
+    && /^(input|textarea|select)$/i.test(active.tagName || '');
+  if (focusedInput && options.force !== true) return false;
+  const refocusId = focusedInput && options.force === true ? active.id : '';
   el.__renderedHtml = html;
   el.innerHTML = html;
   restoreEditableValues(el, values);
+  if (refocusId) {
+    const again = el.querySelector(`#${CSS?.escape ? CSS.escape(refocusId) : refocusId}`);
+    if (again && typeof again.focus === 'function') {
+      again.focus();
+      // 光标停在末尾：用户接着敲的是新内容，不是去改中间（搜索框场景最常见）
+      if (typeof again.setSelectionRange === 'function') {
+        try { again.setSelectionRange(again.value.length, again.value.length); } catch { /* number 类型不支持，忽略 */ }
+      }
+    }
+  }
   return true;
 }
 
@@ -581,20 +611,24 @@ function extraBodyText(obj) {
  * 保存成功后把"服务端实际存下来的值"回填到控件上。
  * 以前只有省 Token 页保存后会重画，别的页不回填：控件里留着旧输入，看着像保存成功了、
  * 其实存的是另一个值（夹上限、换算档位这类字段都会这样）。先从清单条数这一个做起。
+ *
+ * ⚠️ 滑条要补发一次 input 事件（2026-10-04 复审 P2）：程序化写 .value **不触发** input，
+ *    而滑条的读数（#cfg-sticker-max-now）和填充色（--pos）只在那一个监听里更新 ——
+ *    直接写值的话，滑块停在 10.4、服务端存 10，"已保存 ✓"出来了读数还显示着旧的。
  */
 function syncClampedInputs() {
-  const stickerMax = $('#cfg-sticker-max');
-  if (stickerMax) {
-    stickerMax.value = String(normalizeStickerMax(state.config?.sticker?.promptMaxStickers));
-  }
-  const stickerCollectMax = $('#cfg-sticker-collect-max');
-  if (stickerCollectMax) {
-    stickerCollectMax.value = String(normalizeStickerCollectMax(state.config?.sticker?.maxCollectPerHour));
-  }
-  const asrMax = $('#cfg-asr-max');
-  if (asrMax) {
-    asrMax.value = String(normalizeAsrMax(state.config?.asr?.maxPerHour));
-  }
+  const fill = (node, value) => {
+    if (!node) return;
+    const next = String(value);
+    if (node.value !== next) node.value = next;
+    // 滑条的联动全靠 input 事件（读数 + 填充色）；这里补发，让回填和用户拖动走同一条路
+    if (typeof node.dispatchEvent === 'function') {
+      try { node.dispatchEvent(new Event('input', { bubbles: true })); } catch { /* 老环境没有 Event，忽略 */ }
+    }
+  };
+  fill($('#cfg-sticker-max'), normalizeStickerMax(state.config?.sticker?.promptMaxStickers));
+  fill($('#cfg-sticker-collect-max'), normalizeStickerCollectMax(state.config?.sticker?.maxCollectPerHour));
+  fill($('#cfg-asr-max'), normalizeAsrMax(state.config?.asr?.maxPerHour));
 }
 
 

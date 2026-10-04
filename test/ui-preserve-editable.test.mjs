@@ -82,3 +82,60 @@ test('整块重画不覆盖未保存的输入（好友管理/异常处理/人物
   assert.doesNotThrow(() => window.setHtmlIfChanged(removed, '<span id="live">z</span>'));
   window.close();
 });
+
+test('服务端这一轮也改了同一个值时，不回填用户那份（存的值要等于显示的值）', { skip: SKIP }, async () => {
+  const window = loadDomUtil();
+  const doc = window.document;
+  const box = doc.createElement('div');
+  doc.body.appendChild(box);
+  const html = (value) => `<input id="cfg-friend-skip" type="number" max="365" value="${value}">`;
+
+  // 前提：服务端渲染 7，用户把它改成 99999（超出 max=365）
+  window.setHtmlIfChanged(box, html('7'));
+  box.querySelector('#cfg-friend-skip').value = '99999';
+
+  // 保存后服务端夹成 365 回传。⚠️ 之前这一轮会判定"用户动过"就把 99999 又填回去 ——
+  // 界面上显示 99999、配置里存的是 365（2026-10-04 复审 P2）。
+  window.setHtmlIfChanged(box, html('365'));
+  assert.equal(box.querySelector('#cfg-friend-skip').value, '365',
+    '服务端纠正过的值要显示出来，不能被用户那份旧输入盖掉');
+
+  // 服务端**没**动的字段仍然照旧保留用户未保存的输入（别把上一条修复做过头）
+  const other = doc.createElement('div');
+  doc.body.appendChild(other);
+  window.setHtmlIfChanged(other, html('7'));
+  other.querySelector('#cfg-friend-skip').value = '42';
+  window.setHtmlIfChanged(other, html('7'));   // 服务端值没变
+  assert.equal(other.querySelector('#cfg-friend-skip').value, '42', '服务端没改这个字段 → 用户输入必须保住');
+  window.close();
+});
+
+test('force：用户自己触发的刷新不会被焦点守卫挡掉，焦点还回原控件', { skip: SKIP }, async () => {
+  const window = loadDomUtil();
+  const doc = window.document;
+  const box = doc.createElement('div');
+  doc.body.appendChild(box);
+  const html = (rows, sel = 'a') => '<select id="filter"><option value="a">全部</option>'
+    + '<option value="b">只看未处理</option></select>'
+    + `<span id="rows">${rows}</span><span id="picked">${sel}</span>`;
+
+  // 首轮渲染
+  window.setHtmlIfChanged(box, html('R1', 'a'));
+
+  // 用户在筛选下拉上选了 b —— 焦点还在这个 <select> 上（选完选项不会自动失焦）
+  const filter = box.querySelector('#filter');
+  filter.value = 'b';
+  filter.focus();
+  assert.equal(doc.activeElement?.id, 'filter', '前提：焦点确实在筛选下拉上');
+
+  // 后台轮询式的重画：守卫照旧拦下（防止打字被打断）—— 这条不能被 force 顺手废掉
+  assert.equal(window.setHtmlIfChanged(box, html('R2', 'a')), false,
+    '后台刷新时焦点在输入控件上 → 仍然不写（保住正在敲的内容）');
+
+  // 用户自己触发的刷新（改筛选、点搜索）必须立刻生效
+  assert.equal(window.setHtmlIfChanged(box, html('R2', 'b'), { force: true }), true,
+    'force 时焦点在下拉上也要重画（否则筛选看起来完全没反应）');
+  assert.equal(box.querySelector('#rows').textContent, 'R2', '筛选结果要真的刷新');
+  assert.equal(doc.activeElement?.id, 'filter', '重画换掉了节点，焦点要还给同一个控件');
+  window.close();
+});

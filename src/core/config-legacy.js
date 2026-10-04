@@ -983,14 +983,33 @@ function migrateConfig(parsed) {
     for (const key of Object.keys(out.imageGen)) {
       if (/^has[A-Z]/.test(key) || IMAGEGEN_DERIVED_KEYS.includes(key)) delete out.imageGen[key];
     }
-    // 有 Key 却没记归属的老配置：按当前地址补记（与 asr 的 pin 同款）。
-    // 不补的话升级后"换个预设"就会拿旧 Key 去撞新地址 —— 而那在升级前一直是好用的，
-    // 不补等于给升级中的实例制造"突然把 A 家 Key 发给 B 家"或"突然不生效"。
-    if (String(out.imageGen.apiKey || '').trim() && !String(out.imageGen.apiKeyHost || '').trim()) {
-      pinImageGenKeyHost(out.imageGen, out.api?.baseUrl);
+    // ⚠️ 这里**不**补归属钉（与上面 asr 同一条纪律，2026-10-04 复审 P2）：合并路径上补会把
+    // "归属未知的老凭据"绑到**这次 patch 之后**的地址上。路由层刻意不认领那把（resolved.owned
+    // 为 false 就只填值、不写钉），转到这里却被无条件认领 —— 用户把地址换成别家、没填新 Key
+    // 保存一次，旧 Key 就被静默绑到新主机，此后 resolveImageGenAuth 会把它发给新主机。
+    // 读盘那次该补的照旧补（见 loadConfig 里的 pinUnboundImageGenKey），那时地址没被这次改动带偏。
+  }
+  // 槽位条目被手改成标量（"keys":{"tencent":"SCALAR"}）时，各处 `{...entry}` 会摊成
+  // {0:'S',1:'C',…} 的字符索引垃圾。这里直接把非对象条目归一成 {}，读写两侧都干净
+  //（migrateConfig 是所有写入路径的必经口，读盘也走它；2026-10-04 复审 P2）。
+  if (isPlainObject(out.asr?.keys)) {
+    for (const [slot, entry] of Object.entries(out.asr.keys)) {
+      if (!isPlainObject(entry)) out.asr.keys[slot] = {};
     }
   }
   return out;
+}
+
+/**
+ * 读盘这一次给"有 Key 却没记归属"的老配置补记归属（与 pinStoredAsrCredentials 同款）。
+ * 只在读盘做、合并路径不做 —— 合并时地址可能刚被这次 patch 改过，补记等于把老凭据绑到新主机。
+ * 入口条件与 pinStoredAsrCredentials 同款：确实有 Key、确实没记归属。
+ */
+function pinUnboundImageGenKey(imageGen, apiBaseUrl) {
+  if (!isPlainObject(imageGen)) return '';
+  if (!String(imageGen.apiKey || '').trim()) return '';
+  if (String(imageGen.apiKeyHost || '').trim()) return String(imageGen.apiKeyHost);
+  return pinImageGenKeyHost(imageGen, apiBaseUrl);
 }
 
 /**
@@ -1178,6 +1197,9 @@ export function loadConfig() {
     // 升级后"换服务/换地址要重填"的防线立刻生效，而不是等用户碰一次设置才生效
     const asrProviderValue = String(merged.asr?.provider || '').trim().toLowerCase();
     if (asrProviderValue) pinStoredAsrCredentials(merged.asr, asrProviderValue);
+    // 图片生成同款：老配置只有单槽 apiKey、没有 apiKeyHost，不补记的话升级后"换个预设"就拿旧
+    // Key 去撞新地址 —— 而那在升级前一直是好用的。只在读盘补，合并路径不补（见 migrateConfig）
+    pinUnboundImageGenKey(merged.imageGen, merged.api?.baseUrl);
     applyPersonaTemplate(merged);   // 绑了内置卡就按 roles/*.md 刷新正文（卡文件是唯一来源）
     return merged;
   } catch (error) {
@@ -1280,6 +1302,12 @@ export function updateConfig(patch) {
   // 三个带凭据的段同理：它们被 migrateConfig 归一化成 {}，等于**整段清空**（连 keys 映射与
   // 归属钉一起丢），而不是"这次没改"。坏输入最该被忽略，不该当成用户要求清空（2026-10-03 全量审查）。
   for (const sec of ['asr', 'tts', 'imageGen']) {
+    if (sec in safePatch && !isPlainObject(safePatch[sec])) delete safePatch[sec];
+  }
+  // 下面这些段是直接写属性用的（next.api.maxRunTokens = …），客户端送来标量或数组时
+  // 会抛 TypeError（ESM 是严格模式）→ 整个 /api/config 返回 500。坏输入最该被忽略，
+  // 不该把整次保存带崩（2026-10-04 复审 P2）。
+  for (const sec of ['api', 'conversation', 'dailyMoments', 'qzoneInteractions']) {
     if (sec in safePatch && !isPlainObject(safePatch[sec])) delete safePatch[sec];
   }
   const next = migrateConfig(deepMerge(getConfig(), safePatch));

@@ -3082,9 +3082,6 @@ export function createApp({
     // 否则 before 会被写成 after（等于没记；方案附录 J.2）。
     const auditBefore = structuredClone(cfgNow);
     const patch = await readBody(req);
-    // 控制台保存总会带上显式的 provider（来自服务预设）：等于用户确认过这一家，
-    // 清掉"升级默认值"的标记，让环境变量 Key 恢复生效（2026-09-26 审查 P2）
-    if (patch?.asr && typeof patch.asr === 'object') delete patch.asr.providerDefaulted;
     // ── 整节替换（{ __replace__: X }）会把"映射由服务端维护"整条绕过：deepMerge 直接换成
     //    客户端对象，我们算好的 keys 被丢掉，客户端于是能把 keys 映射写进配置（2026-10-02
     //    全量审查实测：`{asr:{__replace__:{keys:{'openai|evil…':{apiKey:'ATK'}}}}}` 落盘成功）。
@@ -3103,6 +3100,11 @@ export function createApp({
       && node.__replace__ && typeof node.__replace__ === 'object' && !Array.isArray(node.__replace__)
       ? node.__replace__
       : node);
+    // 控制台保存总会带上显式的 provider（来自服务预设）：等于用户确认过这一家，
+    // 清掉"升级默认值"的标记，让环境变量 Key 恢复生效（2026-09-26 审查 P2）。
+    // 要删在**有效体**上：整节替换时节点层的 delete 落不到最终配置上，替换体里那份
+    // providerDefaulted 会一路进 deepMerge 落盘，永久屏蔽 ASR_API_KEY 环境变量（2026-10-04 复审 P2）。
+    if (patch?.asr && typeof patch.asr === 'object') delete sectionBody(patch.asr).providerDefaulted;
     // tts 的 Key 与 asr 同款语义：留空/掩码占位 = 保持原值（掩码回写会把真 Key 冲掉）
     if (patch?.tts && typeof patch.tts === 'object') {
       const ttsBody = sectionBody(patch.tts);
@@ -3141,25 +3143,32 @@ export function createApp({
       if (!submittedKey || submittedKey === '******') delete ttsBody.apiKey;
       // ── 单槽 Key 的归属（2026-10-03）── 必须放在上面那句之后：它把 apiKeyInput 清掉、
       //    再判"这次有没有真提交"；而"空/掩码 = 保持原值"那句会把我下面置的空串 delete 掉。
+      //
+      // ── 归档必须**无条件先跑**（与 imageGen/asr 同一口径，2026-10-04 复审 P1）──
+      // 存量实例的 Key 只存在于 tts.apiKey 这一个字段里（keys 映射是控制台从 2026-09-29 起
+      // 才写的）。之前归档写在"没填新 Key"那个分支里，于是"切服务 **并** 填一把新 Key"
+      // 这条最常见的路径完全绕过了归档：那把旧 Key 留在单槽里、归属钉却被改成新服务 ——
+      // 等用户再切回原服务且没填 Key 时，归属比较判成"别家的"，而 keys[原归属] 已被新 Key
+      // 占位 → 不归档 → 直接置空 → **旧 Key 永久丢失**，控制台再也找不回来。
+      const prevTtsKey = String(cfgNow.tts?.apiKey || '').trim();
+      // 归属比较必须用"改动前"的配置：改完之后 current 已经变成新服务，拿它比会判成"就是这家的"。
+      const ownerNow = String(cfgNow.tts?.apiKeyService || '').trim() || ttsServiceOf(cfgNow.tts)?.id || '';
+      if (prevTtsKey && ownerNow && ownerNow !== targetId && !String(nextTtsKeys[ownerNow] || '').trim()) {
+        nextTtsKeys[ownerNow] = prevTtsKey;
+        ttsBody.keys = nextTtsKeys;
+        stampServerKeys('tts', nextTtsKeys);
+      }
       if (keyInput && keyInput !== '******') {
-        ttsBody.apiKeyService = targetId;   // 新填的这把归属就是这一家（切回它时兜底才认）
-      } else if (String(cfgNow.tts?.apiKey || '').trim()) {
+        // 新填的这把归属就是这一家（切回它时兜底才认）。单槽**同步换成新 Key**：
+        // 只改钉不换槽的话，单槽里留的是上一家的 Key，归属钉却指着这一家 —— 与 asr/imageGen
+        // 写入时"单槽装新值 + 钉指新归属"的口径反着来（2026-10-04 复审 P1）。
+        ttsBody.apiKey = keyInput;
+        ttsBody.apiKeyService = targetId;
+      } else if (prevTtsKey && ownerNow !== targetId) {
         // 切到**没存过 Key** 的服务且没填 → 不沿用上一家的单槽 Key（与 asr/imageGen 同一口径）。
-        // 归属比较必须用"改动前"的配置：改完之后 current 已经变成新服务，拿它比会判成"就是这家的"。
-        const ownerNow = String(cfgNow.tts?.apiKeyService || '').trim() || ttsServiceOf(cfgNow.tts)?.id || '';
-        if (ownerNow !== targetId) {
-          // ⚠️ 先归档再置空（2026-10-03 复审）：存量实例的 Key 只存在于 tts.apiKey 这一个字段里
-          // （keys 映射是控制台从 2026-09-29 起才写的），直接清空就是**永久丢失**、控制台也找不回来。
-          // 归档进 keys[原归属] 后：切回那家能自动填回，切走期间归属钉照旧挡住它不被发出去。
-          if (ownerNow && !String(nextTtsKeys[ownerNow] || '').trim()) {
-            nextTtsKeys[ownerNow] = cfgNow.tts.apiKey;
-            ttsBody.keys = nextTtsKeys;
-            stampServerKeys('tts', nextTtsKeys);
-          }
-          // ⚠️ 置空串才是"清空"：delete 只是"这次不提交"（空/掩码 = 保持原值）。
-          ttsBody.apiKey = '';
-          ttsBody.apiKeyService = '';
-        }
+        // ⚠️ 置空串才是"清空"：delete 只是"这次不提交"（空/掩码 = 保持原值）。
+        ttsBody.apiKey = '';
+        ttsBody.apiKeyService = '';
       }
     }
     // imageGen 的 Key：与 tts 同款语义（留空/掩码 = 保持原值）。前端已按此过滤，
@@ -3241,9 +3250,12 @@ export function createApp({
       const nextKeys = { ...(curAsr.keys || {}) };
       // 槽位条目必须是对象：手改成标量（"keys":{"tencent":"SCALAR"}）时 `{...'SCALAR'}` 会摊成
       // 字符索引的垃圾键写进配置（2026-10-02 推前复审）。migrateConfig 只归一化顶层映射，这里兜条目。
+      // 目标槽与归档槽共用这一个守卫：只给目标槽加的话，归档路径仍会把标量摊成 {0:'S',1:'C',…}
+      // 写进 config.json（同一段代码两套标准 = 漏改，2026-10-04 复审 P1）。
+      const entryOf = (value) => (value && typeof value === 'object' && !Array.isArray(value)
+        ? { ...value } : {});
       const prevEntry = nextKeys[targetSlot];
-      const slotEntry = prevEntry && typeof prevEntry === 'object' && !Array.isArray(prevEntry)
-        ? { ...prevEntry } : {};
+      const slotEntry = entryOf(prevEntry);
       const credentials = [
         ['apiKey', 'apiKeyProvider', 'apiKeyHost'],
         ['secretId', 'secretIdProvider', ''],
@@ -3269,7 +3281,7 @@ export function createApp({
           ? (String(curAsr[hostField] || '').trim().toLowerCase() || asrEndpointHost(curAsr.baseUrl))
           : '';
         const slot = asrCredentialSlotOf(owner, host);
-        const entry = { ...(nextKeys[slot] || {}) };
+        const entry = entryOf(nextKeys[slot]);
         if (!String(entry[kind] || '').trim()) entry[kind] = value;
         nextKeys[slot] = entry;
       }
