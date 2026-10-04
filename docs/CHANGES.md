@@ -48,7 +48,69 @@
 | 省 Token 模式 | `src/core/token-saver.js`（新增）、`src/core/config-legacy.js`、`src/llm/prompt.js`、`src/core/orchestrator.js`、`src/memory/memory-global.js`、`src/features/daily-moments.js`、`src/features/qzone-interactions.js`、`ui/app.js`、`src/console/app.js` | 「设置 -> 省 Token」三档，只给上下文档位条数、单次运行轮数与预算、交接/印象注入字符数、表情清单条数**夹上限**，不改写用户设置；关掉即恢复原样 | 本仓库新增 |
 | 关闭上游调试探针 | `src/*.js`、`ui/*.js` | 上游作者留在源码里的调试上报（指向其开发机私网地址）全部关掉 | `apply-disable-upstream-debug.sh` |
 
-## 0. 控制台性能、删除/保存体验与巡检判据修正（v0.7.7 起）
+## 0. 切换服务预设时 API Key 跟随切换与四轮发布前审查修复（v0.7.8 起）
+
+这一版的主体是控制台的一项日常操作：切换语音回复、语音转写、图片生成的服务预设时，已填过的 API Key
+随服务一起切换，不再需要逐家重新获取并填写。围绕该功能建立的凭据记忆机制，在四轮发布前审查中修正了
+20 处缺陷，其中 4 处为加固过程引入的回归。
+
+- **切换服务预设时 Key 跟随切换**：`src/core/config-legacy.js`、`src/console/app.js`、
+  `src/llm/tts-presets.js`、`src/llm/image-gen.js`、`ui/pages/settings-save.js`、`test/tts-config-api.test.mjs`
+  （新增）、`test/asr-config-api.test.mjs`、`test/imagegen-api.test.mjs`（新增）、
+  `test/asr-credential-binding.test.mjs`（新增）、`test/imagegen-key-binding.test.mjs`（新增）。
+  失败模式：切换服务预设后 Key 输入框变为空白；重新填写后，先前那家服务的 Key 被覆盖，切换回去时无法
+  取回，只能重新获取。根因是三类凭据此前只存单槽，任何一次填写都会覆盖上一次的值。
+  现行做法：三类凭据改为按槽位记忆 —— 语音回复按服务标识、图片生成按主机名、语音转写按
+  「服务 + 主机名」（转写含 `apiKey` / `secretId` / `secretKey` 三种）；映射由服务端独占写入，客户端提交的
+  同名字段在保存前丢弃；每把凭据记录归属标记（`tts.apiKeyService` / `imageGen.apiKeyHost` /
+  `asr.apiKeyProvider` + `asr.apiKeyHost`），运行期仅发送归属匹配的那一把 —— 将 A 家的 Key 发往 B 家不会
+  报错，只会在对方后台留下一条 401 或一笔异常计费，因此该约束为强制校验。切换离开时当前凭据先归档至其
+  所属槽位再置空（存量实例的 Key 仅存在于单一字段，直接置空即永久丢失）；控制台「显示」按钮按当前选中项
+  回读，不再回显其他服务的明文。同一批另修：搜索服务的 Key 在保存设置页时被清空、控制台令牌可用整节替换
+  绕过、`__replace__` 绕过「映射归服务端」、回显密钥越家、预算门禁在主动发言路径上失效、重试耗尽后重复
+  投递、贴纸收藏失败不退 quota、记忆查询无返回上限、兜底模型切换将 Key 发往另一主机等 16 项。
+- **语音回复单槽 Key 在「切换服务并填写新 Key」时丢失**：`src/console/app.js`、
+  `test/review-2026-10-04.test.mjs`（新增）。失败模式：存量实例中，切换服务并填写新 Key 后，再切回原服务
+  且不填 Key 时，原 Key 已不可用且无法取回。根因是归档逻辑原先只位于「未填写新 Key」的分支内 ——
+  「切换服务并填写新 Key」这条常用路径完全绕过归档，旧 Key 留在单槽、归属标记却已指向新服务；此后切回原
+  服务时归属比较判定为「他家的」，而归档位置已被新 Key 占用，于是跳过归档并直接置空。
+  现行做法：归档提至两个分支之前无条件执行，与图片生成、语音转写同一口径；填写新 Key 的分支同时将单槽
+  替换为新值，保证「单槽所载」与「归属标记所指」始终为同一把。
+- **语音转写归档槽缺少类型守卫**：`src/console/app.js`、`src/core/config-legacy.js`。
+  失败模式：`asr.keys` 中被手工改为标量的槽位（`{"tencent":"SCALAR"}`）在保存时被展开为
+  `{0:'S',1:'C',…}` 的字符索引键并写入 `config.json`。根因是同一段代码中目标槽位已设「条目必须为对象」的
+  守卫、归档槽位未设。现行做法：两处共用 `entryOf()`；`migrateConfig` 补充条目级归一，覆盖读盘路径。
+- **异常日志筛选与人物印象搜索无响应**：`ui/core/dom-util.js`、`ui/app.js`、`ui/pages/features.js`、
+  `test/ui-preserve-editable.test.mjs`（新增）。失败模式：异常处理页的状态与等级筛选选定后表格不刷新，
+  人物印象页搜索框按回车无响应；期间异常日志页将未筛选的行作为筛选结果呈现。根因是整块重画前设有
+  「焦点位于输入控件时暂不写入」的守卫（用以避免后台轮询覆盖正在输入的内容），但无法区分「后台轮询触发的
+  重画」与「该控件自身触发的重画」。现行做法：新增 `options.force` 通道，由用户主动触发的刷新显式传入，
+  后台轮询仍受原守卫保护；重画后将焦点归还至同一控件，光标置于末尾。
+- **服务端纠正后的值被未保存的输入覆盖**：`ui/core/dom-util.js`。
+  失败模式：好友管理页将 `99999` 填入上限为 `365` 的输入框，服务端存储 365，界面重画后仍显示 99999 ——
+  存储值与显示值不一致。根因是「保留未保存输入」仅判断用户是否修改过该控件，未判断服务端本轮是否也修改了
+  该值。现行做法：两个条件同时成立时才回填，服务端修改过的字段一律以服务端为准；同处一并修正同名控件更换
+  类型、下拉选项消失时不强塞非法值的情形。
+- **凭据与配置的边界**：`src/core/config-legacy.js`、`src/console/app.js`。
+  ① `migrateConfig` 不再为归属未知的图片生成 Key 补记归属：合并路径补记等同于将其绑定到本次保存刚修改的
+  地址，用户切回原地址时校验不通过、凭据被锁定；读盘阶段仍照常补记（移入 `loadConfig`），升级中的实例不受
+  影响。② `asr.providerDefaulted` 改为在整节替换的有效体上删除：节点层的 `delete` 在 `__replace__` 下不作用于
+  最终配置，替换体中的同名字段会落盘并永久屏蔽 `ASR_API_KEY` 环境变量。③ 配置段被提交为标量或数组时按
+  「该段未修改」处理，不再导致整个 `/api/config` 返回 500。
+- **其余修复**：`ui/core/dom-util.js`、`src/llm/llm.js`、`src/core/orchestrator.js`、
+  `src/tools/audio-transcribe.js`、`src/tools/tools-core.js`、`src/onebot/sticker-manager.js`、`src/ops.js`、
+  `deploy.sh`、`.github/workflows/release.yml`、`docs/OPS.md`。
+  滑条回填服务端实际存储值后补发 `input` 事件（程序化写入 `.value` 不触发，滑块读数与填充色停留于旧值）；
+  语音转写配额在下载、转码、超时失败时退还；模型重试耗尽后不再重复投递、响应为空时明确报错；当日预算耗尽
+  的提示改为每个会话每天仅提示一次，主动发言路径不再重复播报；记忆查询补充返回条数上限并按最近观测时间
+  排序；贴纸收藏的 `collect` 在失败时退还计数；`deploy.sh` 失败路径补上真实调用点锚点（原锚点位于函数定义
+  处，任何改动均可通过校验）；发布流水线新增「tag 与 `package.json` 版本号一致」校验，版本号不符时中止发布。
+- **升级影响**：**无破坏性变更，不需要迁移步骤，不需要修改任何配置**。存量凭据在读盘阶段自动补记归属，
+  升级后照常生效。控制台行为变化：切换服务预设时已填写的 Key 随服务切换；异常日志页筛选与人物印象页搜索
+  在触发后立即生效（此前需待焦点移开）；服务端纠正过的值在整块重画的表单中立即显示为纠正后的值（此前会
+  短暂显示用户输入的原值）。部署侧无新增依赖，沿用上一版的 `npm ci` 流程即可。
+
+## 1. 控制台性能、删除/保存体验与巡检判据修正（v0.7.7 起）
 
 这一版集中在控制台的响应速度与"整页重拉"体验，外加健康巡检判据的一次修正、两处依赖升级，
 以及发布前审查补上的一批小项。
@@ -94,7 +156,7 @@
   约 1 小时后也会告警；`docs/OPS.md` 与 `ops.js --help` 的
   第 3 项描述同步更新。控制台行为变化：删图与保存不再整页刷新，滚动位置保留。
 
-## 1. 架构拆分、图片生成与三轮审查修复（v0.7.6 起）
+## 2. 架构拆分、图片生成与三轮审查修复（v0.7.6 起）
 
 这一版是 v0.7.5 之后的收口：控制台 UI 结构性拆分并全量转 ES module、加入图片生成与完整的密钥控制，
 外加三轮对抗性审查的修复；同时让 WS 客户端兼容不回应 PING 的 NapCat 协议端。
@@ -161,7 +223,7 @@
   新增配置键随默认值自动补齐，老配置无需手改；控制台新增「设置 → OneBot」的心跳/补课控件与若干密钥开关。
   NapCat 用户在默认配置下自愈（进程启动后最多断一次，之后不再发 ping）。
 
-## 2. 群游戏、语音回复多供应商、定时提醒与群日报（v0.7.5 起）
+## 3. 群游戏、语音回复多供应商、定时提醒与群日报（v0.7.5 起）
 
 - **群游戏：数字炸弹 / 谁是卧底 / 狼人杀**：`src/features/group-game.js`（新增管理器）、
   `src/features/games/{number-bomb,undercover,werewolf}.js`（新增三个插件）、`src/console/app.js`、
@@ -303,7 +365,7 @@
   窗口内有入站消息且出站超时才失败；窗口内没有入站（或库里根本没有入站记录）记为**静默期**（ok，明细写明各自时间）。
   三处新用例（有入站且超时必红 / 无入站记静默 / 从来没有入站记静默）+ 2 条变异验证（拆掉两个静默期分支，对应用例如期变红）。
 
-## 3. 思考控制与表情匹配（v0.7.4 起）
+## 4. 思考控制与表情匹配（v0.7.4 起）
 
 - **思考控制（按渠道翻译档位、每家独立、可按任务分设）**：`src/core/provider-presets.js`（新增）、
   `src/llm/llm.js`、`src/core/providers.js`、`src/console/app.js`、`ui/app.js`、`src/core/config-legacy.js`。
@@ -343,7 +405,7 @@
   `access_token` / `api_key` 这类带下划线前缀的参数名补进规则（旧规则只认 `?token=` / `?key=`，会漏掉本项目
   OneBot 实际写在查询串上的 `access_token`）。
 
-## 4. 引用、记忆与人设（v0.7.3 起）
+## 5. 引用、记忆与人设（v0.7.3 起）
 
 - **引用块带被引用那条的消息 id**：`src/core/util.js`（`formatQuoteRef` / `quotePrefixFor` / `textWithQuote`）、
   `src/onebot/onebot.js`、`src/llm/prompt.js`、`src/tools/tools-core.js`、`src/console/app.js`。
@@ -380,7 +442,7 @@
   收藏即落盘（`sticker-assets/`），清单标出来源与发送形态（〔QQ收藏表情〕/〔本地图库·发出去是图片〕），
   发送前探活、失效不发并给出可照做的提示；QQ 收藏夹上限 500（非会员）因此本地库保留。
 
-## 5. 语音转写与视频（v0.7.2 起）
+## 6. 语音转写与视频（v0.7.2 起）
 
 - **多供应商语音转写**：`src/llm/asr-openai.js`、`asr-local.js`（本机 whisper.cpp）、`src/llm/seed-asr.js`（火山 Seed-ASR）、
   `asr-dashscope.js`（阿里云百炼）、`asr-baidu.js`、`asr-tencent.js`（TC3 签名）、`asr-iflytek.js`（签名 WSS 分帧）+
@@ -398,14 +460,14 @@
   `src/tools/tools-core.js`（`get_message_images` 按 kind 分流）。失败模式：只采音轨时模型会回"视频只能听声音"
   （用户实测反馈），画面根本没进过模型的眼睛。
 
-## 6. 对话行为
+## 7. 对话行为
 
 - **分条发言（多气泡）**：`src/llm/prompt.js`。失败形态有两种：一是"把想说的全塞进一条长消息"，二是"用空格把两句连成一条"。补丁注释记录，v1 之前实测 90% 的情况只发一条；v2 在尾部加了"别把一轮压成一句点评"，并明确"一轮常见 2-3 条短句、单条多数 ≤30 字、别一口气刷 4 条以上"。配套的 `humanRhythm` / 主体性文本属于上游自带内容，未通过脚本改动。
 - **提示词调优**：`src/llm/prompt.js`、`src/llm/qzone-interaction-prompt.js`。把"被 @ 或直接提问时优先判断是否需要回应"改成"被 @、点名或直接提问时默认要回一句（可以短、可以敷衍、可以怼回去），只有明显与你无关、对方 @ 别人、或纯刷屏误 @ 时才不回"（v0.6.3 起把其中的"可以怼回去"进一步软化为"也可以就回一句不痛不痒的"）；同时统一了"图库可以自己攒"的用法说明。
 - **聊天关思考**：`src/llm/llm.js`、`src/core/orchestrator.js`。聊天主调用传 `purpose:'chat'`，不携带 thinking 字段；判断/写作类调用不传，走 `default:'on'`。配置 `api.thinking = {chat:'off', default:'on'}`；脚本幂等，写配置前才停服务。
 - **看图先读情绪**：`src/llm/prompt.js`、`src/tools/tools-core.js`。模型看表情包/图片时容易去"描述画面"；改成先定性情绪再回话，v2 进一步收紧并给出正反例。顺手修了一个缺失：看库内表情时只给了 `desc`，没给模型自己写的 `localNote`。
 
-## 7. 发送链路健壮性
+## 8. 发送链路健壮性
 
 - **消息 id 归一化**：`src/tools/tools-core.js`、`src/core/store.js`。模型常把提示词里的 `#123` 连 `#` 一起传回来，而 OneBot 只认纯数字 id。关键教训：`tools-core.js` 用到的 `normalizeMid` 必须在同一个文件里定义（`store.js` 里那份是模块私有、没有 export），早先只替换调用点没插 helper，结果每次 `send_message` / `send_sticker` / `send_face` 都抛 `normalizeMid is not defined`，机器人一个字都发不出去。所以脚本把"插 helper"和"替换调用点"绑在一起，并且在最后自检两者必须同时存在。
 - **发送网络级重试**：`src/onebot/sender.js`。协议端重启或连接被掐时会抛 `fetch failed`，原来直接丢消息（用户视角是"它没回我"）；网络层错误重试一次即可救回，限频/参数类错误不重试（重试也没用）。回归用例见 `test/local/test-sender-retry.mjs`。
@@ -413,7 +475,7 @@
 - **启动/重连补课**：`src/console/app.js`。服务重启或协议端断线期间，消息事件会丢——消息根本没进库，也就永远没人回。做法：连上 OneBot（含重连）后从协议端拉一次最近历史，把库里没有的消息按 mid 去重补进来；≤30 分钟的按新消息处理（会触发回应），更早的只补进记录、不吵人。
 - **自检与静态扫描**：`src/ops.js scan`（原为 `ops/check-undefined-calls.sh` + `ops/scan-undefined-calls.py`，现已并入项目代码）。上面那次"整夜发不出一个字"的事故表现像"静默/掉线"，很难查；于是加了一个只记日志、永远 `exit 0`、不阻断启动的自检，挂在服务启动链上，另配 `src/ops.js audit` 的补丁标记检查做部署验收。
 
-## 8. 贴纸（表情包）系统
+## 9. 贴纸（表情包）系统
 
 - **自动收藏**：`src/onebot/sticker-manager.js`、`src/onebot/stickers.js`、`src/console/app.js`、`src/core/config-legacy.js`。让模型看一眼别人发的图，自己判断值不值得收（值得就存并写备注）；入口改成异步判断，不阻塞消息处理。条目保留 `srcKey` 作为去重键。
 - **收藏判断健壮性**：`src/onebot/sticker-manager.js`。两个失败模式：模型有时把决定写成 `<tool_call>` 文本或裸 JSON（判断逻辑只认结构化 `tool_calls` → 决定丢失）；`max_tokens=200` 会被"思考"吃掉（实测思考 80-595 token），截断后一个字段都收不到 → 提到 600。另外内容过滤是概率性的（实测同图 20/20 通过、偶发被挡），把尝试次数 2 提到 3，并把"被服务商内容过滤"和"模型没提交"在日志里分开。
@@ -421,7 +483,7 @@
 - **查找与备注**：`src/onebot/stickers.js`、`src/tools/tools-core.js`、`src/onebot/sticker-manager.js`。线上连续出现 5 次"找不到表情 NNN"，编号其实来自来信里的 `[表情NNN]` 标签，模型却拿去当表情库 id 查。于是：来信把系统表情标成 `[QQ表情N 名字]`；找不到时把有效 id 回给模型；`findSticker` 增加"唯一命中"的模糊兜底，提示改为直接用备注名选图；备注上限 16 → 24 字（真图实测里 16 字会把一句话硬切）。
 - **标签与收录规则**：`src/console/app.js`、`src/llm/prompt.js`、`src/tools/tools-core.js`、`src/onebot/stickers.js`、`src/onebot/sticker-manager.js`。表情包消息显示 `[表情包]`（普通图仍是 `[图片]`）；收藏规则收紧到"只认真正的表情包"，生活照/随手拍/自拍不收；相关文案统一叫"表情包"。
 
-## 9. 主动发言与空间互动
+## 10. 主动发言与空间互动
 
 - **开话题节奏**：`src/core/orchestrator.js`。间隔定为 2.5-3.5 小时；"没有安静的群"这种空转不算消耗本轮（45 分钟后再看）。概率、冷场阈值属于部署方偏好，脚本不强制。
 - **间隔守卫**：`src/core/orchestrator.js`。tick 第一次在启动后 15 秒触发，所以每重启一次就会多一次开话题判定，与"几小时才概率开一次"的设定不符。改为把"上次判定时间"落盘，重启后不足一个间隔直接跳过（补丁标记 `minGapMs`、`writeProactiveLastAttempt`）。
@@ -431,7 +493,7 @@
 - **抓取容错与通知阈值**：`src/features/qzone-interactions.js`、`ui/app.js`。好友动态这条外呼在腾讯侧被限流时会回 `{code:-10001, message:"network busy"}`（协议端原样透传），而它此前是硬失败：一次限流就让整轮——包括评论检查和已积压的未读——全部不跑，还会立刻顶一条"错误"级异常通知。现在抓取失败先等 45 秒重试一次（中止信号可打断等待）；仍失败只记 `run.feedError`，本轮继续跑评论检查与积压，运行记录标为「好友动态未取到」并在控制台显示原因；失败计数与退避照旧（2→4→8→16→30 分钟），连续第 3 次才发异常通知；失败轮不算建立动态基线，免得把上线前的旧动态当成新内容。用例：`test/qzone-interactions.test.mjs`、`test/local/test-qzone-backoff.mjs`、`test/local/test-qzone-intervals.mjs`。
 - **每日说说容错**：`src/features/daily-moments.js`。空间列表读不到时跳过查重，不阻断发布。
 
-## 10. 运维与控制台
+## 11. 运维与控制台
 
 - **控制台端口探测**：`src/console/integrations.js`。上游把 SnowLuma / noVNC 地址写死为旧端口 15099 / 16081，而 Linux 全栈部署实际使用 5099 / 6081，导致"服务与访问控制"页误报"不可达"。改为按实际部署端口探测，并修正改 SnowLuma 密码时的地址兜底端口。
 - **控制台自动登录**：`ui/app.js`（地址栏带 `?token=` 时先自动登录，成功后清掉 URL 里的明文令牌再重载，避免留在浏览历史）、`src/console/app.js`（登录 cookie 加 `Max-Age`，避免关掉浏览器就要重新输令牌）。
