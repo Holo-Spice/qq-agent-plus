@@ -256,9 +256,13 @@ export function ttsKeyFor(cfg, serviceId = '') {
   const map = cfg?.keys;
   const fromMap = map && typeof map === 'object' && Object.hasOwn(map, id) ? String(map[id] || '').trim() : '';
   if (fromMap) return fromMap;
-  // 旧配置只有一个 apiKey（没有 keys 映射）：只在问"当前这家"时兜底 —— 否则会把硅基流动的
-  // Key 拿去打火山的接口（2026-09-28：豆包那条路会因此报 45000010，报错还指向错误的 Key）
-  return id === current ? String(cfg?.apiKey || '').trim() : '';
+  // 旧配置只有一个 apiKey（没有 keys 映射）：**归属明确**（apiKeyService = 这把是给哪家存的，
+  // 提交时记）才用。没记归属的老配置按"当前这家"兜底 —— **升级不改变任何人在用/不在用**。
+  // ⚠️ 为什么不能继续只看"是不是当前这家"（2026-09-28 起一直是这么兜底的）：切换服务预设后
+  // current 会跟着变，上一家那把单槽 Key 就被当成新服务的那把发出去 —— 与 asr 侧 2026-09-26
+  // 修过的事故同型（把腾讯的 SecretKey 当讯飞 APISecret 发出去）。
+  const owner = String(cfg?.apiKeyService || '').trim() || current;
+  return id === owner ? String(cfg?.apiKey || '').trim() : '';
 }
 
 /** 哪几家已经存过 Key（给界面显示掩码用；不下发明文）。 */

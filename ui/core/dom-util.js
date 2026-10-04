@@ -176,9 +176,43 @@ function patchKeyedList(container, entries, keyAttr = 'data-key') {
 // 只在内容真的变化时替换 DOM。
 // 背景：控制页/异常页等会在每次状态刷新（15 秒一次 + 推送）时重建整块 HTML，
 // 数据没变也照重建 —— 页面就"整页闪一下"。用这个函数收口：HTML 相同直接跳过。
+/**
+ * 取出容器内输入控件的当前值（按 id 存）：重画后要还回去，
+ * 否则"用户在整块重画那一刻还没保存的输入"会被服务端上一次的值覆盖
+ * （好友管理页二十多个数字框、异常处理设置、人物印象搜索框都踩过这一类）。
+ * 只保留有 id 的控件 —— 没 id 的本来也只能靠位置猜，猜错反而更糟。
+ */
+function captureEditableValues(root) {
+  const values = new Map();
+  if (!root?.querySelectorAll) return values;
+  for (const node of root.querySelectorAll('input[id], select[id], textarea[id]')) {
+    if (node.type === 'checkbox' || node.type === 'radio') values.set(node.id, { checked: node.checked === true });
+    else values.set(node.id, { value: String(node.value ?? '') });
+  }
+  return values;
+}
+
+/** 还回上一轮的值：输入类控件直接还原；下拉只在**该选项还在**时还原（选项变了不强塞非法值）。
+ *  遍历**新**节点而不是按 id 反查：省掉选择器转义，控件被删/改名时自然跳过。 */
+function restoreEditableValues(root, values) {
+  if (!values.size || !root?.querySelectorAll) return;
+  for (const node of root.querySelectorAll('input[id], select[id], textarea[id]')) {
+    const saved = values.get(node.id);
+    if (!saved) continue;
+    if ('checked' in saved) {
+      node.checked = saved.checked;
+    } else if (node.tagName === 'SELECT' && ![...node.options].some((option) => option.value === saved.value)) {
+      continue;
+    } else {
+      node.value = saved.value;
+    }
+  }
+}
+
 function setHtmlIfChanged(el, html) {
   if (!el) return false;
   if (el.__renderedHtml === html) return false;
+  const values = captureEditableValues(el);
   // 用户正在这块区域里打字时，这一轮重拉先别写：整块 innerHTML 会把输入框连同内容一起换掉
   //（焦点丢失、正在敲的字符消失）—— 与 2026-10-02「屏蔽名单搜索框只能输一个字」同族。
   // 只拦焦点在输入类控件上：按钮上的焦点不拦（保存后的「已保存」提示要能画出来），
@@ -188,6 +222,7 @@ function setHtmlIfChanged(el, html) {
     && /^(input|textarea|select)$/i.test(active.tagName || '')) return false;
   el.__renderedHtml = html;
   el.innerHTML = html;
+  restoreEditableValues(el, values);
   return true;
 }
 

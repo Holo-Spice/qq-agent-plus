@@ -218,6 +218,7 @@ export const DEFAULT_CONFIG = {
     // 按服务分别存 Key（切预设不串用；切回来还能看到已存的那把）：
     //   { "siliconflow": "sk-…", "volc": "<access token>", "doubao": "<api key>", "minimax": "…" }
     keys: {},
+    apiKeyService: '',          // 上面那个单槽 apiKey 是给哪家存的（提交时记；老配置留空 = 按"当前这家"兜底）
     model: '',
     voice: '',
     format: 'mp3',
@@ -956,6 +957,13 @@ function migrateConfig(parsed) {
         for (const sub of Object.keys(value)) if (/^has[A-Z]/.test(sub)) delete value[sub];
       }
     }
+  }
+  // ── 语音合成（tts）──
+  if (isPlainObject(out.tts)) {
+    // 派生位（sanitize 生成的 hasApiKey、GET 下发的 keyServices/currentService）不落盘
+    // （与下面 asr/imageGen 两段同口径；原来 tts 这一段整个缺，别处写入会把它持久化）
+    for (const key of ['hasApiKey', 'keyServices', 'currentService']) delete out.tts[key];
+    if (out.tts.keys !== undefined && !isPlainObject(out.tts.keys)) out.tts.keys = {};
   }
   // ── 语音转写（asr）──
   if (isPlainObject(out.asr)) {

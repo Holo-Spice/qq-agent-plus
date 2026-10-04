@@ -80,3 +80,56 @@ test('自建网关的 Key 存进 keys.custom，运行时也按 custom 取；/api
   assert.match(calls[0].url, /^https:\/\/my-gw\.example\/v1\/audio\/speech$/);
   assert.equal(calls[0].auth, 'Bearer sk-selfhosted');
 });
+
+test('TTS 单槽 Key 的归属：切到没存过 Key 的服务会清掉它，切回来能用自己那把（2026-10-03）', async (t) => {
+  const port = await freePort();
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.server = { ...cfg.server, host: '127.0.0.1', port, token: '' };
+  cfg.runtime.mode = 'observe';
+  cfg.onebot.wsUrl = 'ws://127.0.0.1:1';
+  cfg.onebot.httpUrl = 'ws://127.0.0.1:1';
+  // 老配置形态：单槽 apiKey（归当前这家），keys 映射为空
+  cfg.tts = { ...cfg.tts, enabled: true, provider: 'openai', baseUrl: 'https://api.siliconflow.cn/v1', apiKey: 'SK-SILICON' };
+  updateConfig(cfg);
+  const app = createApp({ log: () => {} });
+  t.after(async () => { await app.stop(); fs.rmSync(root, { recursive: true, force: true }); });
+  await app.start();
+  const request = async (route, { method = 'GET', body } = {}) => {
+    const response = await fetch(`http://127.0.0.1:${port}${route}`, {
+      method, headers: { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    return { status: response.status, body: await response.json() };
+  };
+  const { ttsKeyFor, ttsServiceOf } = await import('../src/llm/tts-presets.js');
+  const { getConfig: live } = await import('../src/core/config.js');
+
+  // 切到豆包（这家的 keys 里没有记录）、Key 框留空 → 单槽那把必须被清掉（不能发给豆包）
+  let res = await request('/api/config', {
+    method: 'POST',
+    body: { tts: { enabled: true, provider: 'doubao', baseUrl: 'https://openspeech.bytedance.com/api/v3/tts/unidirectional', apiKeyInput: '' } }
+  });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  let now = live().tts;
+  assert.equal(String(now.apiKey || ''), '', '不沿用上一家的单槽 Key（宁可显示未填）');
+  assert.equal(ttsKeyFor(now, 'doubao'), '', '豆包拿不到硅基流动那把');
+  assert.equal(String(now.apiKeyService || ''), '', '归属一并清掉');
+
+  // 切回硅基流动并填上 → 归属记住；之后"什么都不填"地保存也不能丢
+  res = await request('/api/config', {
+    method: 'POST',
+    body: { tts: { enabled: true, provider: 'openai', baseUrl: 'https://api.siliconflow.cn/v1', model: 'FunAudioLLM/CosyVoice2-0.5B', apiKeyInput: 'SK-NEW-SILICON' } }
+  });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  now = live().tts;
+  assert.equal(now.apiKeyService, 'siliconflow', '新填的 Key 归属记在这一家');
+  assert.equal(ttsKeyFor(now, 'siliconflow'), 'SK-NEW-SILICON');
+  assert.equal(ttsKeyFor(now, 'doubao'), '', '别家仍然拿不到');
+
+  // 无关的一次保存（没碰 Key）不能把归属或 Key 弄丢
+  res = await request('/api/config', { method: 'POST', body: { tts: { enabled: true, voice: 'claude' } } });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  now = live().tts;
+  assert.equal(ttsKeyFor(now, 'siliconflow'), 'SK-NEW-SILICON', '空/掩码 = 保持原值');
+  assert.ok(ttsServiceOf(now), '服务识别不受影响');
+});

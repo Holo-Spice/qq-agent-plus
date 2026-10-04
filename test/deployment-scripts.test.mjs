@@ -35,6 +35,37 @@ test('deploy script verifies and rolls back the update service and timer', () =>
 // 2026-10-01 审查：接管陈旧锁的判据曾经整个反了（写成 -z），后果是 SIGKILL 之后
 // 无人值守的更新永久卡在"Another deployment is running"，而刚 mkdir 还没写 pid 的
 // 并发锁反被抢走。这条断言盯住 `-mmin +5` 的判定方向（find 命中才输出 = 必须 -n）。
+test('deploy.sh：失败/回滚路径的防线都在（trap、健康闸门、权限、中断标记）', () => {
+  const source = fs.readFileSync(path.join(repo, 'deploy.sh'), 'utf8');
+
+  // ① 出错/中断必须自动回滚：没有这条，一次半途而废的部署会把服务留在坏状态
+  assert.match(source, /^trap rollback_deployment ERR INT TERM$/m,
+    '必须装 ERR/INT/TERM → rollback_deployment 的 trap（失败与 Ctrl-C 都要退回去）');
+  assert.match(source, /^rollback_deployment\(\) \{$/m, 'rollback_deployment 本体要存在（trap 指向的函数）');
+
+  // ② 健康检查是"装好了"的唯一判据：失败必须回滚 + 非 0 退出，不能打印成功
+  const failAt = source.indexOf('HEALTHY=false');
+  const gateAt = source.indexOf('[[ "$HEALTHY" == true ]]');
+  assert.ok(failAt > 0, 'HEALTHY 初始必须是 false（写成 true 等于闸门永不触发）');
+  assert.ok(gateAt > failAt, '健康闸门要在 HEALTHY=false 之后判（顺序反了等于没闸门）');
+  const gateLine = source.slice(gateAt, source.indexOf('\n', gateAt));
+  assert.match(gateLine, /rollback_deployment/, '健康检查失败的分支里必须调 rollback_deployment');
+  assert.match(gateLine, /exit 1/, '并且以非 0 退出（不能打印成功）');
+
+  // ③ 含密钥的产物权限：config.json / console-access.txt / 回滚快照都不能全局可读
+  assert.match(source, /^umask 077$/m, '脚本要 umask 077（配置与回滚快照里是明文密钥）');
+
+  // ④ 中断标记：装到一半被打断（SIGKILL/OOM/掉电，不执行 trap）时，systemd 不能把半更新的树
+  //    当正常代码拉起来 —— 标记必须成对出现（部署前写、结束或回滚时清）
+  const markAt = source.indexOf('mark_deploy_in_progress');
+  const clearAt = source.indexOf('clear_deploy_marker');
+  assert.ok(markAt > 0 && clearAt > 0, '部署前要写中断标记、结束后要清（两处都要在）');
+  assert.ok(clearAt > markAt, '清标记必须在写标记之后');
+  assert.match(source, /IN_PROGRESS_MARKER="\$DATA_DIR\/\.deploy-in-progress"/,
+    '标记落在数据目录（ops 巡检也看它）');
+});
+
+
 test('deploy.sh：只有"属主已死且锁确实超过 5 分钟"才接管陈旧锁', () => {
   const source = fs.readFileSync(path.join(repo, 'deploy.sh'), 'utf8');
   assert.match(

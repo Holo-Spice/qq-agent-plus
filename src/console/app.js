@@ -3135,6 +3135,20 @@ export function createApp({
       }
       const submittedKey = String(ttsBody.apiKey ?? '').trim();
       if (!submittedKey || submittedKey === '******') delete ttsBody.apiKey;
+      // ── 单槽 Key 的归属（2026-10-03）── 必须放在上面那句之后：它把 apiKeyInput 清掉、
+      //    再判"这次有没有真提交"；而"空/掩码 = 保持原值"那句会把我下面置的空串 delete 掉。
+      if (keyInput && keyInput !== '******') {
+        ttsBody.apiKeyService = targetId;   // 新填的这把归属就是这一家（切回它时兜底才认）
+      } else if (String(cfgNow.tts?.apiKey || '').trim()) {
+        // 切到**没存过 Key** 的服务且没填 → 不沿用上一家的单槽 Key（与 asr/imageGen 同一口径）。
+        // 归属比较必须用"改动前"的配置：改完之后 current 已经变成新服务，拿它比会判成"就是这家的"。
+        const ownerNow = String(cfgNow.tts?.apiKeyService || '').trim() || ttsServiceOf(cfgNow.tts)?.id || '';
+        if (ownerNow !== targetId) {
+          // ⚠️ 置空串才是"清空"：delete 只是"这次不提交"（空/掩码 = 保持原值）。
+          ttsBody.apiKey = '';
+          ttsBody.apiKeyService = '';
+        }
+      }
     }
     // imageGen 的 Key：与 tts 同款语义（留空/掩码 = 保持原值）。前端已按此过滤，
     // 这里再兜一层 —— 配置是外部可编辑的，别让一次手写的空串把 Key 冲掉。
