@@ -1096,7 +1096,10 @@ export function buildToolDefs() {
         // 口径与 memory-global.js 一致：按最近观察排序截断；指定 userId 时给更高的单点上限。
         const MAX_ALL = 40;
         const MAX_ONE = 20;
-        const byRecency = (a, b) => Number(b.lastObservedAt || 0) - Number(a.lastObservedAt || 0);
+        // 与 memory-global.js 的注入路径同一口径：缺 lastObservedAt 时回退 createdAt
+        // （只读 lastObservedAt 会把老条目全排到末尾，与自动注入看到的顺序不一致）
+        const recency = (e) => Number(e.lastObservedAt || e.createdAt || 0);
+        const byRecency = (a, b) => recency(b) - recency(a);
         const list = userId
           ? mem.memberImpression.filter((e) => String(e.userId) === userId).sort(byRecency).slice(0, MAX_ONE)
           : [...mem.memberImpression].sort(byRecency).slice(0, MAX_ALL);

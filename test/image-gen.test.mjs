@@ -338,14 +338,15 @@ test('resolveImageGenAuth：存过的 Key 只在"它自己的地址"上生效（
 });
 
 test('映射读键走自有属性：host=constructor 这类原型链取值不算"存过的 Key"（推前复审）', async () => {
-  const { imageGenKeyFor, imageGenKeyResolve } = await import('../src/core/config-legacy.js');
+  // imageGenKeyFor 已与 imageGenKeyResolve 合并（运行时/保存路径共用一个口径）
+  const { imageGenKeyResolve } = await import('../src/core/config-legacy.js');
   // 主机名是外部可控输入（服务预设的地址、手改配置），单标签主机名真的可能是 constructor
   const cfg = { apiKey: 'A-KEY', apiKeyHost: 'a.example.com', keys: {} };
-  assert.equal(imageGenKeyFor(cfg, 'constructor'), '', '不吃对象原型的 constructor');
+  assert.equal(imageGenKeyResolve(cfg, 'constructor').value, '', '不吃对象原型的 constructor');
   assert.deepEqual(imageGenKeyResolve(cfg, 'constructor'), { value: '', owned: false });
-  assert.equal(imageGenKeyFor(cfg, '__proto__'), '');
-  assert.equal(imageGenKeyFor({ keys: { 'a.example.com': 'MAP-KEY' } }, 'constructor'), '');
-  assert.equal(imageGenKeyFor({ keys: { 'a.example.com': 'MAP-KEY' } }, 'a.example.com'), 'MAP-KEY', '自有键照常读到');
+  assert.equal(imageGenKeyResolve(cfg, '__proto__').value, '');
+  assert.equal(imageGenKeyResolve({ keys: { 'a.example.com': 'MAP-KEY' } }, 'constructor').value, '');
+  assert.equal(imageGenKeyResolve({ keys: { 'a.example.com': 'MAP-KEY' } }, 'a.example.com').value, 'MAP-KEY', '自有键照常读到');
   // asr 侧同款（自有属性读；手改成标量的条目当"没存过"）
   const C = await import('../src/core/config.js');
   assert.equal(C.asrCredentialFor({ keys: {} }, 'apiKey', 'constructor', ''), '');

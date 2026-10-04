@@ -960,9 +960,11 @@ function migrateConfig(parsed) {
   }
   // ── 语音合成（tts）──
   if (isPlainObject(out.tts)) {
-    // 派生位（sanitize 生成的 hasApiKey、GET 下发的 keyServices/currentService）不落盘
-    // （与下面 asr/imageGen 两段同口径；原来 tts 这一段整个缺，别处写入会把它持久化）
-    for (const key of ['hasApiKey', 'keyServices', 'currentService']) delete out.tts[key];
+    // 派生位不落盘：hasApiKey 是 sanitize 生成的、keyServices/currentService 是 GET 下发的，
+    // 而 sanitize 生成的 hasApiKeyService 等一律用 has[A-Z] 通配兜住（与下面 asr/imageGen 两段同口径；
+    // 原来 tts 这一段整个缺，别处写入会把它们持久化）
+    for (const key of Object.keys(out.tts)) if (/^has[A-Z]/.test(key)) delete out.tts[key];
+    for (const key of ['keyServices', 'currentService']) delete out.tts[key];
     if (out.tts.keys !== undefined && !isPlainObject(out.tts.keys)) out.tts.keys = {};
   }
   // ── 语音转写（asr）──
@@ -1087,10 +1089,6 @@ export function pinImageGenKeyHost(imageGen, apiBaseUrl) {
  * apiKey + apiKeyHost，"没记归属"的那把按"当前地址能用"算 —— 与 imageGenKeyApplies 一致）。
  * 运行时/判定端读它；"保存时该用哪把、能不能认领"用 imageGenKeyResolve（2026-10-02 全量审查拆开）。
  */
-export function imageGenKeyFor(imageGen, host) {
-  return imageGenKeyResolveCore(imageGen, host, { allowUnbound: true }).value;
-}
-
 /**
  * 保存时解析"目标主机该用哪把 Key"，返回 { value, owned }（与 asrCredentialResolve 同款）：
  *   owned=true  → 明确属于这个主机（活动槽的 apiKeyHost 就是它，或映射里这家存过的）→ 可写回钉；

@@ -57,10 +57,16 @@ test('deploy.sh：失败/回滚路径的防线都在（trap、健康闸门、权
 
   // ④ 中断标记：装到一半被打断（SIGKILL/OOM/掉电，不执行 trap）时，systemd 不能把半更新的树
   //    当正常代码拉起来 —— 标记必须成对出现（部署前写、结束或回滚时清）
-  const markAt = source.indexOf('mark_deploy_in_progress');
-  const clearAt = source.indexOf('clear_deploy_marker');
-  assert.ok(markAt > 0 && clearAt > 0, '部署前要写中断标记、结束后要清（两处都要在）');
-  assert.ok(clearAt > markAt, '清标记必须在写标记之后');
+  // ⚠️ 必须锚**调用点**，不能锚函数定义 —— bash 里定义天然在调用之前，锚定义会让
+  //   "两个调用点都被删掉"照样绿（2026-10-03 复审实测过这个假绿）。用"裸调用的行"正则取位置：
+  //   定义行是 `name() {`，调用行没有括号与花括号。
+  const markAt = source.search(/^\s*mark_deploy_in_progress\s*$/m);
+  const clearAt = source.search(/^\s*clear_deploy_marker\s*$/m);
+  assert.ok(markAt >= 0, '部署前要真的调用 mark_deploy_in_progress（不是只定义）');
+  assert.ok(clearAt >= 0, '结束/回滚时要真的调用 clear_deploy_marker');
+  // 取**标记之后**那次停服：rollback_deployment 里也有一次 stop（在标记之前），与本断言无关
+  const stopAfterMark = source.indexOf('systemctl --user stop "$SERVICE.service"', markAt);
+  assert.ok(stopAfterMark > markAt, '必须先写标记再停服（停服后崩掉才留得下标记给恢复流程用）');
   assert.match(source, /IN_PROGRESS_MARKER="\$DATA_DIR\/\.deploy-in-progress"/,
     '标记落在数据目录（ops 巡检也看它）');
 });

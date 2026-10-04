@@ -11,7 +11,7 @@
 // 下载器（url 形态）直接 import safeFetchBinary 而不是当参数传：函数当参数会被 ops scan
 // 当成"未定义调用点"误报（与 tts-http.js 里记的同一类）。
 import { watchTimeWindow } from '../core/time-gate.js';
-import { imageGenKeyFor } from '../core/config.js';
+import { imageGenKeyResolve } from '../core/config.js';
 import { imageGenServiceOfBaseUrl, imageGenServiceNeedsKey } from './image-gen-presets.js';
 import { safeFetchBinary } from './safe-fetch.js';
 
@@ -58,7 +58,7 @@ export function imageGenKeyStale(imageGen, api) {
   if (!hasAny) return false;   // 从没存过 = "还没填"，不是"要重填"
   // imageGenKeyFor 里含"没记归属的老单槽按当前地址能用"的兜底 —— 与运行时同一口径，
   // 不给升级中的实例制造突然失效（2026-10-02 回归测试抓到过）
-  return !imageGenKeyFor(imageGen, host);
+  return !imageGenKeyResolve(imageGen, host).value;
 }
 
 /** 实际会用的图片服务主机（控制台「显示」按钮判断"表单里换的主机是不是当前这家"用）。 */
@@ -87,7 +87,8 @@ export function resolveImageGenAuth({ imageGen, api, apiKey } = {}) {
   }
   // 活动槽不可用（没填/归属不是这家）→ 查"这家存过的"（2026-10-02：切换服务预设的记忆；
   // 也覆盖手改配置直接换地址的情况 —— 只要那把 Key 确实是给这个主机存的，就不算跨家外发）
-  const remembered = imageGenKeyFor(imageGen, gHost);
+  // 运行时取值走 imageGenKeyResolve（与保存路径同一口径；不再另开一个字符串包装导出）
+  const remembered = imageGenKeyResolve(imageGen, gHost).value;
   if (remembered) return { ok: true, key: remembered, reused: false, error: '' };
   const aHost = hostOf(api?.baseUrl);
   if (gHost && aHost && gHost === aHost) {

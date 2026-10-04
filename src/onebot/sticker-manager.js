@@ -496,7 +496,9 @@ export class StickerManager {
 
   /**
    * 收藏配额预检（#9 双闸：每会话 + 全局）：工具层在"看图判断"之前先问一句，别白跑一次视觉调用。
-   * 只查不记 —— 真正扣额度发生在 collect() 落库成功之后。返回 { ok, scope:'chat'|'global'|'' }。
+   * 只查不记 —— 真正的"扣/退"在 collect() 里（事前原子消费 + 失败退款，见 #collect 门面），
+   * 这里只是让工具层在做视觉判断**之前**先问一句，省掉一次白跑的看图调用。
+   * 返回 { ok, scope:'chat'|'global'|'' }。
    */
   collectPeek(now = Date.now(), chatKey = '') {
     this.#configureCollectQuota();

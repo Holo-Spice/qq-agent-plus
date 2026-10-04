@@ -186,26 +186,33 @@ function captureEditableValues(root) {
   const values = new Map();
   if (!root?.querySelectorAll) return values;
   for (const node of root.querySelectorAll('input[id], select[id], textarea[id]')) {
-    if (node.type === 'checkbox' || node.type === 'radio') values.set(node.id, { checked: node.checked === true });
-    else values.set(node.id, { value: String(node.value ?? '') });
+    const box = node.type === 'checkbox' || node.type === 'radio';
+    // __renderedValue = 上一轮**渲染出来**的值；与它不同才说明用户动过这个控件
+    const current = box ? node.checked === true : String(node.value ?? '');
+    values.set(node.id, { box, current, rendered: node.__renderedValue });
   }
   return values;
 }
 
-/** 还回上一轮的值：输入类控件直接还原；下拉只在**该选项还在**时还原（选项变了不强塞非法值）。
- *  遍历**新**节点而不是按 id 反查：省掉选择器转义，控件被删/改名时自然跳过。 */
+/** 还回用户改过、还没保存的那一份：
+ *  · **只还原"用户真的动过"的控件**（当前值 ≠ 上一轮渲染值）——没动过的控件要跟着服务端新值走，
+ *    否则服务端纠正过的值（越界被夹、别名改名…）会被永久挡在界面外（2026-10-03 复审指出）。
+ *  · 下拉只在**该选项还在**时还原（选项没了不强塞非法值）；控件换了类型（同名 checkbox↔text）不还原。
+ *  · 遍历**新**节点而不是按 id 反查：省掉选择器转义，控件被删/改名时自然跳过。 */
 function restoreEditableValues(root, values) {
-  if (!values.size || !root?.querySelectorAll) return;
+  // 不用 values.size 提前返回：**每个新控件都要记下这一轮渲染出来的值**（首轮容器是空的，
+  // values 为空，但记录渲染值仍要做，否则第二次重画时无从判断"用户动过没有"）。
+  if (!root?.querySelectorAll) return;
   for (const node of root.querySelectorAll('input[id], select[id], textarea[id]')) {
     const saved = values.get(node.id);
-    if (!saved) continue;
-    if ('checked' in saved) {
-      node.checked = saved.checked;
-    } else if (node.tagName === 'SELECT' && ![...node.options].some((option) => option.value === saved.value)) {
-      continue;
-    } else {
-      node.value = saved.value;
+    const box = node.type === 'checkbox' || node.type === 'radio';
+    if (saved && saved.box === box && saved.rendered !== undefined && saved.current !== saved.rendered) {
+      if (box) node.checked = saved.current;
+      else if (node.tagName !== 'SELECT' || [...node.options].some((option) => option.value === saved.current)) {
+        node.value = saved.current;
+      }
     }
+    node.__renderedValue = box ? node.checked : String(node.value ?? '');
   }
 }
 

@@ -318,6 +318,17 @@ test('标量 patch（{asr: 5}）按"这次没改"处理，不清空整段（否�
   assert.equal(typeof getConfig().tts, 'object', '数组 patch 同理');
 });
 
+test('tts 的派生位与 has[A-Z] 通配同样不落盘（hasApiKeyService 是 sanitize 生成的）', async () => {
+  const { updateConfig, getConfig } = await import('../src/core/config.js');
+  updateConfig({ tts: { hasApiKeyService: true, hasApiKey: true, keyServices: ['doubao'], currentService: 'doubao' } });
+  const tts = getConfig().tts;
+  assert.equal('hasApiKeyService' in tts, false, 'has[A-Z] 派生位一律不落盘（tts 段原先漏了通配）');
+  assert.equal('hasApiKey' in tts, false);
+  assert.equal('keyServices' in tts, false);
+  assert.equal('currentService' in tts, false);
+  assert.equal(String(tts.apiKeyService || ''), '', '归属字段本身是配置（默认空串），不能被当派生位删掉');
+});
+
 test('webSearch 的派生位（sanitize 生成的 hasApiKey）不落盘', async () => {
   const { updateConfig, getConfig } = await import('../src/core/config.js');
   updateConfig({

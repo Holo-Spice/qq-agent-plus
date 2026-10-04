@@ -3111,6 +3111,10 @@ export function createApp({
       delete ttsBody.hasApiKey;
       delete ttsBody.keyServices;
       delete ttsBody.currentService;
+      // 归属钉同样由服务端算：客户端直接送 apiKeyService 就能把别家的旧 Key 改绑到当前这家，
+      // 而 ttsKeyFor 会照新归属把它发出去（与 asr/imageGen 同一条防线，这里原先漏了）
+      delete ttsBody.apiKeyService;
+      delete ttsBody.hasApiKeyService;
       // 前端只送"这一家新填的 Key"（apiKeyInput）与当前服务：合并进 keys 映射，
       // 绝不接受整份 keys 覆盖（那会把别家的 Key 冲掉）。空/掩码 = 保持不变。
       const keyInput = String(ttsBody.apiKeyInput ?? '').trim();
@@ -3144,6 +3148,14 @@ export function createApp({
         // 归属比较必须用"改动前"的配置：改完之后 current 已经变成新服务，拿它比会判成"就是这家的"。
         const ownerNow = String(cfgNow.tts?.apiKeyService || '').trim() || ttsServiceOf(cfgNow.tts)?.id || '';
         if (ownerNow !== targetId) {
+          // ⚠️ 先归档再置空（2026-10-03 复审）：存量实例的 Key 只存在于 tts.apiKey 这一个字段里
+          // （keys 映射是控制台从 2026-09-29 起才写的），直接清空就是**永久丢失**、控制台也找不回来。
+          // 归档进 keys[原归属] 后：切回那家能自动填回，切走期间归属钉照旧挡住它不被发出去。
+          if (ownerNow && !String(nextTtsKeys[ownerNow] || '').trim()) {
+            nextTtsKeys[ownerNow] = cfgNow.tts.apiKey;
+            ttsBody.keys = nextTtsKeys;
+            stampServerKeys('tts', nextTtsKeys);
+          }
           // ⚠️ 置空串才是"清空"：delete 只是"这次不提交"（空/掩码 = 保持原值）。
           ttsBody.apiKey = '';
           ttsBody.apiKeyService = '';

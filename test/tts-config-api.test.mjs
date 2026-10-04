@@ -113,7 +113,10 @@ test('TTS 单槽 Key 的归属：切到没存过 Key 的服务会清掉它，切
   let now = live().tts;
   assert.equal(String(now.apiKey || ''), '', '不沿用上一家的单槽 Key（宁可显示未填）');
   assert.equal(ttsKeyFor(now, 'doubao'), '', '豆包拿不到硅基流动那把');
-  assert.equal(String(now.apiKeyService || ''), '', '归属一并清掉');
+  assert.equal(String(now.apiKeyService || ''), '', '活动槽的归属一并清掉');
+  // ⚠️ 但那把 Key 不能凭空消失（2026-10-03 复审）：存量实例的 Key 只存在于 tts.apiKey 一个字段里
+  //（keys 映射是控制台从 2026-09-29 起才写的），直接清空 = 永久丢失、控制台也找不回来。
+  assert.equal(now.keys?.siliconflow, 'SK-SILICON', '切走前要归档进原归属的槽位（切回去能自动填回）');
 
   // 切回硅基流动并填上 → 归属记住；之后"什么都不填"地保存也不能丢
   res = await request('/api/config', {
@@ -132,4 +135,20 @@ test('TTS 单槽 Key 的归属：切到没存过 Key 的服务会清掉它，切
   now = live().tts;
   assert.equal(ttsKeyFor(now, 'siliconflow'), 'SK-NEW-SILICON', '空/掩码 = 保持原值');
   assert.ok(ttsServiceOf(now), '服务识别不受影响');
+  // 不重新填 Key、直接切回硅基流动 → 归档的那把自动回来了（这一段是"不丢数据"的正面断言）
+  res = await request('/api/config', {
+    method: 'POST',
+    body: { tts: { enabled: true, provider: 'openai', baseUrl: 'https://api.siliconflow.cn/v1', model: 'FunAudioLLM/CosyVoice2-0.5B' } }
+  });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(ttsKeyFor(live().tts, 'siliconflow'), 'SK-NEW-SILICON', '切回原服务不用重填（用的是映射里那把）');
+
+  // ② 客户端直接送归属钉 → 被忽略（归属只由服务端按本次提交算）
+  res = await request('/api/config', {
+    method: 'POST',
+    body: { tts: { enabled: true, provider: 'doubao', baseUrl: 'https://openspeech.bytedance.com/api/v3/tts/unidirectional', apiKeyService: 'doubao' } }
+  });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.notEqual(String(live().tts.apiKeyService || ''), 'doubao',
+    '客户端送的归属钉不能生效（否则能把别家的旧 Key 改绑给当前这家）');
 });

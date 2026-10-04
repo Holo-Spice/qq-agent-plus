@@ -2209,7 +2209,7 @@ function printMainHelp() {
   say('  deploy          非交互部署（需 --confirm）');
   say('  console         SSH 隧道 + 打开控制台（Windows/macOS/Linux）');
   say('  install-timers  生成并安装 systemd user 定时器（需 --confirm）');
-  say('  health-check    健康巡检（备份/看门狗/健康/审计清理等单元与数据面）；退出码 0=健康');
+  say('  health-check    健康巡检（控制台/协议端/入站水位/磁盘/更新状态）；退出码 0=健康');
   say('  help            显示本帮助');
   say();
   say('环境变量与常用示例见 docs/OPS.md。');

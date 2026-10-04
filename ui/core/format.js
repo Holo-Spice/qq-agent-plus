@@ -83,10 +83,17 @@ function versionWithRevision(version, value) {
   return v ? `v${v} · ${rev}` : rev;
 }
 
+// 与 fmtTime 同一时区口径（Asia/Shanghai）：会话页"列表时间"与"详情开始/结束时间"同屏出现，
+// 两处一个本地一个上海会让同一批运行对不上（2026-10-03 复审）。
+const CLOCK_FMT = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+});
+
 function fmtClock(ts) {
-  const d = new Date(ts);
-  const p = (n) => String(n).padStart(2, '0');
-  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  const n = Number(ts);
+  if (!Number.isFinite(n) || n <= 0 || n > 8.64e15) return '-';
+  const part = (type) => String(Number(CLOCK_FMT.formatToParts(new Date(n)).find((x) => x.type === type)?.value ?? 0)).padStart(2, '0');
+  return `${part('hour')}:${part('minute')}:${part('second')}`;
 }
 
 function fmtRemainingMs(ms) {

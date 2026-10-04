@@ -62,6 +62,20 @@ test('整块重画不覆盖未保存的输入（好友管理/异常处理/人物
   window.setHtmlIfChanged(gone, '<select id="cfg-sel"><option value="a">A</option></select><span id="live">z</span>');
   assert.equal(gone.querySelector('#cfg-sel').value, 'a', '选项没了就不还原旧值（保持服务端那份合法值）');
 
+  // 用户**没动过**的控件要跟着服务端新值走：否则服务端纠正过的值（越界被夹、别名改名…）
+  // 会被上一轮那份旧值永久挡在界面外（2026-10-03 复审指出）
+  const corrected = doc.createElement('div');
+  window.setHtmlIfChanged(corrected, html('1'));
+  assert.equal(corrected.querySelector('#cfg-num').value, '1');
+  window.setHtmlIfChanged(corrected, html('7', 'z'));
+  assert.equal(corrected.querySelector('#cfg-num').value, '7', '没动过的控件跟服务端纠正后的值走');
+  // 同名换类型（checkbox → text）不乱还原
+  const retyped = doc.createElement('div');
+  window.setHtmlIfChanged(retyped, '<input id="cfg-flag" type="checkbox">');
+  retyped.querySelector('#cfg-flag').checked = true;
+  window.setHtmlIfChanged(retyped, '<input id="cfg-flag" type="text" value="k">');
+  assert.equal(retyped.querySelector('#cfg-flag').value, 'k', '控件换了类型就不还原旧值');
+
   // 控件被删掉 → 不报错
   const removed = doc.createElement('div');
   window.setHtmlIfChanged(removed, html('1'));
