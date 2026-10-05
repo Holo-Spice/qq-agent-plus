@@ -464,4 +464,21 @@ export class SendQueue {
       });      return data;
     });
   }
+
+  /** 改自己在群里的群名片。改完留档，下次运行模型才知道当前名片是什么。 */
+  setCard(chatKey, card) {
+    const [kind, id] = String(chatKey).split(':');
+    const chain = this.#chain(chatKey);
+    return chain(async () => {
+      if (kind !== 'group') throw new Error('群名片只能在群聊里改');
+      await this.#assertNotMuted(chatKey);
+      this.#checkRate(chatKey);
+      await sleep(randInt(300, 900));
+      const data = await this.onebot.setGroupCard(id, this.onebot.selfId, String(card ?? '').trim());
+      const label = `[改群名片] 现在叫「${String(card ?? '').trim()}」`;
+      this.store.appendSelf(chatKey, { text: label, ts: Date.now(), mid: null, eventKind: 'card' });
+      this.onSent?.({ chatKey, text: label, messageId: null });
+      return data;
+    });
+  }
 }

@@ -670,6 +670,33 @@ export function buildToolDefs() {
       }
     },
     {
+      name: 'set_group_card',
+      description: '修改你自己在当前群的群名片（群昵称）。只能改自己的，不能改别人。名字要符合本群氛围（一般 2~8 字），别带广告或奇怪符号。别人问"你叫什么/改下名片"或名片跟当前人设明显不符时可以用，别频繁改。',
+      parameters: {
+        type: 'object',
+        properties: { card: { type: 'string', description: '新的群名片（2~8 字；不支持传空字符串清空，想恢复默认请直接设成群昵称本名）' } },
+        required: ['card']
+      },
+      async execute(ctx, args) {
+        try {
+          if (ctx.kind !== 'group') return err('群名片只能在群聊里改');
+          const raw = String(args.card ?? '').trim();
+          if (!raw) return err('card 不能为空（清空名片请说「恢复默认」而不是发空白）');
+          const card = raw.slice(0, 20);
+          if (ctx.sender?.setCard) {
+            await ctx.sender.setCard(ctx.chatKey, card, { runId: ctx.session.leaseId, signal: ctx.signal });
+          } else if (ctx.onebot?.setGroupCard) {
+            await ctx.onebot.setGroupCard(ctx.chatId, ctx.selfId, card);
+          } else {
+            return err('当前环境不支持改群名片');
+          }
+          return ok({ card, note: '群名片已修改。' });
+        } catch (error) {
+          return err(`改群名片失败：${error?.message ?? error}`);
+        }
+      }
+    },
+    {
       name: 'send_poke',
       description: '拍一拍（群聊传 targetUserId；私聊默认拍对方）。targetUserId 必须是数字 QQ 号：不知道对方 QQ 号时，先调 get_active_members 或 get_recent_messages 查到再拍，绝对不要传名字、昵称或"未知"。适合用"戳一下"代替一句废话、回应别人的拍一拍，或偶尔逗一下正在聊的人。别频繁。',
       parameters: {
