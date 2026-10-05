@@ -663,3 +663,35 @@ test('写入前中止：未执行的条目保持未读，留给下个活跃窗�
   assert.equal(f.writes.length, 0, '中止后不该再发出写入');
   assert.equal(f.manager.status().unreadFeeds, 2, '未执行的条目必须仍是未读（提前标 reviewed 会让它们永远不再进批次）');
 });
+
+test('like_comment：评论已成功后点赞阶段被中止 → reviewed（退回 unread 会重复评论）', async () => {
+  // P1（2026-10-04 复审）：组合动作里评论可能**已经发出去了**，此时中止若退回 unread，
+  // 下轮会按未读重新决策 —— 模型看不到自己已经评论过（commentContent 还被抹了），
+  // 大概率再评一次。此前只有源码锚点（㉘），这里走真实写循环：comment_qzone 成功那一刻
+  // abort，中止检查落在点赞阶段的 pause 之后（正是复现点）。
+  const feed = [{ uin: 111, nickname: 'A', time: nowSec - 30, appid: 311, key: 'k1', html: htmlPost('one') }];
+  let mgr = null;
+  const f = fixture({
+    feed,
+    complete: async ({ messages }) => {
+      const ids = idsFromMessages(messages, 'feed');
+      return response({
+        feedActions: ids.map((id) => ({ id, action: 'like_comment', content: '赞', reason: '好' })),
+        replyActions: []
+      });
+    }
+  });
+  mgr = f.manager;
+  const inner = f.onebot.call;
+  f.onebot.call = async (action, params) => {
+    const result = await inner(action, params);
+    if (action === 'comment_qzone') mgr.abort();   // 评论已成功、点赞还没发：用户此刻点了停止
+    return result;
+  };
+  await f.manager.runNow('feed');
+  const st = JSON.parse(fs.readFileSync(f.stateFile, 'utf8'));
+  const item = (st.feeds || []).find((x) => String(x.key || '').endsWith(':k1'));
+  assert.deepEqual(f.writes.map((w) => w.action), ['comment_qzone'], '只该发出评论，点赞不该发出去');
+  assert.equal(item.commentStatus, 'done', '前提：评论确实成功了');
+  assert.equal(item.status, 'reviewed', '评论已发出 → 必须 reviewed（退回 unread 下轮会重复评论）');
+});
