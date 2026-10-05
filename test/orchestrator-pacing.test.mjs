@@ -35,7 +35,10 @@ function makeInstance(t, { onExceed, spentYuan = 99 }) {
   // ⚠️ 每个用例**各自一份 sqlite**：messages 表对 (chat_key, mid) 有唯一约束，共用同一个
   // 文件时后两个用例的 appendIncoming 会被去重吞掉，实际驱动 wake 的是前一个用例残留的
   // 那行 —— 用例之间顺序耦合，谁改了自己的前置谁就把后面的静默弄塌（2026-10-04 复审 P2）。
-  const store = new ChatStore({
+  // ⚠️⚠️ 第一个位置参数是 maxPerChat：原先漏了它，配置对象被当成 cap 传进去、filename 落回
+  // 默认，三个用例照样共用 messages.sqlite —— 隔离从写下那天起就没生效过
+  //（2026-10-05 全审实测：临时目录里只有 messages.sqlite，没有任何 pacing-*.sqlite）。
+  const store = new ChatStore(0, {
     dataDir: root,
     filename: `pacing-${onExceed}-${spentYuan}-${Math.random().toString(36).slice(2, 8)}.sqlite`
   });

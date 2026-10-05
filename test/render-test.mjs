@@ -1326,21 +1326,27 @@ try {
   // 后台重拉时若焦点落在区域内某个输入框里，这一轮重写要让路（setHtmlIfChanged 的焦点守卫）
   {
     const setter = ctx.setHtmlIfChanged || sandbox.setHtmlIfChanged;
-    const box = document.querySelector('#edit-guard-box');
-    const field = makeElIn(box, 'gi-1');
-    field.tagName = 'INPUT';
-    field.value = 'typed-by-user';
-    box.children.push(field);
-    setter(box, '<b>v1</b>');
-    const before = String(box.innerHTML);
-    const prevActive = document.activeElement;
-    document.activeElement = field;
-    const wrote = setter(box, '<b>v2</b>');
-    document.activeElement = prevActive;
-    const blocked = wrote === false && String(box.innerHTML) === before && field.value === 'typed-by-user';
-    if (typeof setter !== 'function') { fail++; console.log('  FAIL  setHtmlIfChanged 没导出'); }
-    else if (blocked) { pass++; console.log('  OK    后台重拉不会覆盖正在输入的那一块（焦点在输入框里时让路）'); }
-    else { fail++; console.log(`  FAIL  焦点守卫没起作用（wrote=${wrote}）`); }
+    // ⚠️ 先判存在再调用：原先在跑完所有 setter(...) 之后才判 typeof —— 一旦它被删/改名，
+    // 会抛 TypeError 被外层 catch 吞成一条"抛错"，后面上百条断言直接不执行、诊断信息也丢了
+    //（2026-10-05 全审）。
+    if (typeof setter !== 'function') {
+      fail++; console.log('  FAIL  setHtmlIfChanged 没导出（后面的断言无法执行）');
+    } else {
+      const box = document.querySelector('#edit-guard-box');
+      const field = makeElIn(box, 'gi-1');
+      field.tagName = 'INPUT';
+      field.value = 'typed-by-user';
+      box.children.push(field);
+      setter(box, '<b>v1</b>');
+      const before = String(box.innerHTML);
+      const prevActive = document.activeElement;
+      document.activeElement = field;
+      const wrote = setter(box, '<b>v2</b>');
+      document.activeElement = prevActive;
+      const blocked = wrote === false && String(box.innerHTML) === before && field.value === 'typed-by-user';
+      if (blocked) { pass++; console.log('  OK    后台重拉不会覆盖正在输入的那一块（焦点在输入框里时让路）'); }
+      else { fail++; console.log(`  FAIL  焦点守卫没起作用（wrote=${wrote}）`); }
+    }
   }
 
   // 源码钉子：切语音服务预设的回调里不许出现 renderSettings() —— 垫片表达不了"输入框被换掉"
@@ -1348,13 +1354,19 @@ try {
   {
     const src = fs.readFileSync(new URL('../ui/pages/settings-bind.js', import.meta.url), 'utf8');
     const start = src.indexOf("serviceSel.addEventListener('change'");
-    const end = src.indexOf('syncAsrFields();', start);
-    const block = src.slice(start, end);
-    // 先剥掉 // 注释：这段代码里正好有一句"这里**不能** renderSettings()"，不剥会自己误判
-    const code = block.replace(/\/\/[^\n]*/g, '');
-    const reRender = /renderSettings\(\)/.test(code);
-    if (reRender) { fail++; console.log('  FAIL  切换语音识别服务预设又调了 renderSettings()（会清空同分区未保存输入）'); }
-    else { pass++; console.log('  OK    切换语音识别服务预设的回调里没有整块重画（源码钉子）'); }
+    const end = start >= 0 ? src.indexOf('syncAsrFields();', start) : -1;
+    // ⚠️ 锚点自己失效时必须报红：indexOf 返回 -1 时 `slice(-1, end)` 会切出空串，
+    // 「没找到 renderSettings()」于是恒真 —— 把被测的回调整段删掉反而变绿
+    //（2026-10-05 全审：钉子的锚点退化）+ 反方向 `end = -1` 会切到文件尾造成假红。
+    if (start < 0 || end <= start) {
+      fail++; console.log('  FAIL  找不到语音服务切换回调（钉子锚点失效，先修测试再谈回归）');
+    } else {
+      // 先剥掉 // 注释：这段代码里正好有一句"这里**不能** renderSettings()"，不剥会自己误判
+      const code = src.slice(start, end).replace(/\/\/[^\n]*/g, '');
+      const reRender = /renderSettings\(\)/.test(code);
+      if (reRender) { fail++; console.log('  FAIL  切换语音识别服务预设又调了 renderSettings()（会清空同分区未保存输入）'); }
+      else { pass++; console.log('  OK    切换语音识别服务预设的回调里没有整块重画（源码钉子）'); }
+    }
   }
 
   // 语音合成 Key：并入统一开关后的三件事（2026-10-01 审查的两条 low）  // 语音合成 Key：并入统一开关后的三件事（2026-10-01 审查的两条 low）
@@ -3014,21 +3026,34 @@ try {
           console.log('  ' + (badOk ? 'OK   ' : 'FAIL ') + '不存在的接口确实 404（/api/usage/prices）');
           await realApp.stop();
 
-          // 切到别的 range 时，旧数据不能冒用（range 对不上会显示错的区间）
-          vm.runInContext("state.usageRange = 'today';", ctx);
-          usageBox.innerHTML = '';
-          let usedOld = false;
+          // 缓存路径的 range 校验：**两个方向都要测**，而且不能先把缓存清掉。
+          // 旧版是 `state.usageLastData = null` 之后断言"renderUsagePage 被调过" —— 那只证明
+          // force 刷新会渲染，把 usage.js 的 `range === range` 校验删掉照样全绿
+          //（2026-10-05 全审：断言恒真）。这里改成看"同步段"（缓存在 await 之前决定）：
+          //   ① 同 range → 同步段就该画一版（缓存命中）；② 换 range → 同步段一次都不该画。
+          let earlyRenders = 0;
           const origPage = ctx.renderUsagePage || sandbox.renderUsagePage;
-          ctx.renderUsagePage = sandbox.renderUsagePage = (...a) => { usedOld = true; return origPage(...a); };
-          // 先清掉缓存，模拟"新 range 没有旧数据"
-          vm.runInContext('state.usageLastData = null;', ctx);
-          usageBox.innerHTML = '';
-          await loadUsage({ force: true });
+          ctx.renderUsagePage = sandbox.renderUsagePage = (...a) => { earlyRenders += 1; return origPage(...a); };
+          vm.runInContext("state.tab = 'usage'; state.usageRange = '7';", ctx);
+          vm.runInContext("state.usageLastData = { range: '7', stats: state.usageStats || {}, st: {}, prices: {} };", ctx);
+          const sameRangeLoad = loadUsage({ force: true });
+          const sameRangeEarly = earlyRenders;
+          await sameRangeLoad;
+
+          earlyRenders = 0;
+          vm.runInContext("state.usageRange = 'today';", ctx);
+          const staleRangeLoad = loadUsage({ force: true });
+          const staleRangeEarly = earlyRenders;
+          await staleRangeLoad;
           ctx.renderUsagePage = sandbox.renderUsagePage = origPage;
           vm.runInContext("state.usageRange = '7';", ctx);
-          const ok3 = usedOld;
-          ok3 ? pass++ : fail++;
-          console.log('  ' + (ok3 ? 'OK   ' : 'FAIL ') + '切换 range 会重新渲染（不误用旧区间数据）');
+
+          const okSame = sameRangeEarly === 1;
+          okSame ? pass++ : fail++;
+          console.log('  ' + (okSame ? 'OK   ' : 'FAIL ') + '同 range 的旧数据会被立即画出来（正向对照）');
+          const okStale = staleRangeEarly === 0;
+          okStale ? pass++ : fail++;
+          console.log('  ' + (okStale ? 'OK   ' : 'FAIL ') + '切换 range 不误用旧区间数据（缓存必须被 range 校验挡住）');
         } catch (e) {
           fail++; console.log('  FAIL 抛错: ' + (e && e.message));
         } finally {
@@ -3442,7 +3467,7 @@ try {
     const originalRefreshStatus2 = originalRefreshStatus;
     let statusCalls = 0;
     sandbox.refreshStatus = () => { statusCalls++; };
-    // 存档页另有一条每 4 秒的列表轮询（startListPoller，见 ui/app.js:1834）：不把它挪开，
+    // 存档页另有一条每 4 秒的列表轮询（startListPoller，ui/app.js 里启动的那个）：不把它挪开，
     // 它就会在观测窗口里插一脚，"5 次事件只刷一轮"的断言会变成看运气。
     sandbox.refreshIntervalMs = () => 3600 * 1000;
     ctx.startListPoller();

@@ -106,6 +106,24 @@ export class SendQueue {
     }
   }
 
+  /**
+   * 送达后记账要用的「被引用消息的作者」。**这一步已经在 send() 成功之后**，所以库读也必须
+   * 自己兜住：findByMid 抛错（磁盘/库损坏这类不受 busy_timeout 管的错）会让整条 promise
+   * reject → sendTextBatch 把这条记成 failed → 模型以为没发出去、重发 → 群里两条一样的消息。
+   * 与 #afterSent 同源的漏兜（2026-10-05 全审：三处 findByMid 都在兜底之外）。
+   */
+  #replyTarget(chatKey, options) {
+    const at = String(options.atUserId || '');
+    if (at || options.replyToMessageId == null) return at;
+    try {
+      const replied = this.store.findByMid(chatKey, options.replyToMessageId);
+      if (replied && !replied.self) return String(replied.senderId || '');
+    } catch (error) {
+      log.warn('[sender] 消息已送达，但查被引用消息失败（这条按无引用记账）:', error?.message ?? error);
+    }
+    return at;
+  }
+
   constructor({ onebot, store, onSent = null, onIncident = null }) {
     this.onebot = onebot;
     this.store = store;
@@ -290,11 +308,7 @@ export class SendQueue {
           signal: options.signal
         }));
         const ts = Date.now();
-        let targetUserId = String(options.atUserId || '');
-        if (!targetUserId && options.replyToMessageId != null) {
-          const replied = this.store.findByMid(chatKey, options.replyToMessageId);
-          if (replied && !replied.self) targetUserId = String(replied.senderId || '');
-        }
+        let targetUserId = this.#replyTarget(chatKey, options);
         if (!targetUserId && kind === 'private') targetUserId = String(id);
         this.#afterSent(() => {
           this.store.appendSelf(chatKey, {
@@ -355,11 +369,7 @@ export class SendQueue {
         signal: options.signal
       }));
       const ts = Date.now();
-      let targetUserId = String(options.atUserId || '');
-      if (!targetUserId && options.replyToMessageId != null) {
-        const replied = this.store.findByMid(chatKey, options.replyToMessageId);
-        if (replied && !replied.self) targetUserId = String(replied.senderId || '');
-      }
+      let targetUserId = this.#replyTarget(chatKey, options);
       if (!targetUserId && kind === 'private') targetUserId = String(id);
       this.#afterSent(() => {
         this.store.appendSelf(chatKey, {
@@ -388,11 +398,7 @@ export class SendQueue {
         signal: options.signal
       }));
       const ts = Date.now();
-      let targetUserId = String(options.atUserId || '');
-      if (!targetUserId && options.replyToMessageId != null) {
-        const replied = this.store.findByMid(chatKey, options.replyToMessageId);
-        if (replied && !replied.self) targetUserId = String(replied.senderId || '');
-      }
+      let targetUserId = this.#replyTarget(chatKey, options);
       if (!targetUserId && kind === 'private') targetUserId = String(id);
       this.#afterSent(() => {
         this.store.appendSelf(chatKey, {

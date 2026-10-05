@@ -70,4 +70,11 @@ test('A1（行为）：「今天别再花钱」期间，恢复后排期与兜底
   const body = src.slice(src.indexOf('this.retryTimer = setInterval('), src.indexOf('this.retryTimer = setInterval(') + 1100);
   assert.match(body, /if \(this\.#budgetWouldDrop\(key\)\) continue;/,
     '兜底回收循环要逐会话挡（block 与 degrade 的空转都算）；degrade 下提到 @ 的群仍要排');
+
+  // 反向对照：预算没超时必须照排一次 —— 否则把 drainBacklogAfterResume 整体改成 no-op，
+  // 上面那条断言照样绿（2026-10-05 全审：只测单侧的用例咬不住这一种变异）。
+  const okOrch = makeOrch({ onExceed: 'block', usage: { runs: 0, estimatedYuan: 0, unpricedRuns: 0 } });
+  okOrch.orch.drainBacklogAfterResume();
+  assert.equal(okOrch.scheduled.length, 1,
+    '预算未超时要照常排唤醒（否则这条用例只剩"函数什么都不做"也能过）');
 });

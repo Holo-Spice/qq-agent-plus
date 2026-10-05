@@ -622,6 +622,25 @@ test('⑳ B3：内联兜底里 arguments 是 JSON 字符串时要解出来，不
   const broken = parseInlineToolCalls('<tool_call>' + JSON.stringify({ name: 'send_message', arguments: '{not json' }) + '</tool_call>');
   assert.deepEqual(broken[0].args, {}, '解不出的字符串按空对象');
 });
+
+test('⑳b P2：整段裸 JSON（无 <tool_call> 包裹）里的字符串 arguments 也要解出来', async () => {
+  // 格式 4 的兜底原先按「非对象 → 整条丢弃」判：模型把 arguments 写成 JSON 字符串时调用被吞掉，
+  // qzone/说说这类判断方会一直收到"必须调用 submit…"直到轮次耗尽失败（2026-10-05 全审）。
+  const { resolveToolCalls } = await import('../src/tools/inline-tools.js');
+  const plan = { feedActions: [{ id: 'feed-1', action: 'like', reason: '好' }], replyActions: [] };
+  const bare = JSON.stringify({ name: 'submit_qzone_interactions', arguments: JSON.stringify(plan) });
+  const calls = resolveToolCalls({ content: bare });
+  assert.equal(calls.length, 1, '裸 JSON 兜底不能把整条调用吞掉');
+  assert.equal(calls[0].function.name, 'submit_qzone_interactions');
+  assert.deepEqual(JSON.parse(calls[0].function.arguments), plan, '字符串形态的参数要解出来');
+
+  // 对象形态照旧；原生 tool_calls 仍然优先
+  const objForm = resolveToolCalls({ content: JSON.stringify({ name: 'send_message', arguments: { content: '在吗' } }) });
+  assert.deepEqual(JSON.parse(objForm[0].function.arguments), { content: '在吗' });
+  const native = resolveToolCalls({ tool_calls: [{ function: { name: 'x', arguments: '{}' } }], content: bare });
+  assert.equal(native.length, 1);
+  assert.equal(native[0].function.name, 'x', '有原生 tool_calls 时不走文本解析');
+});
 test('㉑ B2：中止落在动作间隔等待里时，未执行的条目保持 unread（不记 unknown）', async () => {
   const src = fs.readFileSync('src/features/qzone-interactions.js', 'utf8');
   // 两处「间隔等待之后、标记 acting 之前」都必须复查一次 abort
@@ -643,7 +662,9 @@ test('㉒ A4：resolveHeld 要清 never-acked 的 sent 行，但排除仍在途�
   const src = fs.readFileSync('src/core/store.js', 'utf8');
   const start = src.indexOf('  resolveHeld(chatKey) {');
   assert.ok(start > 0, '前置条件：找得到 resolveHeld');
-  const body = src.slice(start, start + 2600).replace(/\s+/g, ' ');
+  // ⚠️ 剥注释再匹配：上面的注释里就写着"state NOT IN ('held','failed','acked')"这些词，
+  // 不剥的话锚点可能被注释满足（2026-10-05 全审）。
+  const body = src.slice(start, start + 2600).replace(/\/\/[^\n]*/g, '').replace(/\s+/g, ' ');
   assert.match(body, /DELETE FROM outbox WHERE chat_key\s*=\s*\?/,
     '残骸按 chat_key 清：主动唤醒没有 runs 行（runId 是合成值），只按终态 run 取交集永远清不掉它');
   assert.match(body, /state\s+IN\s*\(\s*'sending'\s*,\s*'unknown'\s*,\s*'sent'/,
@@ -728,7 +749,8 @@ test('㉙ P1：resolveHeld 的清理必须带 run_id 条件，不许按 chat_key
   const src = fs.readFileSync('src/core/store.js', 'utf8');
   const start = src.indexOf('  resolveHeld(chatKey) {');
   assert.ok(start > 0, '前置条件：找得到 resolveHeld');
-  const body = src.slice(start, start + 2600).replace(/\s+/g, ' ');
+  // 同 ㉒：剥注释再匹配，别让锚点被注释里的同款文本满足（2026-10-05 全审）
+  const body = src.slice(start, start + 2600).replace(/\/\/[^\n]*/g, '').replace(/\s+/g, ' ');
   const delAt = body.indexOf('DELETE FROM outbox');
   assert.ok(delAt > 0, '前置条件：找得到 outbox 清理语句');
   const del = body.slice(delAt, delAt + 400);
@@ -885,6 +907,11 @@ test('㊲ P3：#wake 与派发预检的「这批未读里有没有 @」必须用
   // #wake 照常派发 → 到点提醒被无谓顺延 24 小时。行为用例在 orchestrator.test.mjs
   //（「@ 落在第 51–100 条未读里时 degrade 不会丢这次唤醒」）；这里防止窗口被改小。
   const src = fs.readFileSync('src/core/orchestrator.js', 'utf8');
+  // ⚠️ 匹配前**必须剥注释**：函数头注释里就写着 `peekUnread(chatKey, 100)`，
+  // 不剥的话把代码窗口改成 50、注释不动，这条锚点照样绿（2026-10-05 全审实测的假绿）。
+  const stripComments = (text) => text
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
   const regions = {
     '派发预检 #budgetWouldDrop': ['#budgetWouldDrop(chatKey) {', 1000],
     'degrade 闸门 #wake': ['if (!proactive) {', 500],
@@ -893,7 +920,7 @@ test('㊲ P3：#wake 与派发预检的「这批未读里有没有 @」必须用
   for (const [name, [anchor, span]] of Object.entries(regions)) {
     const at = src.indexOf(anchor);
     assert.ok(at > 0, `前置条件：找得到 ${name}`);
-    assert.match(src.slice(at, at + span), /peekUnread\(chatKey, 100\)/,
+    assert.match(stripComments(src.slice(at, at + span)), /peekUnread\(chatKey, 100\)/,
       `${name} 要用 100 条窗口（与 #wake 处理的那批未读一致，看少了会把 @ 漏判）`);
   }
 });

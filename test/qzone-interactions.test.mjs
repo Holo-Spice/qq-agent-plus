@@ -650,6 +650,9 @@ test('写入前中止：未执行的条目保持未读，留给下个活跃窗�
     feed,
     complete: async ({ messages }) => {
       const ids = idsFromMessages(messages, 'feed');
+      // 前提：模型确实给出了两条计划 —— 少了这句，"writes.length === 0"在"计划本身为空"时
+      // 也成立（断言会被空计划满足，2026-10-05 全审）。
+      assert.equal(ids.length, 2, '前提：两条动态都进了提示词（否则 writes=0 是空的）');
       // 模型已经给出计划、即将开始写入时用户点了"停止"
       mgr?.abort();
       return response({
@@ -675,6 +678,7 @@ test('like_comment：评论已成功后点赞阶段被中止 → reviewed（退�
     feed,
     complete: async ({ messages }) => {
       const ids = idsFromMessages(messages, 'feed');
+      assert.equal(ids.length, 1, '前提：这条动态进了提示词（否则下面的 writes 断言是空的）');
       return response({
         feedActions: ids.map((id) => ({ id, action: 'like_comment', content: '赞', reason: '好' })),
         replyActions: []

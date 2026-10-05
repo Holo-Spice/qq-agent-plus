@@ -85,6 +85,38 @@ it('also blocks a chat after an uncertain proactive send with no input lease', a
   assert.equal(store.resolveHeld('group:1'), 1);
 });
 
+it('送达之后查被引用消息失败，不能把已经发出的消息改判成发送失败', async (t) => {
+  // findByMid 发生在 sendText 成功返回**之后**：库读抛错（磁盘/库损坏这类不受
+  // busy_timeout 管的错）若漏出去，整条 promise reject → 该条记 failed → 模型重发 →
+  // 群里两条一样的消息。与 #afterSent 同源的漏兜（2026-10-05 全审）。
+  const caseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-delivery-reply-'));
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.runtime.mode = 'active';
+  cfg.allow.groups = ['1'];
+  cfg.api.model = 'test';
+  cfg.api.baseUrl = 'https://model.invalid';
+  cfg.sticker.enabled = false;
+  cfg.memory.consolidateEnabled = false;
+  setRuntimeConfig(cfg);
+  let sends = 0;
+  const onebot = {
+    getGroupInfo: async () => ({ group_name: 'test' }),
+    sendText: async () => { sends++; return { message_id: 7 }; }
+  };
+  const store = new ChatStore(0, { dataDir: caseDir });
+  // ⚠️ 关库要在删目录**之前**（同一个钩子里按顺序做）：分开注册两个 after 时 Windows 上
+  // 会先删目录、撞上还开着的 sqlite 句柄报 EPERM（本文件里那几条环境性失败就是这个成因）。
+  t.after(() => { store.close(); fs.rmSync(caseDir, { recursive: true, force: true }); });
+  const sender = new SendQueue({ store, onebot });
+  store.findByMid = () => { throw new Error('disk I/O error'); };
+
+  const result = await sender.sendTextBatch('group:1', ['hello'], { replyToMessageId: 123 });
+
+  assert.equal(sends, 1, '消息确实发出去了');
+  assert.equal(result.sent.length, 1, '送达之后的库读失败不能改判成发送失败（否则模型会重发）');
+  assert.equal(result.failed.length, 0);
+});
+
 it('incident pilot quarantines an unknown write without blocking later messages', async (t) => {
   const caseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-delivery-pilot-'));
   t.after(() => fs.rmSync(caseDir, { recursive: true, force: true }));
