@@ -409,31 +409,28 @@ export class ChatStore {
   resolveHeld(chatKey) {
     return this.#transaction(() => {
       const messages = this.db.prepare("UPDATE messages SET state='acked' WHERE chat_key=? AND state='held'").run(chatKey).changes;
-      const outbox = this.db.prepare(`DELETE FROM outbox
-        WHERE chat_key=? AND state IN ('sending','unknown')`).run(chatKey).changes;
-      // 已核对过的终态行不在上面那条里，一并清掉（不然它们永久留在库里）。
-      // ⚠️ `sent` 也要清：正常收尾由 ackLease 删它，但租约从未 ack 的那些（进程在"标记已发"
-      // 与"确认租约"之间挂掉）只剩这一条清理路径 —— 不清就是人工点完"核对"还留一地残骸
-      //（2026-10-04 全面复审 P3 实测：5 次 resolveHeld 后 5/5 行仍在）。
-      // ⚠️⚠️ 但**只能清已终止租约**的：'sent' 行同时是 failLease 里 hasEffects 的判据
-      //（outbox 有 sending/sent/unknown → 该 run 的消息转 held 等人工，而不是回 pending 重跑）。
-      // 无差别按 chat_key 删的话，会把**正在运行租约**的在途证据一起删掉 —— 那次运行随后以
-      // 可重试错误收尾时 hasEffects=false，整批消息回队 5 秒后被兜底循环重跑，群里重复发言
-      //（2026-10-04 复审 P1）。
-      const terminal = this.db.prepare(
-        `SELECT id FROM runs WHERE chat_key=? AND state IN ('held','failed','acked')`
-      ).all(String(chatKey || '')).map((r) => r.id);
-      let terminalRows = 0;
-      for (const runId of terminal) {
-        terminalRows += this.db.prepare(`DELETE FROM outbox
-          WHERE run_id=? AND state IN ('sent','reconciled_sent','reconciled_failed')`).run(runId).changes;
-      }
+      // ⚠️ 'sending'/'unknown'/'sent' 都是 failLease 里 hasEffects 的判据：按 chat_key
+      // 无差别删，正在运行租约的在途证据也被清掉，该运行随后可重试收尾时
+      // hasEffects=false → 整批消息回 pending 重跑，群里重复发言（2026-10-04 复审 P1/P2）。
+      // ⚠️ 但只按 `runs` 里的终态行取交集也不行：**主动唤醒没有 runs 行**（#wake 里
+      // proactive → lease=null，runId 是合成值），它的 unknown 残骸 run_id 在 runs 里
+      // 根本不存在，永远清不掉、控制台一直显示"待核对"
+      //（delivery-integration「无输入租约的主动发送」用例钉的就是这个）。
+      // 口径：按 chat_key 清残骸（含 never-acked 的 'sent'/'failed' —— 正常收尾由 ackLease
+      // 删它们，租约从未 ack 的那些只剩这一条清理路径，不清就永久累积成残骸，复审 P3），
+      // 但**排除仍在途的租约**（runs 里非终态的行）；run_id 为空的（从未绑过租约）
+      // 没有可保护的在途证据，一并清。
+      const outbox = this.db.prepare(`DELETE FROM outbox WHERE chat_key=?
+        AND state IN ('sending','unknown','sent','failed','reconciled_sent','reconciled_failed')
+        AND (run_id IS NULL OR run_id NOT IN (
+          SELECT id FROM runs WHERE chat_key=? AND state NOT IN ('held','failed','acked')))`)
+        .run(String(chatKey || ''), String(chatKey || '')).changes;
       this.db.prepare("UPDATE runs SET state='acked' WHERE chat_key=? AND state='held'").run(chatKey);
       // 「核对 N 条」的 N：held 消息是主项；终态残骸只在**没有** held 消息时才作为计数
       //（求和会把"1 条消息 + 它自己的 outbox 记账行"算成 2，store.test.mjs 钉的就是这个）。
       // 只用 Math.max(messages, outbox) 的旧行为在"只剩 sent/reconciled 残骸"时报 0，
       // 控制台显示"核对 0 条"（2026-10-04 复审 P3）。
-      return Math.max(messages, outbox + terminalRows);
+      return messages > 0 ? messages : outbox;
     });
   }
 

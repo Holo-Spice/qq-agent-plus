@@ -158,6 +158,19 @@ export class ReminderStore {
     return this.items.filter((it) => it.status === 'pending' && it.at <= now - EXPIRE_AFTER_MS);
   }
 
+  /**
+   * 预算等外因挡住派发时，把到点时间显式顺延（2026-10-04 复审 P2）。
+   * 只改 at、不动 status：12 小时作废时钟随新 at 重新起算 —— 否则持续超预算的当天，
+   * "保持到期等明天"的提醒会在迟到满 12 小时时被 expired() 静默作废，与"顺延到明天"相反。
+   */
+  deferTo(id, at) {
+    const hit = this.items.find((x) => x.id === id && x.status === 'pending');
+    if (!hit) return null;
+    hit.at = Number(at) || hit.at;
+    this.#save();
+    return hit;
+  }
+
   markFired(id, now = Date.now()) {
     const it = this.items.find((x) => x.id === id);
     if (!it) return null;

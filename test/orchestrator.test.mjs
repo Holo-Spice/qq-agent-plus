@@ -1559,6 +1559,34 @@ it('换卡后 24 小时内，历史与交接口径会说明"旧口癖不作数"'
     assert.equal(runner.reminders.items[0].status, 'pending', '租约还在时不能标记已触发（否则提醒永久丢失）');
   });
 
+  it('定时提醒：预算闸门会丢的唤醒顺延 24 小时而不是标成已触发；没超预算就正常派发', async (t) => {
+    const { runner, cfg, append } = fixture(t, { reminders: new ReminderStore(path.join(root, 'reminders-budget.json')) });
+    append(1);
+    const item = { id: 'r-budget', chatKey: 'group:1', at: Date.now() - 1000, text: '喝水', status: 'pending', createdBy: '42' };
+    runner.reminders.items.push(item);
+    let woke = 0;
+    runner.wake = async () => { woke++; };
+    // 今天已花超 + 策略「停止」：#wake 的预算闸门会直接丢弃这次唤醒，派发侧必须先接住
+    setRuntimeConfig({ ...cfg, api: { ...cfg.api, budget: { enabled: true, dailyYuan: 0.01, onExceed: 'block' } } });
+    runner.sessions.todayUsage = () => ({ estimatedYuan: 5 });
+    const origAt = item.at;
+    runner.fireDueReminders();
+    assert.equal(woke, 0, '预算会丢掉这次唤醒：不能派发');
+    const after = runner.reminders.items.find((x) => x.id === 'r-budget');
+    assert.equal(after.status, 'pending', '没派发就不能标记已触发（否则提醒内容永久丢失）');
+    assert.ok(after.at >= origAt + 23 * 3600 * 1000,
+      `到点时间要顺延 24 小时，实际 ${new Date(after.at).toISOString()}`);
+    // 顺延的意义：12 小时作废窗口从**新**到点时间起算 —— 持续超预算一整天也不会被静默作废
+    assert.equal(runner.reminders.expired(origAt + 13 * 3600 * 1000).length, 0,
+      '按新到点时间起算，13 小时后不该被判超时作废（不顺延的话这条早就没了）');
+    // 反向：没超预算时必须正常派发（否则「顺延」变成永远不提醒）
+    after.at = Date.now() - 1000;
+    runner.sessions.todayUsage = () => ({ estimatedYuan: 0 });
+    runner.fireDueReminders();
+    assert.equal(woke, 1, '没超预算要正常派发');
+    assert.equal(runner.reminders.items.find((x) => x.id === 'r-budget').status, 'fired');
+  });
+
   it('定时提醒：一次只派发装得进提示词的条数，装不下的留到下一轮（标记与内容一致）', async (t) => {
     const { runner, append } = fixture(t, { reminders: new ReminderStore(path.join(root, 'reminders-merge.json')) });
     append(1);

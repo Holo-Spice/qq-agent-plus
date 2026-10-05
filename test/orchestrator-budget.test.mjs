@@ -57,7 +57,7 @@ test('A2：预算闸门豁免只给「真正人工」，paced 不是人工', asy
 });
 
 // A1 这条**是行为用例**：drainBacklogAfterResume 直接调 scheduleWake（已打桩），
-// 断言排期次数，能真正咬住「去掉 #budgetHardStop 守卫」那个变异。
+// 断言排期次数，能真正咬住「去掉 #budgetWouldDrop 守卫」那个变异。
 test('A1（行为）：「今天别再花钱」期间，恢复后排期与兜底回收都不再排唤醒', async () => {
   const { orch, scheduled } = makeOrch({ onExceed: 'block', usage: { runs: 99, estimatedYuan: 99, unpricedRuns: 0 } });
   orch.drainBacklogAfterResume();

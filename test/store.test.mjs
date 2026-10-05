@@ -63,6 +63,26 @@ describe('ChatStore', () => {
     assert.equal(store.resolveHeld('group:1'), 1);
   });
 
+  it('resolveHeld 清残骸但绝不碰在途租约的证据，也不漏掉主动唤醒的孤儿残骸', (t) => {
+    const { store } = fixture(t);
+    // 在途租约：claimUnread 建的 runs 行是 'leased'，它的 outbox 行是 failLease 判
+    // hasEffects 的证据 —— 删掉它，这次收尾就会被当成"没发出去"，整批消息回队重跑。
+    append(store, 1);
+    const batch = store.claimUnread('group:1');
+    const live = store.beginSend('group:1', batch.id, { text: 'in flight' });
+    const orphan = store.beginSend('group:1', 'proactive-synthetic-run', { text: 'lost' });
+    store.finishSend(orphan, { error: 'response lost' });
+    assert.equal(store.getChatMeta('group:1').held, 2, '前提：一条在途 + 一条主动唤醒的未知残骸');
+    assert.equal(store.resolveHeld('group:1'), 1, '清掉的是残骸数，不是把在途那条也算进去');
+    assert.equal(store.hasEffects(batch.id), true, '在途租约的 sending 行被删了：收尾会当成没发过');
+    assert.ok(store.listUnknownOperations('group:1').some((op) => op.id === live), '在途证据仍在库里');
+    // 主动唤醒没有 runs 行（runId 是合成值），残骸 run_id 在 runs 里查无此人 ——
+    // 只按终态 run 取交集的写法会永远清不掉它，控制台一直显示"待核对"。
+    assert.equal(store.listUnknownOperations('group:1').some((op) => op.id === orphan), false,
+      '主动唤醒的未知残骸要能清掉，否则人工核对永远点不干净');
+    assert.equal(store.getChatMeta('group:1').held, 1, '清完之后只剩在途那条');
+  });
+
   it('reconciles unknown operations individually without deleting business history', (t) => {
     const { store } = fixture(t);
     const message = store.appendIncoming('group:9', {

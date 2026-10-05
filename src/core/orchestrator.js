@@ -463,12 +463,6 @@ export class Orchestrator {
     }
   }
 
-  /** 「今天别再花钱」是否生效（预算已超且策略是停止）。与 #wake 里的闸门同一判据。 */
-  #budgetHardStop() {
-    const b = budgetStatus(getConfig(), this.sessions?.todayUsage?.(todayKey()) || {});
-    return b.enabled && b.exceeded && b.onExceed === 'block';
-  }
-
   /**
    * 这次唤醒会不会被 #wake 里的预算闸门**直接丢掉**（而不是"稍后再来"）。
    * 给"派发前预检"用：提醒这类派发完就 markFired 的路径，必须先在这里挡住 ——
@@ -2138,13 +2132,23 @@ export class Orchestrator {
       // 留在 due() 里 30 秒后再试 —— 否则提醒被标成已发却永远没人说（2026-09-29 审查 P1）。
       // 最后那条租约闸门对应 #wake 里 claimUnread 取不到租约的静默 return：
       // 硬崩溃（kill -9/OOM）会留下 runs.state='leased' 的残行，recoverExpired 最多 5 秒后回收。
+      const budgetDrop = this.#budgetWouldDrop(chatKey);
       const dispatchable = !this.#wakeBlockedNow(chatKey)
         && !this.store.hasLeasedRun(chatKey)
-        // ⚠️ 预算闸门也要在派发**之前**判：下面 wake() 一发出就 markFired，而闸门会把
-        // 这次唤醒直接丢掉 —— 到点的提醒内容就永久丢了（block 全丢；degrade 丢群里
-        // 没 @ 的）。挡在这里提醒保持"到期"，明天预算重置后自然补发（2026-10-04 复审 P2）。
-        && !this.#budgetWouldDrop(chatKey);
-      if (!dispatchable) continue;
+        && !budgetDrop;
+      if (!dispatchable) {
+        // ⚠️ 只有"预算会丢"这一类才顺延（瞬时的在跑/断线不值得动到点时间）：
+        // 上面注释说"明天预算重置后自然补发"，但 reminders 的 expired() 对迟到满
+        // 12 小时的条目会静默作废 —— 持续超预算一整天，到点的提醒照样丢。
+        // 显式把到点时间顺延 24 小时（作废窗口 12 小时 → 充分错开），
+        // deferTo 只改 at、不动 status，作废时钟随新 at 重新起算（2026-10-04 复审 P2）。
+        if (budgetDrop) {
+          const later = Date.now() + 24 * 60 * 60 * 1000;
+          for (const it of chosen) this.reminders.deferTo(it.id, later);
+          log.info(`[reminder] 预算超限，${chosen.length} 条顺延 24 小时后补发`);
+        }
+        continue;
+      }
       this.wake(chatKey, { manual: true, paced: true, wakeNote: note })
         .catch((error) => log.error('[reminder] 唤醒出错:', error?.message ?? error));
       for (const it of chosen) this.reminders.markFired(it.id, now);

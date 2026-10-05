@@ -3134,10 +3134,14 @@ export function createApp({
         const value = out[key];
         if (/^has[A-Z]/.test(key)) {
           const realKey = key.charAt(3).toLowerCase() + key.slice(4);
-          if (Object.hasOwn(cur, realKey)) {
+          // ⚠️ 提交里同时带了真值（用户在这个框里填了新 Key）时**真值优先**：无条件回填
+          // 服务端旧值会把刚填的新 Key 悄悄丢掉（2026-10-04 复审 P2）。
+          // 视图本身不含这些字段（脱敏是整条删除 + hasXxx 标记），所以"提交里有 realKey"
+          // 就等于用户真的填了新值，不存在"回传掩码"的干扰。
+          if (!Object.hasOwn(out, realKey) && Object.hasOwn(cur, realKey)) {
             out[realKey] = structuredClone(cur[realKey]);
-            delete out[key];
           }
+          if (Object.hasOwn(cur, realKey)) delete out[key];
           continue;
         }
         if (value && typeof value === 'object' && Object.hasOwn(cur, key)) {
