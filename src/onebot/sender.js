@@ -466,18 +466,26 @@ export class SendQueue {
   }
 
   /** 改自己在群里的群名片。改完留档，下次运行模型才知道当前名片是什么。 */
-  setCard(chatKey, card) {
+  setCard(chatKey, card, { signal } = {}) {
     const [kind, id] = String(chatKey).split(':');
+    const text = String(card ?? '').trim();
     const chain = this.#chain(chatKey);
     return chain(async () => {
       if (kind !== 'group') throw new Error('群名片只能在群聊里改');
       await this.#assertNotMuted(chatKey);
       this.#checkRate(chatKey);
       await sleep(randInt(300, 900));
-      const data = await this.onebot.setGroupCard(id, this.onebot.selfId, String(card ?? '').trim());
-      const label = `[改群名片] 现在叫「${String(card ?? '').trim()}」`;
-      this.store.appendSelf(chatKey, { text: label, ts: Date.now(), mid: null, eventKind: 'card' });
-      this.onSent?.({ chatKey, text: label, messageId: null });
+      // 等待期间运行被中止：别再发出写入（工具侧传了 signal 就必须真的用上）
+      signal?.throwIfAborted();
+      const data = await this.onebot.setGroupCard(id, this.onebot.selfId, text, signal);
+      // ⚠️ 与五条发送路径同口径：**改名片已经成功**，之后的记账失败不能把结果改判成失败
+      //（2026-10-05 复审 P3：这条写路径漏了 #afterSent —— appendSelf 抛 disk full 时，
+      //  工具会回"改群名片失败"，可名片其实已经改了，模型会以为没改成）。
+      this.#afterSent(() => {
+        const label = `[改群名片] 现在叫「${text}」`;
+        this.store.appendSelf(chatKey, { text: label, ts: Date.now(), mid: null, eventKind: 'card' });
+        this.onSent?.({ chatKey, text: label, messageId: null });
+      });
       return data;
     });
   }

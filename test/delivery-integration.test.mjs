@@ -117,6 +117,52 @@ it('送达之后查被引用消息失败，不能把已经发出的消息改判�
   assert.equal(result.failed.length, 0);
 });
 
+it('改群名片：送达后记账失败不改判成失败，运行中止后不再写', async (t) => {
+  // PR#19 合并后补的两处（2026-10-05 复审）：①新写路径要跟五条发送路径同款走 #afterSent
+  // —— 名片已经改了，之后的 appendSelf 抛错不能把结果改判成"改群名片失败"；
+  // ②工具侧传了 signal 就必须真的用上，等待期间运行被中止就别再发出写入。
+  const caseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-delivery-card-'));
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.runtime.mode = 'active';
+  cfg.allow.groups = ['1', '2', '3'];
+  cfg.api.model = 'test';
+  cfg.api.baseUrl = 'https://model.invalid';
+  cfg.sticker.enabled = false;
+  cfg.memory.consolidateEnabled = false;
+  setRuntimeConfig(cfg);
+  const store = new ChatStore(0, { dataDir: caseDir });
+  t.after(() => { store.close(); fs.rmSync(caseDir, { recursive: true, force: true }); });
+  const calls = [];
+  const onebot = {
+    selfId: '888',
+    setGroupCard: async (gid, uid, card, signal) => {
+      calls.push({ gid, uid, card, aborted: Boolean(signal?.aborted) });
+      return { ok: true };
+    }
+  };
+  const sender = new SendQueue({ store, onebot });
+
+  // ① 正常路径：发出写入 + 群里留档（下次运行模型才知道自己现在叫什么）
+  await sender.setCard('group:1', '新名字');
+  assert.deepEqual(calls, [{ gid: '1', uid: '888', card: '新名字', aborted: false }]);
+  const selfTexts = store.recent('group:1', { limit: 5 }).map((m) => m.text);
+  assert.ok(selfTexts.some((x) => x.includes('改群名片') && x.includes('新名字')), '改完要留档');
+
+  // ② 记账失败：名片已经改成功，不许 reject（否则工具回"失败"、模型以为没改成）
+  const realAppend = store.appendSelf.bind(store);
+  store.appendSelf = () => { throw new Error('disk full'); };
+  await sender.setCard('group:2', '新名字2');
+  store.appendSelf = realAppend;
+  assert.deepEqual(calls.at(-1), { gid: '2', uid: '888', card: '新名字2', aborted: false },
+    '记账失败发生在写入成功之后');
+
+  // ③ 运行已中止：等待期间被取消 → 不再发出写入
+  const controller = new AbortController();
+  controller.abort(new Error('stopped'));
+  await assert.rejects(() => sender.setCard('group:3', '新名字3', { signal: controller.signal }));
+  assert.equal(calls.some((c) => c.gid === '3'), false, '中止后不该改名片');
+});
+
 it('incident pilot quarantines an unknown write without blocking later messages', async (t) => {
   const caseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-delivery-pilot-'));
   t.after(() => fs.rmSync(caseDir, { recursive: true, force: true }));

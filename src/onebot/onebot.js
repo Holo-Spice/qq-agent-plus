@@ -440,8 +440,12 @@ export class OneBotClient {
     return this.call('get_group_member_info', { group_id: Number(groupId), user_id: Number(userId) });
   }
 
-  async setGroupCard(groupId, userId, card) {
-    return this.call('set_group_card', { group_id: Number(groupId), user_id: Number(userId), card: String(card ?? '') });
+  async setGroupCard(groupId, userId, card, signal) {
+    // 与 sendPoke 等写动作同款：把调用方的 signal 一路带下去，运行中止时不再发出写入
+    //（2026-10-05 复审：原先签名没有 signal，工具侧传了也被静默丢掉）。
+    return this.call('set_group_card',
+      { group_id: Number(groupId), user_id: Number(userId), card: String(card ?? '') },
+      TEXT_TIMEOUT_MS, signal);
   }
 }
 

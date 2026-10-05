@@ -684,9 +684,11 @@ export function buildToolDefs() {
           if (!raw) return err('card 不能为空（清空名片请说「恢复默认」而不是发空白）');
           const card = raw.slice(0, 20);
           if (ctx.sender?.setCard) {
-            await ctx.sender.setCard(ctx.chatKey, card, { runId: ctx.session.leaseId, signal: ctx.signal });
+            // 只传 signal：名片写入不进 outbox，没有租约记账要配对（原先还传了 runId，
+            // 而 setCard 并不消费它 —— 2026-10-05 复审顺手去掉）。
+            await ctx.sender.setCard(ctx.chatKey, card, { signal: ctx.signal });
           } else if (ctx.onebot?.setGroupCard) {
-            await ctx.onebot.setGroupCard(ctx.chatId, ctx.selfId, card);
+            await ctx.onebot.setGroupCard(ctx.chatId, ctx.selfId, card, ctx.signal);
           } else {
             return err('当前环境不支持改群名片');
           }
