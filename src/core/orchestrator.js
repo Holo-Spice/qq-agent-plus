@@ -475,7 +475,10 @@ export class Orchestrator {
     if (!b.enabled || !b.exceeded) return false;
     if (b.onExceed === 'block') return true;
     if (!String(chatKey).startsWith('group:')) return false;   // 私聊不受 degrade 影响
-    const pending = this.store.peekUnread(chatKey, 50) || [];
+    // ⚠️ 窗口必须与 #wake 的 degrade 闸门（peekUnread(chatKey, 100)）一致：闸门看的是
+    // 「这次要处理的那批未读里有没有 @」。少看 50 条时，@ 落在第 51–100 条会被这里判成
+    // "会丢"，提醒被无谓顺延 24 小时（#wake 其实照常派发）—— 2026-10-05 复审实测。
+    const pending = this.store.peekUnread(chatKey, 100) || [];
     return !pending.some((m) => m?.mentionsSelf === true);
   }
 
@@ -551,7 +554,9 @@ export class Orchestrator {
     if (this.runningChats.has(chatKey)) return;   // 运行结束后 drain 会接管
     // 自主节奏：不即时唤醒，攒着等"自己安排的醒来"统一处理；被 @ 时例外
     if (this.#pacingApplies(chatKey)) {
-      const pending = this.store.peekUnread(chatKey, 50) || [];
+      // 窗口与 #wake / #budgetWouldDrop 同口径：@ 落在第 51–100 条时同样算"被 @ 了"
+      //（#wake 处理的那批未读就是 100 条窗口），不该因为看少了而被丢进自主节奏排队。
+      const pending = this.store.peekUnread(chatKey, 100) || [];
       const mentioned = pending.some((m) => m.mentionsSelf === true);
       if (!(mentioned && getConfig().pacing?.instantOnMention !== false)) {
         this.#ensurePacedWake(chatKey);

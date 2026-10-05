@@ -3127,9 +3127,18 @@ export function createApp({
     // hasAuthorization 还会以最高优先级并进每一次模型请求。所以凡是提交里出现 hasXxx、
     // 而服务端现值里有对应的真键，就把真值**回填**回去（等价于"掩码 = 保持原值"的 Key 语义）。
     const unmaskSubmitted = (submitted, current) => {
-      if (!submitted || typeof submitted !== 'object' || Array.isArray(submitted)) return submitted;
+      // 数组也要逐元素回填：`{headers:[{authorization:…}]}` 这种形态，脱敏后元素里只剩
+      // `hasAuthorization`，不回填就会带着占位整段替换掉真值 —— 真 Key 静默丢失
+      //（2026-10-05 复审实测：__replace__ 提交后盘上只剩 hasAuthorization）。
+      // 按下标配对是启发式：用户重排数组元素时可能把旧值填到别的元素上（占位键本来就是
+      // 脱敏产物，宁可保错也不能丢）。
+      if (Array.isArray(submitted)) {
+        const curArr = Array.isArray(current) ? current : [];
+        return submitted.map((item, i) => unmaskSubmitted(item, curArr[i]));
+      }
+      if (!submitted || typeof submitted !== 'object') return submitted;
       const cur = (current && typeof current === 'object' && !Array.isArray(current)) ? current : {};
-      const out = Array.isArray(submitted) ? [...submitted] : { ...submitted };
+      const out = { ...submitted };
       for (const key of Object.keys(out)) {
         const value = out[key];
         if (/^has[A-Z]/.test(key)) {
@@ -3159,9 +3168,13 @@ export function createApp({
         const isReplace = raw && typeof raw === 'object' && !Array.isArray(raw) && '__replace__' in raw;
         const submitted = isReplace ? raw.__replace__ : raw;
         if (stableJson(submitted) === stableJson(sanitizedApi[field])) {
-          // 视图原样回传 = 用户没动这个框 → 整项当没改（快速路径）
-          if (isReplace) delete apiGuard[field];
-          else apiGuard[field] = structuredClone(sanitizedApi[field] ?? {});
+          // 视图原样回传 = 用户没动这个框 → 整项当没改（快速路径）。
+          // ⚠️ 两种形态都要 delete：非 __replace__ 时前端会在「JSON 解析失败/填了数组」
+          // 的回退分支里原样回传脱敏视图（ui/pages/settings-save.js "已保留原值"），
+          // 把它 clone 进 patch 就等于把视图里的 hasXxx 占位**落盘**，
+          // 之后每次模型请求都被 Object.assign(body, extraBody) 带上
+          //（2026-10-05 复审实测：盘上出现 hasAuthorization:true）。
+          delete apiGuard[field];
           continue;
         }
         // 用户改了内容：把视图里的 hasXxx 占位换回服务端真值再落盘

@@ -638,17 +638,17 @@ test('㉑ B2：中止落在动作间隔等待里时，未执行的条目保持 u
 });
 
 test('㉒ A4：resolveHeld 要清 never-acked 的 sent 行，但排除仍在途的租约', async () => {
-  // 真行为在 store.test.mjs（「清残骸但绝不碰在途租约的证据」）；这里钉住源码口径，
-  // 防止有人把「排除在途租约」这个限定条件改回去。
+  // 真行为在 store.test.mjs（「清残骸但绝不碰在途租约的证据」）；这里钉住源码口径。
+  // 正则对空白/换行留容忍（等价重排不该假红），语义要有：按 chat_key 清 + 状态白名单 + 排除非终态租约。
   const src = fs.readFileSync('src/core/store.js', 'utf8');
   const start = src.indexOf('  resolveHeld(chatKey) {');
   assert.ok(start > 0, '前置条件：找得到 resolveHeld');
-  const body = src.slice(start, start + 1800).replace(/\s+/g, ' ');
-  assert.match(body, /DELETE FROM outbox WHERE chat_key=\?/,
+  const body = src.slice(start, start + 2600).replace(/\s+/g, ' ');
+  assert.match(body, /DELETE FROM outbox WHERE chat_key\s*=\s*\?/,
     '残骸按 chat_key 清：主动唤醒没有 runs 行（runId 是合成值），只按终态 run 取交集永远清不掉它');
-  assert.match(body, /state IN \('sending','unknown','sent','failed','reconciled_sent','reconciled_failed'\)/,
+  assert.match(body, /state\s+IN\s*\(\s*'sending'\s*,\s*'unknown'\s*,\s*'sent'/,
     "租约从未 ack 的 'sent' / 主动唤醒的 'unknown' 只剩这一条清理路径，不清就是人工点完还留一地残骸");
-  assert.match(body, /run_id NOT IN \( SELECT id FROM runs WHERE chat_key=\? AND state NOT IN \('held','failed','acked'\)/,
+  assert.match(body, /run_id\s+NOT\s+IN\s*\(\s*SELECT id FROM runs WHERE chat_key\s*=\s*\? AND state\s+NOT\s+IN\s*\(\s*'held'\s*,\s*'failed'\s*,\s*'acked'/,
     '在途租约（runs 里非终态的行）的证据必须排除：删了它 hasEffects=false → 整批消息回队重跑（P1）');
 });
 test('㉓ A5：discard 也要清节流时间戳（否则那个 Map 只涨不消）', async () => {
@@ -721,16 +721,23 @@ test('㉘ P1：feed 的 like_comment 组合动作，评论已成功后点赞中�
     '评论已发过 → 置 reviewed 保住成果（点赞丢了就丢了，低价值不会重复）');
 });
 
-test('㉙ P1：resolveHeld 清 sent 行必须排除在途租约（不碰正在运行租约的证据）', async () => {
+test('㉙ P1：resolveHeld 的清理必须带 run_id 条件，不许按 chat_key 无差别删', async () => {
+  // 真行为在 store.test.mjs（「清残骸但绝不碰在途租约的证据」）。这里只钉两条语义：
+  // ① 清理语句必须触及 run_id；② 排除集按 runs 的租约状态判（非终态=在途）。
+  // 写法上允许 NOT IN ('held','failed','acked') 或 state='leased' 两种等价形态。
   const src = fs.readFileSync('src/core/store.js', 'utf8');
-  const body = src.slice(src.indexOf('  resolveHeld(chatKey) {'), src.indexOf('  resolveHeld(chatKey) {') + 1800);
-  // 不能再有「按 chat_key 无差别删 sent」的语句
-  assert.doesNotMatch(body, /chat_key=\? AND state IN \('sent'/,
-    '按 chat_key 无差别删 sent 会删掉在途租约的证据：该运行随后可重试收尾时 '
+  const start = src.indexOf('  resolveHeld(chatKey) {');
+  assert.ok(start > 0, '前置条件：找得到 resolveHeld');
+  const body = src.slice(start, start + 2600).replace(/\s+/g, ' ');
+  const delAt = body.indexOf('DELETE FROM outbox');
+  assert.ok(delAt > 0, '前置条件：找得到 outbox 清理语句');
+  const del = body.slice(delAt, delAt + 400);
+  assert.match(del, /run_id/,
+    '清理要带 run_id 条件：按 chat_key 无差别删会删掉在途租约的证据 —— 该运行随后可重试收尾时 '
     + 'hasEffects=false → 整批消息回 pending 重跑 → 群里重复发言');
-  // 正面要求：排除条件要按 runs 的租约状态写（真行为见 store.test.mjs 的同名场景）
-  assert.match(body.replace(/\s+/g, ' '), /state NOT IN \('held','failed','acked'\)/,
-    '排除条件要按 runs 里的租约状态判定，不能靠别的字段绕过去');
+  assert.ok(/state\s+NOT\s+IN\s*\(\s*'held'\s*,\s*'failed'\s*,\s*'acked'/.test(del)
+    || /state\s*=\s*'leased'/.test(del),
+  '排除集要按 runs 里的租约状态判定（非终态 = 仍在途），不能靠别的字段绕过去');
 });
 
 test('㉚ P2：extraBody 提交里的 hasXxx 占位要回填成服务端真值（用户改了别的字段再保存）', async (t) => {
@@ -783,14 +790,22 @@ test('㉛ P2：extraBody 清空不受回填影响（用户真要清掉整段）'
 });
 
 test('㉜ P2：预算闸门不吞到点提醒（markFired 在派发后才跑，必须先在派发前挡住）', async () => {
+  // 行为用例在 orchestrator.test.mjs（顺延 + 反向"没超预算照样派发"）。这里防的是
+  // 「把预检整段删掉」这类改动：只看 fireDueReminders 的语义点，不钉变量名/写法。
   const src = fs.readFileSync('src/core/orchestrator.js', 'utf8');
-  const at = src.indexOf('const budgetDrop = this.#budgetWouldDrop(chatKey);');
-  assert.ok(at > 0, '派发前要先算「这次唤醒会不会被预算闸门丢掉」（判据在 #budgetWouldDrop）');
-  const win = src.slice(at, at + 1200);
-  assert.ok(win.includes('&& !budgetDrop;'),
-    'dispatchable 预检要含预算判据（否则提醒被 markFired 后吞掉）');
-  assert.ok(win.includes('this.reminders.deferTo(it.id, later)'),
+  const start = src.indexOf('fireDueReminders() {');
+  assert.ok(start > 0, '前置条件：找得到 fireDueReminders');
+  let end = src.indexOf('\n  }', start);
+  if (end < 0 || end - start > 4000) end = start + 4000;
+  const body = src.slice(start, end).replace(/\s+/g, ' ');
+  assert.match(body, /#budgetWouldDrop\(/,
+    '派发前要先算「这次唤醒会不会被预算闸门丢掉」（判据在 #budgetWouldDrop）');
+  assert.match(body, /reminders\.deferTo\(/,
     '预算挡下的提醒要顺延到点时间，不然 12 小时作废窗口一过就真丢了');
+  const deferAt = body.indexOf('deferTo(');
+  const firedAt = body.indexOf('markFired(');
+  assert.ok(firedAt > deferAt,
+    '标记已触发只能发生在真正派发之后（被预算挡下时不许顺带 markFired）');
 });
 
 test('㉝ P2：两个 load 函数的 catch 也要过 token 守卫（过期失败不许盖掉新结果）', async () => {
@@ -811,4 +826,74 @@ test('㉞ P3：记忆整理要先给"期间新增的"留配额（否则整批并
   assert.match(src, /const room = Math\.max\(0, maxKeep - appendedDuring\.length\);/,
     'clean 之前已 slice 到 maxKeep，先满再并一条都进不去（2026-10-04 复审 P3）');
   assert.match(src, /mergedCount \+= 1;/, '日志要按实际并回数打，不能按 appendedDuring.length 虚报');
+});
+
+test('㉟ P2：前端"解析失败→原样回传视图"（非 __replace__）同样不许把 hasXxx 落盘', async (t) => {
+  // ui/pages/settings-save.js 的 extraBody/thinkingParams 在 JSON 非法或填了数组时
+  // `return c.api.extraBody`（注释写的是"保留原值"）—— 这个形态不带 __replace__。
+  // 服务端把它当成"视图原样回传 → 整项没改"，但早先那版的快速路径会把脱敏视图 clone 进
+  // patch，等于把 hasXxx 占位**落盘**；之后每次模型请求都被 Object.assign(body, extraBody)
+  // 带上（2026-10-05 复审真机探针实测：盘上出现 hasAuthorization:true）。
+  const { request, disk } = await withConsole(t, (cfg) => {
+    cfg.api = {
+      ...cfg.api, baseUrl: 'https://api.example/v1',
+      extraBody: { normal: 'ok', authorization: { scheme: 'Bearer', value: 'sk-REAL' } }
+    };
+  });
+  const view = (await request('/api/config')).body;
+  assert.equal(view.api.extraBody.hasAuthorization, true, '前提：视图里是占位');
+  const echoed = JSON.parse(JSON.stringify(view.api.extraBody));   // 用户没改这个框
+  assert.equal((await request('/api/config', {
+    method: 'POST', body: { api: { baseUrl: 'https://api.example/v1', extraBody: echoed } }
+  })).status, 200);
+  const after = disk().api.extraBody;
+  assert.deepEqual(after.authorization, { scheme: 'Bearer', value: 'sk-REAL' },
+    '原样回传 = 这个框没改：真值要留住');
+  assert.equal(after.normal, 'ok', '框里的内容照常保留');
+  assert.equal(JSON.stringify(after).includes('hasAuthorization'), false,
+    '占位不许落盘（会被 Object.assign 并进每次模型请求体）');
+});
+
+test('㊱ P2：extraBody 数组元素里的密钥键也要回填（否则 __replace__ 会把真 Key 静默删掉）', async (t) => {
+  // 脱敏会递归数组元素（secret-keys.js），数组元素里也只剩 hasXxx；而 unmaskSubmitted
+  // 早先对数组直接原样返回 → __replace__ 整段替换时真 Key 被删掉、占位落盘
+  //（2026-10-05 复审真机探针实测）。
+  const { request, disk } = await withConsole(t, (cfg) => {
+    cfg.api = {
+      ...cfg.api, baseUrl: 'https://api.example/v1',
+      extraBody: { normal: 'ok', headers: [{ authorization: 'Bearer sk-X' }] }
+    };
+  });
+  const view = (await request('/api/config')).body;
+  assert.deepEqual(view.api.extraBody.headers, [{ hasAuthorization: true }], '前提：数组元素里也只剩占位');
+  const submitted = JSON.parse(JSON.stringify(view.api.extraBody));
+  submitted.other = 'changed';   // 用户改了别处，数组原样带回
+  assert.equal((await request('/api/config', {
+    method: 'POST', body: { api: { baseUrl: 'https://api.example/v1', extraBody: { __replace__: submitted } } }
+  })).status, 200);
+  // ⚠️ 只断言相关字段，不 deepEqual 整个 extraBody：console 的 updateConfig 是深合并，
+  // 同一文件里前一条用例留下的键会带进本用例（2026-10-05 实测：整对象断言会假红）。
+  const after = disk().api.extraBody;
+  assert.deepEqual(after.headers, [{ authorization: 'Bearer sk-X' }],
+    '数组元素里的真 Key 要按元素回填回来');
+  assert.equal(after.other, 'changed', '用户改的其它字段照常生效');
+  assert.equal(JSON.stringify(after).includes('hasAuthorization'), false, '占位不许落盘');
+});
+
+test('㊲ P3：#wake 与派发预检的「这批未读里有没有 @」必须用同一窗口', async () => {
+  // 50 vs 100 的偏差（2026-10-05 复审）：@ 落在第 51–100 条时，派发预检判"会丢"而
+  // #wake 照常派发 → 到点提醒被无谓顺延 24 小时。行为用例在 orchestrator.test.mjs
+  //（「@ 落在第 51–100 条未读里时 degrade 不会丢这次唤醒」）；这里防止窗口被改小。
+  const src = fs.readFileSync('src/core/orchestrator.js', 'utf8');
+  const regions = {
+    '派发预检 #budgetWouldDrop': ['#budgetWouldDrop(chatKey) {', 1000],
+    'degrade 闸门 #wake': ['if (!proactive) {', 500],
+    'pacing 的 @ 例外': ['if (this.#pacingApplies(chatKey)) {', 500]
+  };
+  for (const [name, [anchor, span]] of Object.entries(regions)) {
+    const at = src.indexOf(anchor);
+    assert.ok(at > 0, `前置条件：找得到 ${name}`);
+    assert.match(src.slice(at, at + span), /peekUnread\(chatKey, 100\)/,
+      `${name} 要用 100 条窗口（与 #wake 处理的那批未读一致，看少了会把 @ 漏判）`);
+  }
 });

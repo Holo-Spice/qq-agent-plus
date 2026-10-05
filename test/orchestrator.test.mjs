@@ -1587,6 +1587,30 @@ it('换卡后 24 小时内，历史与交接口径会说明"旧口癖不作数"'
     assert.equal(runner.reminders.items.find((x) => x.id === 'r-budget').status, 'fired');
   });
 
+  it('定时提醒：@ 落在第 51–100 条未读里时 degrade 不会丢这次唤醒，提醒也不该被顺延', async (t) => {
+    // 派发预检与 #wake 的 degrade 闸门必须看同一批未读（都是 100 条）。看少 50 条时，
+    // @ 落在第 51–100 条会被预检判成"会丢"→ 提醒无谓顺延 24 小时，而 #wake 其实照常派发
+    //（2026-10-05 复审实测的窗口不一致）。
+    const { runner, store, cfg } = fixture(t, { reminders: new ReminderStore(path.join(root, 'reminders-degrade.json')) });
+    for (let i = 1; i <= 60; i++) {
+      store.appendIncoming('group:1', {
+        mid: i, text: i === 55 ? 'bot 在吗' : `m${i}`, senderId: '42', senderName: 'member-42', mentionsSelf: i === 55
+      });
+    }
+    runner.reminders.items.push({
+      id: 'r-degrade', chatKey: 'group:1', at: Date.now() - 1000, text: '喝水', status: 'pending', createdBy: '42'
+    });
+    let woke = 0;
+    runner.wake = async () => { woke++; };
+    setRuntimeConfig({ ...cfg, api: { ...cfg.api, budget: { enabled: true, dailyYuan: 0.01, onExceed: 'degrade' } } });
+    runner.sessions.todayUsage = () => ({ estimatedYuan: 5 });   // 已超限，但 degrade 只丢"没 @"的那批
+
+    runner.fireDueReminders();
+
+    assert.equal(woke, 1, '@ 在 100 条窗口里 → #wake 不会丢这次唤醒，预检不该拦');
+    assert.equal(runner.reminders.items.find((x) => x.id === 'r-degrade').status, 'fired');
+  });
+
   it('定时提醒：一次只派发装得进提示词的条数，装不下的留到下一轮（标记与内容一致）', async (t) => {
     const { runner, append } = fixture(t, { reminders: new ReminderStore(path.join(root, 'reminders-merge.json')) });
     append(1);
