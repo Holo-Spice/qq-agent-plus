@@ -128,6 +128,7 @@ function normalizedConfig(raw = getConfig().qzoneInteractions || {}) {
 function defaultState() {
   return {
     version: 1,
+    accountId: '',
     feedInitializedAt: 0,
     replyInitializedAt: 0,
     lastFeedPollAt: 0,
@@ -146,6 +147,9 @@ function normalizeState(raw) {
     if (!Array.isArray(state[key])) state[key] = fallback[key];
   }
   state.version = 1;
+  // 2026-10-06 复审 P2：持久化状态绑定账号（详见 #run 里的闸门）。旧状态文件没有该字段
+  // 时保持空串，首次运行回填当前 selfId。
+  state.accountId = String(state.accountId || '');
   state.feedInitializedAt = Number(state.feedInitializedAt) || 0;
   state.replyInitializedAt = Number(state.replyInitializedAt) || 0;
   state.lastFeedPollAt = Number(state.lastFeedPollAt) || 0;
@@ -1209,6 +1213,21 @@ export class QzoneInteractionManager {
   }
 
   async #run({ kind, source, includeExisting }) {
+    // 2026-10-06 复审 P2：持久化状态必须绑定账号。协议端（NapCat）换号登录后 selfId 变了，
+    // 旧账号积压的动态/评论队列若照常出批，会以新账号身份对旧账号好友的动态点赞/评论、
+    // 把回复发给旧账号的评论 —— daily-moments 对同一场景专门设了 MOMENT_ACCOUNT_CHANGED 闸，
+    // 这里补齐同款防线：首次运行为空则回填当前账号；账号不匹配则拒绝执行（保留队列，
+    // 换回原账号或清空状态后自动恢复）。
+    const runSelfId = String(this.onebot?.selfId || '');
+    if (!this.state.accountId) {
+      if (runSelfId) {
+        this.state.accountId = runSelfId;
+        this.#save();
+      }
+    } else if (this.state.accountId !== runSelfId) {
+      this.log(`[qzone-interactions] QQ 登录账号已改变（状态属于 ${this.state.accountId}，当前 ${runSelfId || '未知'}），本轮跳过执行；如确认切换账号，请清空 qzone-interactions 状态文件`);
+      return;
+    }
     const cfg = normalizedConfig();
     const run = {
       id: crypto.randomUUID(),

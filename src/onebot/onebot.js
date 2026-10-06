@@ -139,11 +139,25 @@ export class OneBotClient {
       this.reconnectAttempt = 0;
       this.#startHeartbeat(socket);
       this.#setStatus(true);
-      try {
-        this.selfInfo = await this.call('get_login_info');
-      } catch (error) {
-        console.error('[onebot] 获取登录信息失败:', error?.message ?? error);
-      }
+      // 2026-10-06 复审 P2：selfInfo 全仓库只有这一处赋值，首连恰好失败一次（NapCat 重启
+      // 竞态、HTTP 端瞬时不可达）就 selfId 恒空 —— 被艾特判定恒 false（degrade 模式下整体
+      // 装死）、自己发的 message_sent 被当群友消息（有自回复循环风险）。带退避重试；
+      // 连续失败则挂 60 秒单发重试直到拿到或连接失效（isCurrent 兜住旧 socket 迟到回调）。
+      const fetchLoginInfo = async (attempt) => {
+        if (!isCurrent(socket) || this.selfId) return;
+        try {
+          this.selfInfo = await this.call('get_login_info');
+        } catch (error) {
+          if (attempt >= 10) {
+            console.error(`[onebot] 获取登录信息已连续失败 ${attempt} 次，60 秒后继续重试:`, error?.message ?? error);
+            setTimeout(() => { fetchLoginInfo(1); }, 60000).unref?.();
+            return;
+          }
+          await new Promise((resolve) => { setTimeout(resolve, Math.min(2000 * attempt, 8000)).unref?.(); });
+          return fetchLoginInfo(attempt + 1);
+        }
+      };
+      await fetchLoginInfo(1);
     });
     socket.on('message', (data) => {
       if (!isCurrent(socket)) return;

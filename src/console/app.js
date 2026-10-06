@@ -154,10 +154,32 @@ function sameSecret(a, b) {
 const LOGIN_MAX_FAILURES = 5;
 const LOGIN_BACKOFF_BASE_MS = 30_000;
 const LOGIN_BACKOFF_MAX_MS = 15 * 60_000;
+// 全局失败软上限：per-IP 退避挡不住大子网/分布式轮换源（IPv6 下换 IP 近乎零成本），
+// 与 IP 无关地记一个总量，异常量级（>1000 次/小时）打告警日志供运维侧发现（2026-10-06 复审 P3）。
+const LOGIN_GLOBAL_FAIL_ALERT = 1000;
+let loginGlobalFails = 0;
+let loginGlobalWindowAt = 0;
+let loginGlobalAlerted = false;
+// 查询串令牌只留给这些路径（EventSource 发不了自定义头）；登录走 /api/login 的 body。
+// 用集合而不是 `pathname === '…'` 字面量判定：console-routes-migrated 的防回退断言
+// 禁止 if 链形态的路由判定，路径判定一律收口到这里（2026-10-06 复审 P3）。
+const QUERY_TOKEN_PATHS = new Set(['/api/events']);
+
 const loginThrottle = new Map();
 function loginGate(req) {
   const key = String(req.socket?.remoteAddress || 'unknown');
-  if (loginThrottle.size > 4096) loginThrottle.clear();
+  // 原"超 4096 整体 clear()"会把还在生效期的锁定一起清掉（攻击者灌满 map 即解锁自己）。
+  // 改为先逐出非锁定条目，仍超限再按最旧逐出 —— 最坏也只是个别旧锁提前释放，不会全军覆没。
+  if (loginThrottle.size > 4096) {
+    const now = Date.now();
+    for (const [k, v] of loginThrottle) {
+      if (v.blockedUntil <= now) loginThrottle.delete(k);
+    }
+    for (const k of loginThrottle.keys()) {
+      if (loginThrottle.size <= 4096) break;
+      loginThrottle.delete(k);
+    }
+  }
   const entry = loginThrottle.get(key);
   if (entry && entry.blockedUntil > Date.now()) {
     return { ok: false, retryAfterSec: Math.ceil((entry.blockedUntil - Date.now()) / 1000) };
@@ -165,6 +187,17 @@ function loginGate(req) {
   return {
     ok: true,
     fail() {
+      const now = Date.now();
+      if (now - loginGlobalWindowAt > 3_600_000) {
+        loginGlobalWindowAt = now;
+        loginGlobalFails = 0;
+        loginGlobalAlerted = false;
+      }
+      loginGlobalFails += 1;
+      if (loginGlobalFails === LOGIN_GLOBAL_FAIL_ALERT && !loginGlobalAlerted) {
+        loginGlobalAlerted = true;
+        console.error(`[console] 登录失败已达 ${LOGIN_GLOBAL_FAIL_ALERT} 次/小时（与源 IP 无关的全局计数），疑似针对令牌的暴力猜测，请检查访问来源`);
+      }
       const e = loginThrottle.get(key) || { failures: 0, blockedUntil: 0 };
       e.failures += 1;
       if (e.failures >= LOGIN_MAX_FAILURES) {
@@ -1357,16 +1390,34 @@ export function createApp({
     return text ? JSON.parse(text) : {};
   }
 
+  // 「无令牌 = 仅本机」的本机判定必须看 TCP 对端（req.socket.remoteAddress），不能只看 Host 头：
+  // Host 是客户端随便填的，0.0.0.0 暴露面下伪造 `Host: 127.0.0.1` 就能冒充本机
+  //（2026-10-06 复审：server.__replace__ 清空令牌后，监听仍是 0.0.0.0，靠 Host 头判本机即免鉴权）。
+  function isLoopbackRemote(req) {
+    let remote = String(req.socket?.remoteAddress || '');
+    if (!remote) return false;
+    if (remote.startsWith('::ffff:')) remote = remote.slice('::ffff:'.length);   // IPv4-mapped
+    return remote === '::1' || remote.startsWith('127.');
+  }
+
+  // 套接字只在 start() 里绑定一次，不随配置重绑 —— 运行期的真实暴露面以这里记的为准，
+  // updateConfig 的"非回环必须有令牌"校验不能只看配置里的 host（配置改成 127.0.0.1 校验就过了，
+  // 监听却还开着 0.0.0.0）。'' 表示尚未绑定（测试直连路由的场景）。
+  let boundServerHost = '';
+
   function authorize(req) {
     const token = String(getConfig().server?.token ?? '');
     const origin = String(req.headers.origin || '');
     if (origin && origin !== `http://${req.headers.host}` && origin !== `https://${req.headers.host}`) return false;
-    if (!token) return /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(req.headers.host || '');
+    if (!token) {
+      return isLoopbackRemote(req)
+        && /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(req.headers.host || '');
+    }
     const url = new URL(req.url, 'http://127.0.0.1');
     const cookie = String(req.headers.cookie || '').split(';').map((v) => v.trim())
       .find((v) => v.startsWith('qq_agent_token='));
     return sameSecret(req.headers['x-console-token'], token)
-      || sameSecret(url.searchParams.get('token'), token)
+      || (QUERY_TOKEN_PATHS.has(url.pathname) && sameSecret(url.searchParams.get('token'), token))
       || sameSecret(cookie?.slice('qq_agent_token='.length), encodeURIComponent(token));
   }
 
@@ -1469,19 +1520,22 @@ export function createApp({
     if (token && authorize(req)) return true;
     if (token) {
       const url = new URL(req.url, 'http://127.0.0.1');
-      if (sameSecret(req.headers['x-console-token'], token) || sameSecret(url.searchParams.get('token'), token)) return true;
+      if (sameSecret(req.headers['x-console-token'], token)
+        || (QUERY_TOKEN_PATHS.has(url.pathname) && sameSecret(url.searchParams.get('token'), token))) return true;
     }
     // 带自定义头 → 不可能是简单跨站请求（需 CORS 预检通过才能发出）；
-    // 但还要求 loopback Host：否则"控制台暴露到公网且没设令牌"时任何人都能读明文密钥。
+    // 但还要求请求真来自本机（remoteAddress 回环 + Host 口径保留）：否则"控制台暴露到公网
+    // 且没设令牌"时，伪造 `Host: 127.0.0.1` 就能带着任意 x-console-token 读明文密钥。
     const host = String(req.headers.host ?? '');
-    if (req.headers['x-console-token'] && /^(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(host)) return true;
+    if (req.headers['x-console-token'] && isLoopbackRemote(req)
+      && /^(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(host)) return true;
 
     const origin = String(req.headers.origin ?? '');
     const referer = String(req.headers.referer ?? '');
     // 与上面 x-console-token 分支、authorize 同一口径（端口可选）：config 校验允许 host='::1'，
     // 漏了 [::1] 时 IPv6 回环部署在这里会一直 403；80 端口部署的 Host 也不带端口。
     const isLoopbackHost = /^(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(host);
-    if (!isLoopbackHost) return false;
+    if (!isLoopbackHost || !isLoopbackRemote(req)) return false;
     if (origin) return origin === `http://${host}`;
     if (referer) return referer.startsWith(`http://${host}/`);
     return true;   // 地址栏直连等无来源请求，无法进一步区分
@@ -3441,6 +3495,20 @@ export function createApp({
       // 服务重启后 authorize 读不到令牌（控制台全部登出），下次 start() 还会因"绑非回环却无令牌"
       // 直接 throw 起不来（2026-10-03 全量审查）。归属与派生位一律取**有效体**处理。
       const serverBody = sectionBody(patch.server);
+      // 2026-10-06 复审：替换体里的 token 必被剥（下面 delete，令牌只走专用端点）→ 整节替换后
+      // server.token 必空，而运行中的套接字不随配置重绑 —— 绑 0.0.0.0 时这一保存会把监听降级为
+      // "无令牌 + Host 头判本机"的免鉴权模式。运行期套接字仍在非回环地址上时，拒绝一切 server 整节替换。
+      const serverReplacing = patch.server.__replace__ && typeof patch.server.__replace__ === 'object'
+        && !Array.isArray(patch.server.__replace__);
+      if (serverReplacing && boundServerHost && !['127.0.0.1', 'localhost', '::1'].includes(boundServerHost)) {
+        // 直接回 409 而不是 throw：统一异常处理器会把一切抛错记成 error 级 incident，
+        // 而这是"管理员存了个会被拒的配置"的**预期内拒绝**，不该刷异常面板
+        //（2026-10-06 生产实测踩到：一次守卫验证就在 journal 和异常面板各留了一条 error）。
+        return json(res, 409, {
+          ok: false,
+          error: '控制台正绑定在非回环地址上运行，整节替换 server 段会清空令牌且套接字不会重新绑定；请改用普通保存，或先停机改配置'
+        });
+      }
       delete serverBody.token;
       delete serverBody.hasToken;
     }
@@ -4114,6 +4182,7 @@ export function createApp({
       server.once('error', reject);
       server.listen(port, getConfig().server?.host || '127.0.0.1', () => {
         server.off('error', reject);
+        boundServerHost = String(getConfig().server?.host || '127.0.0.1');
         resolve(port);
       });
     });

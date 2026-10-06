@@ -319,6 +319,11 @@ export class SessionRegistry {
 
   /** 在会话结束时累加今日用量。 */
   #bumpTodayUsage(s) {
+    // 2026-10-06 复审 P3：waiting 会话被 finish 成 aborted（预算 block、并发满、无未读等
+    // 早退路径）时 0 token、0 发送 —— 与启动回收"不是一次真实运行就不计"的口径对齐
+    //（启动回收为此专门写了不 bump 的 #rewriteSessionFile），这类会话不计 runs，
+    // 否则预算 block 期间每条进群消息都虚增一次"运行次数"。
+    if (!(Number(s.usage?.totalTokens) > 0) && !(s.sent?.length > 0)) return;
     // 按"结束时刻"归属。用 startedAt 的话，跨零点的会话会把它的数字按开始那天算，发现文件
     // 是另一天就把新一天已累计的量重置成 0；之后当天的会话又因 dayKey 不匹配一直少算。
     const dayKey = todayKey(Date.now());
@@ -340,7 +345,9 @@ export class SessionRegistry {
       const est = estimateCost({ ...s.usage }, {
         model: s.model || cfgNow.api?.model,
         at: Date.now(),
-        vendor: vendorOfConfig(cfgNow)
+        // 会话自己记录过 vendor（兜底模型接管后记实际渠道）就优先用它；
+        // 拿当前配置倒推历史是错的（vendorOfConfig 注释同款约定）。
+        vendor: s.vendor || vendorOfConfig(cfgNow)
       });
       const cost = Number(est?.cost) || 0;
       data.estimatedYuan = (Number(data.estimatedYuan) || 0) + cost;

@@ -248,10 +248,18 @@ export class SendQueue {
       const outcome = error?.outcome === 'failed' || error?.outcome === 'unknown'
         ? error.outcome
         : (definite && !uncertain ? 'failed' : 'unknown');
-      this.store.finishSend(id, {
-        error: error?.message ?? error,
-        outcome
-      });
+      try {
+        this.store.finishSend(id, {
+          error: error?.message ?? error,
+          outcome
+        });
+      } catch (accountingError) {
+        // 与成功路径同口径（2026-10-04 复审修的是成功路径，失败路径是漏网之鱼，2026-10-06 复审 P3）：
+        // 记账失败只记日志、原错误照抛 —— 否则真实错误被 sqlite 错误顶掉、incident 整段跳过、
+        // 本该记 failed 自动重试的 definite 失败被升级成"未知写入"人工核对。
+        log.warn('[sender] 发送失败后 outbox 记账也失败（该行留在 sending，待人工核对）:',
+          accountingError?.message ?? accountingError);
+      }
       try {
         const incident = this.onIncident(error, {
           source: 'sender',

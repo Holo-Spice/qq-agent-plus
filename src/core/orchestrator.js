@@ -108,7 +108,7 @@ function proactiveWindowState(raw, now) {
 import { safeSlice } from './util.js';
 import { canRun } from './access.js';
 import { assertTimeAllowed, isTimeActive, TimeControlError, watchTimeWindow, withTimeScope } from './time-gate.js';
-import { vendorOfConfig } from '../pricing/model-prices.js';
+import { vendorOfConfig, vendorOfBaseUrl } from '../pricing/model-prices.js';
 import { budgetStatus } from './budget.js';
 import { readOwnerUin } from './notify-owner.js';
 import { ZONE_OFFSET_MS, minuteOfDayInZone, randInt, createEventBus, todayKey } from './util.js';
@@ -475,10 +475,10 @@ export class Orchestrator {
     if (!b.enabled || !b.exceeded) return false;
     if (b.onExceed === 'block') return true;
     if (!String(chatKey).startsWith('group:')) return false;   // 私聊不受 degrade 影响
-    // ⚠️ 窗口必须与 #wake 的 degrade 闸门（peekUnread(chatKey, 100)）一致：闸门看的是
-    // 「这次要处理的那批未读里有没有 @」。少看 50 条时，@ 落在第 51–100 条会被这里判成
-    // "会丢"，提醒被无谓顺延 24 小时（#wake 其实照常派发）—— 2026-10-05 复审实测。
-    const pending = this.store.peekUnread(chatKey, 100) || [];
+    // ⚠️ 窗口必须与 #wake 的 degrade 闸门一致（#unreadScanLimit ≥ claimUnread 的 batchLimit）：
+    // 闸门看的是「这次要处理的那批未读里有没有 @」。窗口偏小时，落在窗口之后的 @ 会被这里
+    // 判成"会丢"，提醒被无谓顺延 24 小时（#wake 其实照常派发）—— 2026-10-05 复审实测。
+    const pending = this.store.peekUnread(chatKey, this.#unreadScanLimit()) || [];
     return !pending.some((m) => m?.mentionsSelf === true);
   }
 
@@ -554,9 +554,9 @@ export class Orchestrator {
     if (this.runningChats.has(chatKey)) return;   // 运行结束后 drain 会接管
     // 自主节奏：不即时唤醒，攒着等"自己安排的醒来"统一处理；被 @ 时例外
     if (this.#pacingApplies(chatKey)) {
-      // 窗口与 #wake / #budgetWouldDrop 同口径：@ 落在第 51–100 条时同样算"被 @ 了"
-      //（#wake 处理的那批未读就是 100 条窗口），不该因为看少了而被丢进自主节奏排队。
-      const pending = this.store.peekUnread(chatKey, 100) || [];
+      // 窗口与 #wake / #budgetWouldDrop 同口径（#unreadScanLimit）：@ 落在窗口后半段时同样
+      // 算"被 @ 了"，不该因为看少了而被丢进自主节奏排队。
+      const pending = this.store.peekUnread(chatKey, this.#unreadScanLimit()) || [];
       const mentioned = pending.some((m) => m.mentionsSelf === true);
       if (!(mentioned && getConfig().pacing?.instantOnMention !== false)) {
         this.#ensurePacedWake(chatKey);
@@ -577,6 +577,13 @@ export class Orchestrator {
     return chatKey.startsWith('group:');
   }
 
+  // 未读扫描窗口：必须 ≥ 实际领取的批次大小（#wake 的 claimUnread 用 store.batchLimit）。
+  // 全部判定口（degrade 闸门 / #budgetWouldDrop / 即时@例外 / #predictTier）共用同一窗口 ——
+  // batchLimit 被调到 100 以上时，落在固定 100 窗口之后的 @ 会被判据漏看（2026-10-06 复审）。
+  #unreadScanLimit() {
+    return Math.max(100, Number(getConfig().store?.batchLimit) || 100);
+  }
+
   /** 确保该会话有一次自主节奏唤醒安排；已有且在合理范围内则不动。 */
   #ensurePacedWake(chatKey) {
     const p = getConfig().pacing || {};
@@ -584,6 +591,11 @@ export class Orchestrator {
     const maxMs = Math.max(minMs, (Number(p.maxSilenceMinutes) || 45) * 60000);
     const defMs = Math.max(minMs, Math.min(maxMs, (Number(p.defaultWakeMinutes) || 20) * 60000));
     const existing = this.scheduledWakes.get(chatKey);
+    // 已有安排是模型自安排的唤醒（selfWake）或任何带留言的安排时不要顶掉：
+    // scheduleInitiativeWake 是单槽覆盖，会把留言一起清掉 —— fireDueScheduledWakes 专门
+    // 为 selfWake 绕开重排以保留言，这里却会先把槽覆写掉（2026-10-06 复审 P3：pacing 开启时
+    // 群里来一条普通消息，模型 2 小时后带留言的唤醒就被换成 20 分钟后的无留言 paced）。
+    if (existing && (existing.kind === 'selfWake' || String(existing.note || '').trim())) return;
     if (existing && existing.at - Date.now() <= maxMs) return;
     this.scheduleInitiativeWake(chatKey, defMs, '', { paced: true });
   }
@@ -604,7 +616,7 @@ export class Orchestrator {
   #predictTier(chatKey, { roll } = {}) {
     const cfg = getConfig();
     const conversation = conversationConfigForChat(chatKey);
-    const entries = this.store.peekUnread(chatKey, 100) || [];
+    const entries = this.store.peekUnread(chatKey, this.#unreadScanLimit()) || [];
     if (chatKey.startsWith('private:')) {
       const caps = tokenSaverCapsOf(cfg);
       return {
@@ -1027,8 +1039,9 @@ export class Orchestrator {
       }
     }
     if (!proactive) {
-      // peekUnread 只看不取，limit 给足以免漏判（判定用的是这批的文本）
-      pendingEntries = this.store.peekUnread(chatKey, 100) || [];
+      // peekUnread 只看不取，limit 给足以免漏判（判定用的是这批的文本；与 claimUnread 的
+      // batchLimit 同窗口，见 #unreadScanLimit）
+      pendingEntries = this.store.peekUnread(chatKey, this.#unreadScanLimit()) || [];
       // 取用预判时那颗骰子（超过 2 分钟就当过期，避免串到后面的批次）
       const pendingRoll = this.pendingRolls.get(chatKey);
       this.pendingRolls.delete(chatKey);
@@ -1136,53 +1149,81 @@ export class Orchestrator {
     });
 
     this.runningChats.add(chatKey);
-    const seq = (this.runSeq.get(chatKey) || 0) + 1;
-    this.runSeq.set(chatKey, seq);
+    // 2026-10-06 复审 P2：add 与主 try 之间原本是一大段无保护的同步准备 —— sqlite 读线程
+    // （#applyWaitingConversation → getConversationThread 里还有 BEGIN IMMEDIATE）、会话落盘、
+    // emit 监听器都可能抛（磁盘满/库损坏/监听器异常）。一旦抛出，主 try 的 finally 不会执行，
+    // runningChats 就永远不清：该会话此后被 onIncoming、恢复循环、手动唤醒、主动候选全部绕开，
+    // 静默卡死到重启。准备段单独兜底：清掉已挂上的控制器/定时器/租约，会话落终态后原样上抛。
     const [kind, chatId] = String(chatKey).split(':');
-
-    // 触发摘要
-    const first = triggerEntries[0];
-    const triggerSummary = manual
-      ? '控制台主动唤醒'
-      : proactive
-      ? '主动机会（冷场开话题）'
-      : (first ? `${first.senderName || first.senderId}：${String(first.text || '').slice(0, 40)}` : '');
-
-    // 把“等待中”会话原地转成运行中；没有等待会话（主动/手动唤醒）才新建
+    let controller = null;
+    let runTimer = null;
+    let releaseTimeGuard = null;
+    let seq = 0;
     let session = waitingSessionId ? this.sessions.get(waitingSessionId) : null;
     let createdSession = false;
-    if (session && session.status === 'waiting') {
-      this.sessions.current.get(waitingSessionId).status = 'running';
-      this.sessions.current.get(waitingSessionId).waitUntil = null;
-      this.sessions.current.get(waitingSessionId).trigger = triggerEntries;
-      this.sessions.current.get(waitingSessionId).triggerSummary = triggerSummary;
-      this.sessions.current.get(waitingSessionId).triggerText = triggerEntries.map((m) => `${m.senderName || m.senderId}: ${String(m.text || '').slice(0, 80)}`).join(' | ').slice(0, 500);
-      session = this.sessions.current.get(waitingSessionId);
-    } else {
-      session = this.sessions.create({ chatKey, trigger: triggerEntries, triggerSummary });
-      createdSession = true;
+    try {
+      seq = (this.runSeq.get(chatKey) || 0) + 1;
+      this.runSeq.set(chatKey, seq);
+
+      // 触发摘要
+      const first = triggerEntries[0];
+      const triggerSummary = manual
+        ? '控制台主动唤醒'
+        : proactive
+        ? '主动机会（冷场开话题）'
+        : (first ? `${first.senderName || first.senderId}：${String(first.text || '').slice(0, 40)}` : '');
+
+      // 把“等待中”会话原地转成运行中；没有等待会话（主动/手动唤醒）才新建
+      if (session && session.status === 'waiting') {
+        this.sessions.current.get(waitingSessionId).status = 'running';
+        this.sessions.current.get(waitingSessionId).waitUntil = null;
+        this.sessions.current.get(waitingSessionId).trigger = triggerEntries;
+        this.sessions.current.get(waitingSessionId).triggerSummary = triggerSummary;
+        this.sessions.current.get(waitingSessionId).triggerText = triggerEntries.map((m) => `${m.senderName || m.senderId}: ${String(m.text || '').slice(0, 80)}`).join(' | ').slice(0, 500);
+        session = this.sessions.current.get(waitingSessionId);
+      } else {
+        session = this.sessions.create({ chatKey, trigger: triggerEntries, triggerSummary });
+        createdSession = true;
+      }
+      this.#applyWaitingConversation(session, tierResult, chatKey);
+      this.#applySessionTrigger(session, tierResult, { manual, proactive, chatKey });
+      this.sessions.update(session.id);
+      if (createdSession) {
+        this.emit('session-start', {
+          sessionId: session.id,
+          chatKey,
+          triggerSummary,
+          triggerKind: session.triggerKind,
+          triggerReason: session.triggerReason
+        });
+      } else {
+        this.emit('session-update', session.id);
+      }
+      this.activeRuns.set(chatKey, session.id);
+      session.leaseId = lease?.id || session.id;
+      controller = new AbortController();
+      this.controllers.set(chatKey, controller);
+      runTimer = setTimeout(() => controller.abort(new Error('Run deadline exceeded')), runTimeoutMs);
+      releaseTimeGuard = watchTimeWindow((error) => controller.abort(error), chatKey);
+      this.emit('chat-update', chatKey);
+    } catch (setupError) {
+      if (runTimer !== null) clearTimeout(runTimer);
+      releaseTimeGuard?.();
+      if (controller) this.controllers.delete(chatKey);
+      this.activeRuns.delete(chatKey);
+      this.runningChats.delete(chatKey);
+      try {
+        if (session && session.status === 'running') this.sessions.finish(session.id, 'error');
+        if (lease) {
+          const setupTimeClosed = setupError?.code === 'TIME_CONTROL_INACTIVE' || !isTimeActive(chatKey);
+          if (setupTimeClosed && !this.store.hasEffects(lease.id)) this.store.ackLease(lease.id);
+          else this.store.failLease(lease.id, setupError, { retryable: !setupTimeClosed && isRetryableError(setupError) });
+        }
+      } catch (cleanupError) {
+        log.warn(`[orchestrator] ${chatKey} 唤醒准备段中断后的清理失败：${cleanupError?.message ?? cleanupError}`);
+      }
+      throw setupError;
     }
-    this.#applyWaitingConversation(session, tierResult, chatKey);
-    this.#applySessionTrigger(session, tierResult, { manual, proactive, chatKey });
-    this.sessions.update(session.id);
-    if (createdSession) {
-      this.emit('session-start', {
-        sessionId: session.id,
-        chatKey,
-        triggerSummary,
-        triggerKind: session.triggerKind,
-        triggerReason: session.triggerReason
-      });
-    } else {
-      this.emit('session-update', session.id);
-    }
-    this.activeRuns.set(chatKey, session.id);
-    session.leaseId = lease?.id || session.id;
-    const controller = new AbortController();
-    this.controllers.set(chatKey, controller);
-    const runTimer = setTimeout(() => controller.abort(new Error('Run deadline exceeded')), runTimeoutMs);
-    const releaseTimeGuard = watchTimeWindow((error) => controller.abort(error), chatKey);
-    this.emit('chat-update', chatKey);
 
     try {
       const runResult = await this.#runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, wakeNote, paced, seq,
@@ -1768,6 +1809,12 @@ export class Orchestrator {
       });
       signal.throwIfAborted();
       session.model = response.model || session.model;
+      // 2026-10-06 复审 P3：兜底模型接管且端点真的换了渠道时，成本要记到实际渠道名下
+      //（model-prices 的约定就是"会话用它自己记录的 vendor"）—— 否则渠道价/渠道价目表
+      // 会按主渠道单价给兜底模型计价，而渠道价目表可自动注入，错价路径生产可达。
+      if (response.channelChanged && response.originBaseUrl) {
+        session.vendor = vendorOfBaseUrl(getConfig(), response.originBaseUrl) || session.vendor;
+      }
       addUsage(session.usage, response.usage);
       session.usage.calls += 1;
       const promptTokens = Number(response.usage?.prompt_tokens) || 0;
@@ -1791,7 +1838,25 @@ export class Orchestrator {
       const reasoningContent = typeof msg.reasoning_content === 'string'
         ? msg.reasoning_content
         : null;
-      const finalToolCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length ? msg.tool_calls : undefined;
+      // 2026-10-06 复审 P2：部分网关/自部署推理服务返回的 tool_calls 形态不规整（缺 id、
+      // 非数组、null 项）。缺 id 的 tool 消息下一轮会被多数 OpenAI 兼容端点整请求 400 拒掉，
+      // isRetryableError 判 false → 批次转人工、被 @ 的消息当场无人回。与 inline 路径自造
+      // inline_${round}_${i} 同口径：进 messages 前先归一化 —— 补 id、补 type、参数字符串化
+      //（id 要同步落在 providerAssistant.tool_calls 上，保证 assistant/tool 配对一致）。
+      const normalizedToolCalls = (Array.isArray(msg.tool_calls) ? msg.tool_calls : [])
+        .filter((c) => c && typeof c === 'object')
+        .map((c, i) => ({
+          ...c,
+          id: c.id || `toolcall_${round}_${i}`,
+          type: c.type || 'function',
+          function: {
+            name: String(c.function?.name ?? ''),
+            arguments: typeof c.function?.arguments === 'string'
+              ? c.function.arguments
+              : JSON.stringify(c.function?.arguments ?? {})
+          }
+        }));
+      const finalToolCalls = normalizedToolCalls.length ? normalizedToolCalls : undefined;
       const providerAssistant = {
         role: 'assistant',
         content: finalContent,
@@ -1807,7 +1872,7 @@ export class Orchestrator {
       session.rounds = round + 1;
       markActivity('');
 
-      let toolCalls = msg.tool_calls ?? [];
+      let toolCalls = normalizedToolCalls;
       // 兼容：少数模型把工具调用写成文本而不是原生 tool_calls。解析成功后需要把
       // 该 assistant 消息改成 tool_calls 形态回填 messages，并追加真正的 tool 结果。
       const rawContent = typeof msg.content === 'string' ? msg.content : '';

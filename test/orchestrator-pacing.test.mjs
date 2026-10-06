@@ -98,3 +98,81 @@ test('A2（反向，行为）：预算未超限时，同一条链路会真的调
   const r = await runPacedWake(t, { onExceed: 'block', spentYuan: 0 });
   assert.ok(r.modelCalls >= 1, `预算未超限时 paced 唤醒应当调模型（实际 fetch ${r.modelCalls} 次）——守卫若变成"一律不放行"，这条会红`);
 });
+
+// ── 2026-10-06 复审 P3：pacing 不许顶掉模型自安排的唤醒（单槽覆盖会连留言一起清）──
+test('P3-1（行为）：带留言的 selfWake 不被 paced 唤醒顶掉', async (t) => {
+  const ctx = makeInstance(t, { onExceed: 'block', spentYuan: 0 });
+  ctx.runner.scheduleInitiativeWake('group:1', 2 * 60 * 60 * 1000, '记得看看那个帖子的后续', { kind: 'selfWake' });
+  ctx.store.appendIncoming('group:1', { mid: '31', text: '今天天气不错', senderId: '42', senderName: 'm42' });
+  ctx.runner.onIncoming('group:1');
+  const wake = ctx.runner.scheduledWakes.get('group:1');
+  assert.equal(wake?.kind, 'selfWake', '模型自安排的唤醒不许被 paced 覆盖');
+  assert.equal(wake?.note, '记得看看那个帖子的后续', 'selfWake 的留言必须原样保留');
+  assert.equal(ctx.store.unreadCount('group:1'), 1, '消息保留未读，等 selfWake 到点处理');
+});
+
+test('P3-1（反向，行为）：没有 selfWake 时 paced 照常排上（守卫不许变成一律不排）', async (t) => {
+  const ctx = makeInstance(t, { onExceed: 'block', spentYuan: 0 });
+  ctx.store.appendIncoming('group:1', { mid: '41', text: '在吗', senderId: '43', senderName: 'm43' });
+  ctx.runner.onIncoming('group:1');
+  const wake = ctx.runner.scheduledWakes.get('group:1');
+  assert.ok(wake, '无已有安排时 paced 唤醒要照常排上');
+  assert.equal(wake.kind, 'paced');
+});
+
+// ── 2026-10-06 复审 P2：网关返回畸形 tool_calls（缺 id）时，进 messages 前先归一化 ──
+test('P2-8（行为）：缺 id 的原生 tool_calls 会被补齐，下一轮 assistant/tool 配对完整', async (t) => {
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.runtime = { ...cfg.runtime, mode: 'active' };
+  cfg.api = { ...cfg.api, model: 'test-model', baseUrl: 'https://api.example/v1', apiKey: 'k' };
+  cfg.allow.groups = ['1'];
+  cfg.memory.consolidateEnabled = false;
+  cfg.sticker.enabled = false;
+  setRuntimeConfig(cfg);
+  const store = new ChatStore(0, {
+    dataDir: root,
+    filename: `toolcalls-${Math.random().toString(36).slice(2, 8)}.sqlite`
+  });
+  const sessions = new SessionRegistry();
+  const memory = { formatForPrompt: () => '', formatHandoffForPrompt: () => '', getHandoff: () => null, setHandoff: () => null, clearHandoff: () => {} };
+  const sender = {
+    sendTextBatch: async (_chatKey, messages) => ({
+      sent: messages.map((text, i) => ({ text, at: Date.now(), messageId: i + 1 })), failed: []
+    })
+  };
+  const runner = new Orchestrator({
+    store, sessions, memory, stickers: {}, sender,
+    onebot: { selfId: '888', selfNickname: 'bot', getGroupInfo: async () => ({ group_name: 'test' }) }
+  });
+  const originalFetch = globalThis.fetch;
+  const bodies = [];
+  let call = 0;
+  globalThis.fetch = async (_url, options) => {
+    call += 1;
+    bodies.push(JSON.parse(String(options?.body || '{}')));
+    if (call === 1) {
+      // 部分网关/自部署推理服务的真实形态：缺 id、缺 type 的原生 tool_calls
+      return Response.json({
+        choices: [{ message: { content: '', tool_calls: [{ function: { name: 'no_such_tool', arguments: '{}' } }] } }],
+        usage: { total_tokens: 5 }
+      });
+    }
+    return Response.json({ choices: [{ message: { content: '好的' } }], usage: { total_tokens: 3 } });
+  };
+  t.after(async () => {
+    globalThis.fetch = originalFetch;
+    await runner.abortAll();
+    sessions.close?.();
+    store.close();
+  });
+  store.appendIncoming('group:1', { mid: 51, text: '麻烦看下', senderId: '42', senderName: 'm42' });
+  await runner.wake('group:1');
+  assert.ok(bodies.length >= 2, `前提：第二轮请求发生了（实际 ${bodies.length} 轮）`);
+  const assistant = (bodies[1].messages || [])
+    .filter((m) => m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length).pop();
+  const toolMsg = (bodies[1].messages || []).filter((m) => m.role === 'tool').pop();
+  assert.ok(assistant, '第二轮请求要带上 assistant.tool_calls');
+  assert.ok(assistant.tool_calls[0].id, 'tool_calls[0].id 必须已归一化补齐（缺 id 时多数端点整请求 400）');
+  assert.ok(toolMsg, '第二轮请求要带上 tool 结果消息');
+  assert.equal(toolMsg.tool_call_id, assistant.tool_calls[0].id, 'assistant 与 tool 消息必须按同一 id 配对');
+});

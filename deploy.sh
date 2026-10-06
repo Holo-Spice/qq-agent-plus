@@ -205,16 +205,31 @@ node_ready() {
 if [[ -z "$NODE_BIN" ]]; then
   NODE_BIN="$(command -v node || true)"
 fi
+# 2026-10-06 复审 P2：无系统 Node 时先复用 $INSTALL_DIR/.runtime 里已装好的运行时。
+# 原先只探测 `command -v node`，服务器重跑部署（deploy-all 的镜像拉取失败提示就是
+# "重跑 deploy-all.sh"，而它调 deploy.sh 不带 --node）会每次都从 nodejs.org 全量重下，
+# nodejs.org 不可达时整个部署失败 —— 哪怕磁盘上就有校验过的可用 node。
+RUNTIME_DIR="$INSTALL_DIR/.runtime"
+NODE_ARCH=''
+case "$(uname -m)" in
+  x86_64) NODE_ARCH=x64 ;;
+  aarch64|arm64) NODE_ARCH=arm64 ;;
+  *) NODE_ARCH='' ;;
+esac
+if [[ -n "$NODE_ARCH" ]] && ! node_ready "$NODE_BIN"; then
+  CANDIDATE_NODE="$RUNTIME_DIR/node-v${NODE_VERSION}-linux-${NODE_ARCH}/bin/node"
+  if node_ready "$CANDIDATE_NODE"; then
+    NODE_BIN="$CANDIDATE_NODE"
+    printf 'Reusing existing Node.js runtime at %s\n' "$CANDIDATE_NODE"
+  fi
+fi
 if ! node_ready "$NODE_BIN"; then
   command -v curl >/dev/null
   command -v sha256sum >/dev/null
   command -v tar >/dev/null
-  case "$(uname -m)" in
-    x86_64) NODE_ARCH=x64 ;;
-    aarch64|arm64) NODE_ARCH=arm64 ;;
-    *) printf 'Unsupported CPU architecture: %s\n' "$(uname -m)" >&2; exit 1 ;;
-  esac
-  RUNTIME_DIR="$INSTALL_DIR/.runtime"
+  if [[ -z "$NODE_ARCH" ]]; then
+    printf 'Unsupported CPU architecture: %s\n' "$(uname -m)" >&2; exit 1
+  fi
   ARCHIVE="node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"
   TMP_DIR="$(mktemp -d)"
   printf 'Installing Node.js v%s for %s...\n' "$NODE_VERSION" "$NODE_ARCH"

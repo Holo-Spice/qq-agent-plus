@@ -699,3 +699,23 @@ test('like_comment：评论已成功后点赞阶段被中止 → reviewed（退�
   assert.equal(item.commentStatus, 'done', '前提：评论确实成功了');
   assert.equal(item.status, 'reviewed', '评论已发出 → 必须 reviewed（退回 unread 下轮会重复评论）');
 });
+
+// ── 2026-10-06 复审 P2：持久化状态绑定账号（与 daily-moments 的 MOMENT_ACCOUNT_CHANGED 同款防线）──
+test('换号登录后，旧账号积压的互动队列拒绝执行（accountId 闸门）', async () => {
+  const f = fixture({
+    state: { version: 1, accountId: '999', feeds: [], comments: [], watchedPosts: [], runs: [] }
+  });
+  const result = await f.manager.runNow('feed');
+  assert.equal(result, undefined, '账号不匹配时本轮必须直接跳过（不产出 run）');
+  const st = JSON.parse(fs.readFileSync(f.stateFile, 'utf8'));
+  assert.equal(st.accountId, '999', '状态文件的账号归属不许被覆盖');
+  assert.deepEqual(f.writes, [], '一次 QQ 动作都不许发（旧队列不能以新账号身份执行）');
+});
+
+test('首次运行把当前 selfId 回填为状态归属（守卫不许变成一律拒跑）', async () => {
+  const f = fixture({});
+  const result = await f.manager.runNow('feed');
+  assert.ok(result, '前提：正常跑完一轮');
+  const st = JSON.parse(fs.readFileSync(f.stateFile, 'utf8'));
+  assert.equal(st.accountId, '888', '首次运行要回填当前 selfId，之后才具备换号判定基准');
+});

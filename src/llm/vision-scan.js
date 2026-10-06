@@ -146,14 +146,27 @@ export async function scanModelsVision({ providers, emit = null, limit = 3, time
   // + fs.writeFileSync 同步落盘。扫 50 个模型 = 50 次全量序列化 + 50 次阻塞写盘，
   // 扫描期间主线程被 I/O 拖住，中途崩溃还会留下半写状态。
   const pending = new Map();
+  // 定时器回调里的异常没有 worker 的 .catch 兜（runTask 里那次有，:171）——磁盘满/无权限时
+  // updateConfig 的 writeFileSync 裸抛会变成 uncaughtException 直接 process.exit(1)，
+  // systemd 反复重启、进行中会话全断（2026-10-06 复审 P2）。这里自己兜住：失败留 pending
+  // 下轮重试，只记日志。
   const flushPending = () => {
     if (!pending.size) return;
     const patch = {};
     for (const [key, v] of pending) patch[key] = v;
+    try {
+      updateConfig({ modelVision: patch });
+    } catch (error) {
+      emit?.('vision-scan', { error: `结果落盘失败（下轮重试）：${String(error?.message ?? error)}` });
+      return;
+    }
     pending.clear();
-    updateConfig({ modelVision: patch });
   };
-  const flushTimer = setInterval(flushPending, 2000);
+  const flushTimer = setInterval(() => {
+    try {
+      flushPending();
+    } catch { /* flushPending 内部已兜底；这里再兜一层保定时器回调绝不上抛 */ }
+  }, 2000);
 
   const runTask = async (task) => {
     const key = `${task.providerId}|||${task.model}`;

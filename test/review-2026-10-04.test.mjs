@@ -907,6 +907,8 @@ test('㊲ P3：#wake 与派发预检的「这批未读里有没有 @」必须用
   // 50 vs 100 的偏差（2026-10-05 复审）：@ 落在第 51–100 条时，派发预检判"会丢"而
   // #wake 照常派发 → 到点提醒被无谓顺延 24 小时。行为用例在 orchestrator.test.mjs
   //（「@ 落在第 51–100 条未读里时 degrade 不会丢这次唤醒」）；这里防止窗口被改小。
+  // 2026-10-06 复审收口：四处判定口统一走 #unreadScanLimit()（= max(100, batchLimit)，
+  // 与 claimUnread 的领取窗口对齐）—— batchLimit 调大后窗口跟着走，比固定 100 更强。
   const src = fs.readFileSync('src/core/orchestrator.js', 'utf8');
   // ⚠️ 匹配前**必须剥注释**：函数头注释里就写着 `peekUnread(chatKey, 100)`，
   // 不剥的话把代码窗口改成 50、注释不动，这条锚点照样绿（2026-10-05 全审实测的假绿）。
@@ -916,12 +918,13 @@ test('㊲ P3：#wake 与派发预检的「这批未读里有没有 @」必须用
   const regions = {
     '派发预检 #budgetWouldDrop': ['#budgetWouldDrop(chatKey) {', 1000],
     'degrade 闸门 #wake': ['if (!proactive) {', 500],
-    'pacing 的 @ 例外': ['if (this.#pacingApplies(chatKey)) {', 500]
+    'pacing 的 @ 例外': ['if (this.#pacingApplies(chatKey)) {', 500],
+    '#predictTier 的未读扫描': ['#predictTier(chatKey, { roll } = {}) {', 500]
   };
   for (const [name, [anchor, span]] of Object.entries(regions)) {
     const at = src.indexOf(anchor);
     assert.ok(at > 0, `前置条件：找得到 ${name}`);
-    assert.match(stripComments(src.slice(at, at + span)), /peekUnread\(chatKey, 100\)/,
-      `${name} 要用 100 条窗口（与 #wake 处理的那批未读一致，看少了会把 @ 漏判）`);
+    assert.match(stripComments(src.slice(at, at + span)), /peekUnread\(chatKey, this\.#unreadScanLimit\(\)\)/,
+      `${name} 要走 #unreadScanLimit()（≥ claimUnread 的 batchLimit，看少了会把 @ 漏判）`);
   }
 });

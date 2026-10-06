@@ -198,7 +198,14 @@ export class IdentityPilotManager {
       this.lastError = '';
       const queuedIncoming = this.pendingIncomingEvents.splice(0);
       for (const request of queuedIncoming) {
-        await this.receiveIncomingFriendRequest(request);
+        // 2026-10-06 复审 P2：启动冲刷里单条请求失败（如待审批积压到上限时 createIncoming
+        // 抛错）不能带崩整个 start() —— catch 会关掉 db 但 identityStore 仍指向已关闭句柄，
+        // start() 又被 `if (this.identityStore)` 短路，身份功能整体瘫痪到重启且无法自愈。
+        try {
+          await this.receiveIncomingFriendRequest(request);
+        } catch (error) {
+          this.log(`[identity-pilot] 启动冲刷入站好友请求失败（跳过该条，继续启动）：${error?.message ?? error}`);
+        }
       }
       if (incomingFriendRequestEnabled(this.config())) {
         const pendingIncoming = this.identityStore.listIncomingFriendRequests({
@@ -206,10 +213,15 @@ export class IdentityPilotManager {
           limit: 100
         }).filter((request) => !request.notifiedAt);
         await Promise.all(pendingIncoming.map((request) =>
-          this.#notifyIncomingFriendRequest(request)));
+          this.#notifyIncomingFriendRequest(request).catch((error) => {
+            this.log(`[identity-pilot] 待审批请求通知失败（不阻塞启动）：${error?.message ?? error}`);
+          })));
       }
       return this.status();
     } catch (error) {
+      // 关库的同时必须把 identityStore 摘干净：active getter、start() 短路、status()/observe
+      // 全都认这个字段 —— 留着已关闭句柄比 null 更糟（null 还能重新 start 重建）。
+      if (this.identityStore === db) this.identityStore = null;
       try { db?.close(); } catch { /* ignore */ }
       this.lastError = String(error?.message ?? error);
       throw error;

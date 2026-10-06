@@ -146,6 +146,25 @@ cleanup_fresh_stack() {
     "$SNOWLUMA_DATA_DIR" "$SNOWLUMA_DIR" "$AGENT_DATA_DIR" 2>/dev/null || true
 }
 
+# 2026-10-06 复审 P2/P3：统一的退出钩子（bash 只有一个 EXIT trap，原先分散的
+# `trap cleanup_fresh_stack EXIT` 与 `trap 'rm …' EXIT` 互相覆盖，谁后挂谁生效）。
+# - fresh：清掉半成品栈文件与空目录。
+# - existing + 轮换凭据：.env 在部署成功前就已重写成新凭据，而 config.json 还是旧令牌
+#   （deploy.sh 的回滚只管 config.json）—— 此后 check-stack-update 比对必然 refuse_existing，
+#   脚本自提示的"重跑带 --rotate-credentials"也无效（预检在写凭据之前跑）。失败退出回拷
+#   部署前的 .env，让重跑路径保持可用。
+# - 模型 Key 临时文件兜底删除（原先只在设置了 MODEL_API_KEY 时才挂 trap，且会顶掉清理钩子）。
+deploy_all_exit() {
+  local status=$?
+  [[ -n "${MODEL_KEY_FILE:-}" ]] && rm -f "$MODEL_KEY_FILE"
+  if [[ "${ENV_REWRITTEN:-false}" == true && "${DEPLOY_COMPLETED:-false}" != true && -f "$ENV_FILE.pre-deploy" ]]; then
+    cp -p "$ENV_FILE.pre-deploy" "$ENV_FILE"
+    printf '部署未完成：.env 已回滚为部署前内容（备份保留在 %s.pre-deploy），可直接重跑 deploy-all.sh。\n' "$ENV_FILE" >&2
+  fi
+  cleanup_fresh_stack
+  exit "$status"
+}
+
 step() {
   printf '\n==> %s\n' "$*"
 }
@@ -580,6 +599,14 @@ mkdir -p "$APP_DIR" "$AGENT_DATA_DIR" \
 chmod 700 "$ROOT_DIR" "$AGENT_DATA_DIR" "$SNOWLUMA_DIR" "$SNOWLUMA_DATA_DIR" \
   "$SNOWLUMA_DIR/client-config" "$SNOWLUMA_DIR/client-data"
 
+# 2026-10-06 复审 P3：退出钩子必须挂在第一次写盘之前 —— 原先 fresh 的清理 trap 在
+# .env/compose 写完之后才挂（655 行），写盘窗口内失败（ENOSPC/权限）会留下半成品 .env，
+# 重跑被 check_local_ownership 拒绝，正是本节注释声称要避免的死结。
+# EXISTING_STACK 的失败退出由 deploy_all_exit 里的 .env 回滚兜底。
+if [[ "$EXISTING_STACK" != true ]]; then
+  FRESH_STACK_CLEANUP=true
+fi
+trap deploy_all_exit EXIT
 if [[ -f "$ENV_FILE" ]]; then
   cp -p "$ENV_FILE" "$ENV_FILE.pre-deploy"
 fi
@@ -608,6 +635,8 @@ QQ_AGENT_CONSOLE_TOKEN=$AGENT_TOKEN
 EOF
 mv "$ENV_FILE.tmp" "$ENV_FILE"
 chmod 600 "$ENV_FILE"
+# .env 已重写（可能带新凭据）：部署成功前的失败退出要回拷 .pre-deploy（见 deploy_all_exit）。
+ENV_REWRITTEN=true
 
 cat >"$COMPOSE_FILE.tmp" <<'EOF'
 services:
@@ -650,13 +679,7 @@ EOF
 mv "$COMPOSE_FILE.tmp" "$COMPOSE_FILE"
 chmod 600 "$COMPOSE_FILE"
 
-# 从这里到 Agent 部署成功之间失败的话，栈是"半成品"：check_local_ownership 会因此拒绝重跑，
-# 所以先挂上清理钩子（Agent 装好后立刻撤销）。
-if [[ "$EXISTING_STACK" != true ]]; then
-  FRESH_STACK_CLEANUP=true
-  trap cleanup_fresh_stack EXIT
-fi
-
+# 清理钩子已提前到 .env 写盘之前挂载（deploy_all_exit，见上）；Agent 装好后在下方撤销标志。
 if ! docker_ready && ! sudo_docker_ready; then install_docker; fi
 docker_ready || sudo_docker_ready || die 'Docker installation completed but the daemon is unavailable'
 docker_call compose version >/dev/null 2>&1 || die 'Docker Compose v2 is required'
@@ -749,7 +772,6 @@ if [[ -n "$MODEL_API_KEY" ]]; then
   printf '%s' "$MODEL_API_KEY" >"$MODEL_KEY_FILE"
   chmod 600 "$MODEL_KEY_FILE"
   export QQ_AGENT_MODEL_KEY_FILE="$MODEL_KEY_FILE"
-  trap 'rm -f "$MODEL_KEY_FILE"; cleanup_fresh_stack' EXIT
 fi
 [[ -z "$MODEL_NAME" ]] || export QQ_AGENT_MODEL="$MODEL_NAME"
 [[ -z "$ALLOW_GROUPS" ]] || export QQ_AGENT_ALLOW_GROUPS="$ALLOW_GROUPS"
@@ -762,6 +784,8 @@ bash "$SOURCE_DIR/deploy.sh" \
   --service "$SERVICE"
 # Agent 已装好，栈不再是"半成品"：撤销失败清理，保留 .env / compose。
 FRESH_STACK_CLEANUP=false
+# .env 的新凭据自此生效（deploy.sh 已完成、config.json 已含配套令牌）：此后失败不再回拷。
+DEPLOY_COMPLETED=true
 
 NODE_BIN="$(tr -d '\r\n' <"$APP_DIR/.deployment-node")"
 if [[ "$EXISTING_STACK" != true ]]; then

@@ -318,7 +318,13 @@ export async function chatCompletionWithRetry(args, retries = 2) {
     ? `失败（${String(primaryError?.message ?? primaryError).slice(0, 90)}）`
     : '两轮都被审核拦截';
   log.warn(`[llm] 主模型${why}，改用兜底模型 ${fb.model}`);
-  return await runCompletionWithRetries({ ...args, overrides: fb }, 1);
+  const fbResponse = await runCompletionWithRetries({ ...args, overrides: fb }, 1);
+  // 2026-10-06 复审 P3：标记本次是否真的换了渠道（兜底端点与主渠道 host 不同）。
+  // 同渠道换模型不算换渠道 —— vendor 不变；跨渠道时调用方把成本记到实际渠道名下。
+  const primaryBase = String(effectiveApi().baseUrl || '');
+  const channelChanged = Boolean(fbResponse.originBaseUrl)
+    && hostOf(fbResponse.originBaseUrl) !== hostOf(primaryBase);
+  return { ...fbResponse, viaFallback: true, channelChanged };
 }
 
 /**
@@ -471,7 +477,9 @@ export async function chatCompletion({
     if (!choice) throw new Error('模型 API 响应缺少 choices');
     return {
       message: choice.message ?? {}, finishReason: choice.finish_reason ?? null,
-      usage: data.usage ?? null, model: data.model ?? api.model, raw: data
+      usage: data.usage ?? null, model: data.model ?? api.model, raw: data,
+      // 实际发往的端点（overrides/兜底接管后 ≠ 主渠道）—— 调用方据此把成本记到实际渠道名下
+      originBaseUrl: String(api.baseUrl || '')
     };
   } catch (error) {
     if (controller.signal.reason?.code === 'TIME_CONTROL_INACTIVE') throw controller.signal.reason;

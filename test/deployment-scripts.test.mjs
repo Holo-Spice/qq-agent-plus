@@ -198,7 +198,11 @@ test('deploy-all 现读现用凭据，模型 Key 走 0600 文件而不是子进�
   assert.match(source, /mktemp "\$\{TMPDIR:-\/tmp\}\/qq-agent-model-key\.XXXXXX"/);
   assert.match(source, /chmod 600 "\$MODEL_KEY_FILE"/);
   assert.match(source, /export QQ_AGENT_MODEL_KEY_FILE="\$MODEL_KEY_FILE"/);
-  assert.match(source, /trap 'rm -f "\$MODEL_KEY_FILE"; cleanup_fresh_stack' EXIT/);
+  // 2026-10-06 复审：EXIT trap 统一收口到 deploy_all_exit（原先分散的 trap 互相覆盖，
+  // 且只在设置了 MODEL_API_KEY 时才挂——会顶掉 fresh 清理钩子），Key 文件删除在钩子里兜底。
+  assert.match(source, /deploy_all_exit\(\) \{/);
+  assert.match(source, /rm -f "\$MODEL_KEY_FILE"/);
+  assert.match(source, /trap deploy_all_exit EXIT/);
 });
 
 test('configure-linux creates observe config and preserves runtime mode on update', (t) => {
