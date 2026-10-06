@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*'
+  # New forks may not dispatch tag-push events. A manual run must still select
+  # a matching version tag and pass every verification step below.
+  workflow_dispatch:
 
 # 默认最小权限：只有真正创建 Release 的那个 job 需要写权限。
 # 此前 contents: write 挂在工作流级，等于把"能改仓库的 token"也交给了 npm ci 的依赖
