@@ -181,6 +181,48 @@ test('finish conservatively repairs unescaped quotes inside string values', asyn
   assert.equal(f.ctx.session.threadDisposition, 'listening');
 });
 
+test('finish unwraps a single arguments envelope and preserves the handoff', async () => {
+  const args = { summary: '等待补充信息', topic: '当前话题', evidence: ['已确认的观察'], threadDisposition: 'listening' };
+  for (const raw of [{ arguments: args }, JSON.stringify({ arguments: args })]) {
+    const f = context();
+    const result = await executeTool(buildToolDefs(), f.ctx, 'finish', raw);
+    assert.equal(result.isError, undefined);
+    assert.equal(result.argumentsRepaired, true);
+    assert.deepEqual(result.parsedArgs, args);
+    assert.deepEqual(f.ctx.session.handoffDraft, args);
+    assert.equal(f.ctx.session.threadDisposition, 'listening');
+    assert.deepEqual(f.sends, []);
+  }
+});
+
+test('finish keeps ambiguous envelopes and empty summaries invalid', async () => {
+  for (const args of [
+    { arguments: { summary: ' ' } },
+    { arguments: { summary: 'nested' }, topic: 'outside' },
+    { summary: '', arguments: { summary: 'nested' } },
+    { arguments: [{ summary: 'nested' }] }
+  ]) {
+    const f = context();
+    const result = await executeTool(buildToolDefs(), f.ctx, 'finish', JSON.stringify(args));
+    assert.equal(result.isError, true);
+    assert.equal(f.ctx.session.finishReason, undefined);
+  }
+  const f = context();
+  await executeTool(buildToolDefs(), f.ctx, 'finish', JSON.stringify({ summary: 'original', arguments: { summary: 'nested' } }));
+  assert.equal(f.ctx.session.finishReason, 'original');
+});
+
+test('arguments envelopes on external-write tools are never unwrapped', async () => {
+  const args = { arguments: { summary: 'payload', messages: ['hello'] } };
+  let received;
+  const result = await executeTool([{ name: 'send_message', execute: async (_ctx, value) => {
+    received = value;
+    return {};
+  } }], context().ctx, 'send_message', JSON.stringify(args));
+  assert.deepEqual(received, args);
+  assert.equal(result.argumentsRepaired, undefined);
+});
+
 test('memory_append 私聊同样只认出现过的成员（编错号不给陌生人永久挂印象）', async () => {
   const appended = [];
   const f = context({

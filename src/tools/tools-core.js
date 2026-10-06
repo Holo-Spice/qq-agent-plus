@@ -198,15 +198,26 @@ const REPAIRABLE_ARGUMENT_TOOLS = new Set(['finish']);
 // 这里只保留"哪些工具允许修复"的策略门槛。
 
 function parseToolArguments(name, raw) {
-  if (typeof raw !== 'string') return { args: raw, repaired: false };
+  const normalize = (args, repaired = false) => {
+    // Some models repeat the function-call envelope inside its arguments.
+    // Only unwrap an unambiguous finish payload; never repair external writes.
+    if (name === 'finish' && args && typeof args === 'object' && !Array.isArray(args)
+      && Object.keys(args).length === 1 && Object.hasOwn(args, 'arguments')
+      && args.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments)
+      && typeof args.arguments.summary === 'string' && args.arguments.summary.trim()) {
+      return { args: args.arguments, repaired: true };
+    }
+    return { args, repaired };
+  };
+  if (typeof raw !== 'string') return normalize(raw);
   try {
-    return { args: JSON.parse(raw), repaired: false };
+    return normalize(JSON.parse(raw));
   } catch (error) {
     if (REPAIRABLE_ARGUMENT_TOOLS.has(name)) {
       const repaired = repairUnescapedStringQuotes(raw);
       if (repaired) {
         try {
-          return { args: JSON.parse(repaired), repaired: true };
+          return normalize(JSON.parse(repaired), true);
         } catch {
           // Ambiguous malformed arguments must still go back to the model.
         }

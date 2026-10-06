@@ -17,6 +17,9 @@ import { resolveToolCalls } from '../tools/inline-tools.js';
 import { repairJsonObject } from '../core/json-repair.js';
 
 const EVENT_TYPES = new Set(RELATIONSHIP_EVENT_TYPES);
+// Reasoning tokens share the output limit. Retry a truncated, read-only
+// evaluation once with more room, before applying any relationship events.
+const EVALUATION_TOKEN_LIMITS = [4096, 8192];
 const clean = (value, max = 240) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 const clampInt = (value, min, max, fallback) => Math.min(
   max,
@@ -79,10 +82,10 @@ function usageOf(response) {
   };
 }
 
-function callUsageOf(response) {
+function callUsageOf(response, round = 1) {
   const usage = usageOf(response);
   return {
-    round: 1,
+    round,
     promptTokens: usage.promptTokens,
     cachedTokens: usage.cachedTokens,
     cacheHitRate: usage.promptTokens ? Math.min(1, usage.cachedTokens / usage.promptTokens) : 0,
@@ -91,7 +94,14 @@ function callUsageOf(response) {
   };
 }
 
+function responseFinishReason(response) {
+  return response?.finishReason ?? response?.raw?.choices?.[0]?.finish_reason ?? null;
+}
+
 function parseRelationshipResponse(response, evidence) {
+  if (responseFinishReason(response) === 'length') {
+    throw new Error('关系评估输出达到 Token 上限而被截断，未写入关系事件');
+  }
   const calls = resolveToolCalls(response?.message);
   if (calls.length !== 1 || calls[0]?.function?.name !== 'submit_relationship_events') {
     throw new Error('关系评估模型未提交唯一的 submit_relationship_events 结果');
@@ -496,7 +506,7 @@ export class RelationshipPilotManager {
       session.model = settings.model;
       session.inputMessages = structuredClone(messages);
       session.inputTools = structuredClone(tools);
-      session.inputRequestOptions = { toolChoice: 'auto', temperature: 0.1, maxTokens: 1600 };
+      session.inputRequestOptions = { toolChoice: 'auto', temperature: 0.1, maxTokens: EVALUATION_TOKEN_LIMITS[0] };
       session.inputRound = 1;
       session.inputPayloadChars = JSON.stringify({ messages, tools }).length;
       session.triggerKind = 'relationship-shadow';
@@ -509,18 +519,49 @@ export class RelationshipPilotManager {
       });
     }
 
-    let usage = {};
+    let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, calls: 0 };
     try {
-      const response = await this.complete({
-        messages,
-        tools,
-        toolChoice: 'auto',
-        temperature: 0.1,
-        purpose: 'judge',   // 关系评估 = 判断类任务
-        maxTokens: 1600
-      }, 0);
-      usage = usageOf(response);
-      const parsed = parseRelationshipResponse(response, evidence);
+      let parsed;
+      const generation = this.generation;
+      for (const [index, maxTokens] of EVALUATION_TOKEN_LIMITS.entries()) {
+        if (session) {
+          session.inputRound = index + 1;
+          session.inputRequestOptions.maxTokens = maxTokens;
+        }
+        const response = await this.complete({
+          messages,
+          tools,
+          toolChoice: 'auto',
+          temperature: 0.1,
+          purpose: 'judge',
+          maxTokens
+        }, 0);
+        const currentUsage = usageOf(response);
+        usage = Object.fromEntries(Object.keys(usage).map((key) => [key, usage[key] + currentUsage[key]]));
+        // Keep diagnostics and usage even when validation below rejects the response.
+        if (session) {
+          session.rounds = index + 1;
+          session.usage = usage;
+          (session.callUsage ||= []).push(callUsageOf(response, index + 1));
+          session.messages.push({
+            role: 'assistant',
+            content: response?.message?.content ?? null,
+            ...(response?.message?.reasoning_content
+              ? { reasoning_content: response.message.reasoning_content } : {}),
+            ...(resolveToolCalls(response?.message).length
+              ? { tool_calls: structuredClone(resolveToolCalls(response.message)) } : {}),
+            finishReason: responseFinishReason(response),
+            raw: response.raw ?? null
+          });
+          this.sessions.update(session.id);
+        }
+        if (generation !== this.generation || !this.active || !relationshipPilotEnabled(this.config())) {
+          throw new Error('关系评估已停止，未写入关系事件');
+        }
+        if (responseFinishReason(response) === 'length' && index < EVALUATION_TOKEN_LIMITS.length - 1) continue;
+        parsed = parseRelationshipResponse(response, evidence);
+        break;
+      }
       const applied = this.relationshipStore.applyEvaluation(uin, parsed.events, {
         cursorUpdates: this.#cursorUpdates(evidence),
         halfLifeHours: settings.frictionHalfLifeHours,
@@ -528,23 +569,9 @@ export class RelationshipPilotManager {
       });
       this.relationshipStore.finishEvaluation(evaluationId, { status: 'done', usage });
       if (session) {
-        session.rounds = 1;
-        session.usage = usage;
         session.finishReason = parsed.events.length
           ? `影子评估记录 ${parsed.events.length} 个关系事件`
           : `影子评估无关系变化${parsed.noChangeReason ? `：${parsed.noChangeReason}` : ''}`;
-        session.callUsage = [callUsageOf(response)];
-        session.messages.push({
-          role: 'assistant',
-          content: response?.message?.content ?? null,
-          ...(typeof response?.message?.reasoning_content === 'string' && response.message.reasoning_content
-            ? { reasoning_content: response.message.reasoning_content }
-            : {}),
-          ...(resolveToolCalls(response?.message).length
-            ? { tool_calls: structuredClone(resolveToolCalls(response?.message)) }
-            : {}),
-          raw: response.raw ?? null
-        });
         this.sessions.finish(session.id, 'done');
         this.emit('session-end', {
           sessionId: session.id,
